@@ -19,6 +19,18 @@
 - RAM with 10 active terminals: < 300MB
 - 60fps terminal rendering under heavy output
 
+## Development
+
+```bash
+# Install dependencies
+pnpm install
+
+# Run in dev mode
+pnpm tauri dev
+```
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for full setup instructions, platform dependencies, and development workflow.
+
 ## Status
 
 🚧 Early development — see [PROJECT_PLAN.md](./PROJECT_PLAN.md) for the roadmap.
