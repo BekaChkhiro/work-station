@@ -4,12 +4,14 @@
 //! lifetime of the application, independent of any window.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::{broadcast, Mutex};
 use tokio::task;
+use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
 use super::session::PtySession;
@@ -60,28 +62,121 @@ impl PtyManager {
         let pid = child.process_id().unwrap_or(0);
 
         let master = pair.master;
-        let reader = master.try_clone_reader()?;
+        let mut reader = master.try_clone_reader()?;
         let writer = master.take_writer()?;
 
         let (output_tx, _) = broadcast::channel::<Bytes>(1024);
-        let output_tx_clone = output_tx.clone();
+        let frontend_channels: Arc<
+            std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>,
+        > = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        // Spawn a background task to read PTY output and broadcast it.
+        // ── Coalescing output reader ─────────────────────────────
+        // Two tasks work together:
+        // 1. A blocking reader fills a shared buffer from the PTY.
+        // 2. An async flusher drains the buffer every ~16 ms and emits
+        //    batched bytes to broadcast + frontend channels.
+
+        let coalesce_buf = Arc::new(std::sync::Mutex::new(Vec::with_capacity(65536)));
+        let reader_buf = coalesce_buf.clone();
+        let flusher_buf = coalesce_buf.clone();
+        let reader_alive = Arc::new(AtomicBool::new(true));
+        let flusher_alive = reader_alive.clone();
+
+        let output_tx_clone = output_tx.clone();
+        let flusher_channels = frontend_channels.clone();
+
+        // Blocking reader task.
         task::spawn_blocking(move || {
-            let mut reader = reader;
-            let mut buf = [0u8; 4096];
+            let mut local = [0u8; 4096];
             loop {
-                match std::io::Read::read(&mut reader, &mut buf) {
+                match std::io::Read::read(&mut reader, &mut local) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let _ = output_tx_clone.send(Bytes::copy_from_slice(&buf[..n]));
+                        if let Ok(mut b) = reader_buf.lock() {
+                            b.extend_from_slice(&local[..n]);
+                        }
                     }
                     Err(_) => break,
                 }
             }
+            reader_alive.store(false, Ordering::Relaxed);
         });
 
-        let session = PtySession::new(Uuid::new_v4(), pid, master, child, writer, output_tx);
+        // Async flusher task.
+        tokio::spawn(async move {
+            let mut tick = interval(Duration::from_millis(16));
+            loop {
+                tick.tick().await;
+
+                // Drain buffer.
+                let chunk = {
+                    if let Ok(mut b) = flusher_buf.lock() {
+                        if b.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut *b))
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(data) = chunk {
+                    let bytes = Bytes::from(data.clone());
+                    let _ = output_tx_clone.send(bytes);
+
+                    // Forward to frontend channels, pruning dead ones.
+                    let mut channels = flusher_channels.lock().unwrap();
+                    let mut alive = Vec::with_capacity(channels.len());
+                    for ch in channels.drain(..) {
+                        if ch.send(data.clone()).is_ok() {
+                            alive.push(ch);
+                        }
+                    }
+                    *channels = alive;
+                }
+
+                if !flusher_alive.load(Ordering::Relaxed) {
+                    // Reader is done; do one final flush and exit.
+                    let final_chunk = {
+                        if let Ok(mut b) = flusher_buf.lock() {
+                            if b.is_empty() {
+                                None
+                            } else {
+                                Some(std::mem::take(&mut *b))
+                            }
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(data) = final_chunk {
+                        let bytes = Bytes::from(data.clone());
+                        let _ = output_tx_clone.send(bytes);
+
+                        let mut channels = flusher_channels.lock().unwrap();
+                        let mut alive = Vec::with_capacity(channels.len());
+                        for ch in channels.drain(..) {
+                            if ch.send(data.clone()).is_ok() {
+                                alive.push(ch);
+                            }
+                        }
+                        *channels = alive;
+                    }
+                    break;
+                }
+            }
+        });
+
+        let session = PtySession::new(
+            Uuid::new_v4(),
+            pid,
+            master,
+            child,
+            writer,
+            output_tx,
+            frontend_channels,
+        );
         let id = self.insert(session).await;
         Ok(id)
     }
@@ -129,6 +224,21 @@ impl PtyManager {
         let sessions = self.sessions.lock().await;
         let session = sessions.get(id)?;
         Some(session.subscribe())
+    }
+
+    /// Register a frontend Tauri channel for a session's output.
+    pub async fn add_frontend_channel(
+        &self,
+        id: &Uuid,
+        channel: tauri::ipc::Channel<Vec<u8>>,
+    ) -> Option<()> {
+        let channels = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions.get(id)?;
+            session.frontend_channels()
+        };
+        channels.lock().unwrap().push(channel);
+        Some(())
     }
 
     /// Gracefully kill a session and remove it from the registry.

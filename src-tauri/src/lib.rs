@@ -5,7 +5,7 @@ pub mod db;
 pub mod ipc;
 pub mod pty;
 
-use commands::{pty_kill, pty_spawn};
+use commands::{pty_kill, pty_spawn, pty_subscribe};
 use pty::PtyManager;
 
 #[tauri::command]
@@ -18,7 +18,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PtyManager::new())
-        .invoke_handler(tauri::generate_handler![greet, pty_spawn, pty_kill])
+        .invoke_handler(tauri::generate_handler![greet, pty_spawn, pty_subscribe, pty_kill])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

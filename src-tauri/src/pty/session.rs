@@ -16,6 +16,7 @@ pub struct PtySession {
     child: Box<dyn Child + Send>,
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     output_tx: broadcast::Sender<Bytes>,
+    frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>>,
 }
 
 impl PtySession {
@@ -26,6 +27,7 @@ impl PtySession {
         child: Box<dyn Child + Send>,
         stdin: Box<dyn Write + Send>,
         output_tx: broadcast::Sender<Bytes>,
+        frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>>,
     ) -> Self {
         Self {
             id,
@@ -34,6 +36,7 @@ impl PtySession {
             child,
             stdin: Arc::new(Mutex::new(stdin)),
             output_tx,
+            frontend_channels,
         }
     }
 
@@ -63,6 +66,39 @@ impl PtySession {
     /// Subscribe to the output broadcast channel.
     pub fn subscribe(&self) -> broadcast::Receiver<Bytes> {
         self.output_tx.subscribe()
+    }
+
+    /// Clone the frontend channels Arc so callers can push channels without
+    /// holding a reference to `PtySession` across await points.
+    pub fn frontend_channels(
+        &self,
+    ) -> Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>> {
+        self.frontend_channels.clone()
+    }
+
+    /// Register a frontend Tauri channel to receive output bytes.
+    pub fn add_frontend_channel(&self, channel: tauri::ipc::Channel<Vec<u8>>) {
+        self.frontend_channels.lock().unwrap().push(channel);
+    }
+
+    /// Broadcast output bytes to all subscribers (broadcast + frontend channels).
+    ///
+    /// Dead frontend channels are pruned automatically.
+    pub fn broadcast_output(&self, data: Vec<u8>) {
+        if data.is_empty() {
+            return;
+        }
+
+        let _ = self.output_tx.send(Bytes::from(data.clone()));
+
+        let mut channels = self.frontend_channels.lock().unwrap();
+        let mut alive = Vec::with_capacity(channels.len());
+        for ch in channels.drain(..) {
+            if ch.send(data.clone()).is_ok() {
+                alive.push(ch);
+            }
+        }
+        *channels = alive;
     }
 
     /// Gracefully kill the child process.

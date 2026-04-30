@@ -34,6 +34,26 @@ pub async fn pty_spawn(
     Ok(id.to_string())
 }
 
+/// Subscribe to a PTY session's output via a Tauri Channel.
+///
+/// Args:
+/// - `id`      – session UUID returned by `pty_spawn`
+/// - `channel` – Tauri Channel that receives batched `Vec<u8>` output
+///
+/// The channel receives coalesced output flushed every ~16 ms.
+#[tauri::command]
+pub async fn pty_subscribe(
+    id: String,
+    channel: tauri::ipc::Channel<Vec<u8>>,
+    manager: State<'_, PtyManager>,
+) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    manager
+        .add_frontend_channel(&uuid, channel)
+        .await
+        .ok_or_else(|| "Session not found".to_string())
+}
+
 /// Kill a PTY session with graceful shutdown.
 ///
 /// Args:
