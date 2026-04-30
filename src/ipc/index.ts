@@ -212,6 +212,25 @@ export async function projectDelete(id: string): Promise<void> {
 }
 
 /**
+ * A detected CLI with its resolved absolute path and version.
+ */
+export interface DetectedCli {
+  name: string;
+  path: string;
+  version: string | null;
+}
+
+/**
+ * List CLIs available on the system PATH.
+ *
+ * Returns `{ name, path, version? }` for each detected CLI.
+ * Scans for: `claude`, `kimi`, `codex`, `bash`, `zsh`, `pwsh`.
+ */
+export async function cliListAvailable(): Promise<DetectedCli[]> {
+  return invoke("cli_list_available");
+}
+
+/**
  * Open a native folder picker dialog.
  *
  * Returns the absolute path of the selected folder, or `null` if the user cancelled.

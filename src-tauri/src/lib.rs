@@ -1,12 +1,15 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
+pub mod cli;
 pub mod commands;
 pub mod db;
 pub mod ipc;
 pub mod pty;
 
+use cli::CliRegistry;
 use commands::{
-    pty_get_scrollback, pty_kill, pty_resize, pty_spawn, pty_subscribe, pty_write, pick_folder,
+    cli_list_available, pty_get_scrollback, pty_kill, pty_resize, pty_spawn, pty_subscribe, pty_write,
+    pick_folder,
 };
 use commands::project::{project_create, project_delete, project_list, project_update};
 use pty::PtyManager;
@@ -29,8 +32,10 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::new())
+        .manage(CliRegistry::new())
         .invoke_handler(tauri::generate_handler![
             greet,
+            cli_list_available,
             pty_spawn,
             pty_subscribe,
             pty_resize,

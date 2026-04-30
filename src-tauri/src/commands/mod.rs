@@ -133,6 +133,15 @@ pub async fn pty_kill(id: String, manager: State<'_, PtyManager>) -> Result<(), 
     }
 }
 
+/// List CLIs available on the system PATH.
+///
+/// Returns the cached array of `{ name, path, version? }` detected at app boot.
+/// Scans for: `claude`, `kimi`, `codex`, `bash`, `zsh`, `pwsh`.
+#[tauri::command]
+pub fn cli_list_available(registry: tauri::State<'_, crate::cli::CliRegistry>) -> Vec<crate::cli::DetectedCli> {
+    registry.list()
+}
+
 /// Open a native folder picker dialog.
 ///
 /// Returns the absolute path of the selected folder, or `None` if the user cancelled.
