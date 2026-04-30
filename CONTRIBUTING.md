@@ -196,6 +196,24 @@ See [PROJECT_PLAN.md](./PROJECT_PLAN.md) for the full task breakdown and design 
 - **Solid.js**: Use fine-grained reactivity (`createSignal`, `createMemo`) over derived stores where possible.
 - **Tailwind**: Use design tokens from `src/styles/`; avoid arbitrary values.
 
+## Release Setup (maintainers only)
+
+The [Release workflow](.github/workflows/release.yml) builds signed binaries and publishes them to GitHub Releases. It requires these repository secrets:
+
+| Secret | Purpose |
+|--------|---------|
+| `TAURI_SIGNING_PRIVATE_KEY` | Updater signing private key (contents of `.tauri-updater.key`) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the signing key (if set) |
+| `WINDOWS_CERTIFICATE` | Base64-encoded Windows Authenticode cert (optional) |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Password for the Windows cert (optional) |
+
+To extract the signing key for GitHub Secrets:
+
+```bash
+cat src-tauri/.tauri-updater.key | pbcopy   # macOS
+# Paste into Settings → Secrets and variables → Actions → New repository secret
+```
+
 ## Before Submitting
 
 ```bash
