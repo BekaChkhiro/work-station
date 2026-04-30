@@ -14,7 +14,9 @@
       {
         "title": "work-station",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "titleBarStyle": "Transparent",
+        "hiddenTitle": true
       }
     ],
     "security": {
@@ -38,6 +40,16 @@
   "plugins": {
     "sql": {
       "preload": ["sqlite:workstation.db"]
+    },
+    "updater": {
+      "active": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE4RDEyNjdBQjM0QjJGRUYKUldUdkwwdXplaWJScUZMR1JpU1NCWDEzNVR5YU93MjVJQWwwdEJIQmtzZ2MveVMvQW0zL01VN0gK",
+      "endpoints": [
+        "https://github.com/beqolozi/work-station/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }
