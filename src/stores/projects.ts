@@ -91,6 +91,7 @@ export async function addProject(input: {
   path: string;
   color?: string | null;
   icon?: string | null;
+  env_json?: string | null;
 }): Promise<Project> {
   const project = await projectCreate(input);
   setState(

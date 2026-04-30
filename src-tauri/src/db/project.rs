@@ -51,6 +51,7 @@ pub struct CreateProjectInput {
     pub path: String,
     pub color: Option<String>,
     pub icon: Option<String>,
+    pub env_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,13 +124,14 @@ pub async fn create_project(
     }
 
     let result = sqlx::query(
-        "INSERT INTO projects (name, path, color, icon, position)
-         VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM projects))",
+        "INSERT INTO projects (name, path, color, icon, env_json, position)
+         VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM projects))",
     )
     .bind(&name)
     .bind(&path)
     .bind(&input.color)
     .bind(&input.icon)
+    .bind(&input.env_json)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;

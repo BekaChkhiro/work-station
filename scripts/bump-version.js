@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global process */
 /**
  * Semver version bump script.
  * Keeps package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json
@@ -68,10 +69,7 @@ function updatePackageJson(filePath, data, newVersion) {
 }
 
 function updateCargoToml(filePath, content, newVersion) {
-  const updated = content.replace(
-    /^(version\s*=\s*")([^"]+)(")/m,
-    `$1${newVersion}$3`
-  );
+  const updated = content.replace(/^(version\s*=\s*")([^"]+)(")/m, `$1${newVersion}$3`);
   writeFileSync(filePath, updated);
 }
 
@@ -122,14 +120,18 @@ function main() {
       cwd: resolve(root, "src-tauri"),
       stdio: "inherit",
     });
-  } catch (e) {
-    console.warn("⚠️  Could not update Cargo.lock automatically. Run `cargo generate-lockfile` manually in src-tauri/.");
+  } catch {
+    console.warn(
+      "⚠️  Could not update Cargo.lock automatically. Run `cargo generate-lockfile` manually in src-tauri/."
+    );
   }
 
   console.log("✅ Version bumped successfully.");
   console.log("");
   console.log("Next steps:");
-  console.log(`   git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock`);
+  console.log(
+    `   git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock`
+  );
   console.log(`   git commit -m "chore(release): bump version to ${next}"`);
 }
 

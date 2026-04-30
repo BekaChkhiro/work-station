@@ -43,7 +43,15 @@ function spawnForActiveProject(direction?: "vertical" | "horizontal"): void {
   if (!project) return;
 
   const command = project.default_cli ?? getDefaultShell();
-  ptySpawn(project.path, command, {}, 80, 24)
+  let projectEnv: Record<string, string> = {};
+  if (project.env_json) {
+    try {
+      projectEnv = JSON.parse(project.env_json) as Record<string, string>;
+    } catch {
+      console.warn("[hotkey] Invalid env_json for project", project.name);
+    }
+  }
+  ptySpawn(project.path, command, projectEnv, 80, 24)
     .then((sessionId) => {
       const layout = getProjectLayout(project.id);
       if (!layout) {

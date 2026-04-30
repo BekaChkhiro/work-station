@@ -182,6 +182,7 @@ export async function projectCreate(input: {
   path: string;
   color?: string | null;
   icon?: string | null;
+  env_json?: string | null;
 }): Promise<Project> {
   return invoke("project_create", { input });
 }
