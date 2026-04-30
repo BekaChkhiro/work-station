@@ -6,6 +6,8 @@ use tauri::ipc::InvokeResponseBody;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{sleep, Duration};
 
+use crate::pty::scrollback::ScrollbackBuffer;
+
 /// A single PTY session.
 ///
 /// Owns the master PTY handle, the child process, and the output broadcast channel.
@@ -18,6 +20,7 @@ pub struct PtySession {
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     output_tx: broadcast::Sender<Bytes>,
     frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>>,
+    scrollback: Arc<std::sync::Mutex<ScrollbackBuffer>>,
 }
 
 impl PtySession {
@@ -29,6 +32,7 @@ impl PtySession {
         stdin: Box<dyn Write + Send>,
         output_tx: broadcast::Sender<Bytes>,
         frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>>,
+        scrollback: Arc<std::sync::Mutex<ScrollbackBuffer>>,
     ) -> Self {
         Self {
             id,
@@ -38,7 +42,14 @@ impl PtySession {
             stdin: Arc::new(Mutex::new(stdin)),
             output_tx,
             frontend_channels,
+            scrollback,
         }
+    }
+
+    /// Clone the stdin handle so callers can write without holding `&self`
+    /// across await points (required for `Send` futures in Tauri commands).
+    pub fn clone_stdin(&self) -> Arc<Mutex<Box<dyn Write + Send>>> {
+        self.stdin.clone()
     }
 
     /// Write raw bytes to the PTY stdin.
@@ -80,6 +91,11 @@ impl PtySession {
     /// Register a frontend Tauri channel to receive output bytes.
     pub fn add_frontend_channel(&self, channel: tauri::ipc::Channel<InvokeResponseBody>) {
         self.frontend_channels.lock().unwrap().push(channel);
+    }
+
+    /// Retrieve scrollback buffer chunks for the given byte range.
+    pub fn get_scrollback(&self, offset: usize, limit: usize) -> Vec<Bytes> {
+        self.scrollback.lock().unwrap().get_range(offset, limit)
     }
 
     /// Broadcast output bytes to all subscribers (broadcast + frontend channels).

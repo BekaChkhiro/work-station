@@ -1,6 +1,7 @@
 // IPC channel types and helpers
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { readText as clipboardReadText } from "@tauri-apps/plugin-clipboard-manager";
 
 /** A saved project that maps to a directory on disk. */
 export interface Project {
@@ -12,7 +13,7 @@ export interface Project {
   default_cli: string | null;
   env_json: string | null;
   position: number;
-  created_at: number;
+  created_at: string;
 }
 
 /** Metadata for an active PTY session. */
@@ -165,3 +166,64 @@ export async function ptyGetScrollback(
   const chunks: number[][] = await invoke("pty_get_scrollback", { id, offset, limit });
   return chunks.map((c) => new Uint8Array(c));
 }
+
+/**
+ * List all projects ordered by position.
+ */
+export async function projectList(): Promise<Project[]> {
+  return invoke("project_list");
+}
+
+/**
+ * Create a new project.
+ */
+export async function projectCreate(input: {
+  name: string;
+  path: string;
+  color?: string | null;
+  icon?: string | null;
+}): Promise<Project> {
+  return invoke("project_create", { input });
+}
+
+/**
+ * Update an existing project.
+ */
+export async function projectUpdate(
+  id: string,
+  input: {
+    name?: string;
+    path?: string;
+    color?: string | null;
+    icon?: string | null;
+    default_cli?: string | null;
+    env_json?: string | null;
+    position?: number;
+  }
+): Promise<Project> {
+  return invoke("project_update", { id, input });
+}
+
+/**
+ * Delete a project by ID.
+ */
+export async function projectDelete(id: string): Promise<void> {
+  return invoke("project_delete", { id });
+}
+
+/**
+ * Open a native folder picker dialog.
+ *
+ * Returns the absolute path of the selected folder, or `null` if the user cancelled.
+ */
+export async function pickFolder(): Promise<string | null> {
+  return invoke("pick_folder");
+}
+
+/**
+ * Read plain text from the system clipboard.
+ *
+ * Uses the Tauri clipboard manager plugin for reliable access
+ * inside the WebView (avoids browser permission prompts).
+ */
+export { clipboardReadText };

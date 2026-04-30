@@ -16,6 +16,7 @@ use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
 use super::session::PtySession;
+use crate::pty::scrollback::ScrollbackBuffer;
 
 /// Central registry for all active PTY sessions.
 ///
@@ -71,11 +72,13 @@ impl PtyManager {
             std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>,
         > = Arc::new(std::sync::Mutex::new(Vec::new()));
 
+        let scrollback = Arc::new(std::sync::Mutex::new(ScrollbackBuffer::default()));
+
         // ── Coalescing output reader ─────────────────────────────
         // Two tasks work together:
         // 1. A blocking reader fills a shared buffer from the PTY.
         // 2. An async flusher drains the buffer every ~16 ms and emits
-        //    batched bytes to broadcast + frontend channels.
+        //    batched bytes to broadcast + frontend channels + scrollback.
 
         let coalesce_buf = Arc::new(std::sync::Mutex::new(Vec::with_capacity(65536)));
         let reader_buf = coalesce_buf.clone();
@@ -85,6 +88,7 @@ impl PtyManager {
 
         let output_tx_clone = output_tx.clone();
         let flusher_channels = frontend_channels.clone();
+        let flusher_scrollback = scrollback.clone();
 
         // Blocking reader task.
         task::spawn_blocking(move || {
@@ -124,6 +128,12 @@ impl PtyManager {
 
                 if let Some(data) = chunk {
                     let bytes = Bytes::from(data.clone());
+
+                    // Store in scrollback buffer.
+                    if let Ok(mut sb) = flusher_scrollback.lock() {
+                        sb.push(bytes.clone());
+                    }
+
                     let _ = output_tx_clone.send(bytes);
 
                     // Forward to frontend channels, pruning dead ones.
@@ -153,6 +163,11 @@ impl PtyManager {
 
                     if let Some(data) = final_chunk {
                         let bytes = Bytes::from(data.clone());
+
+                        if let Ok(mut sb) = flusher_scrollback.lock() {
+                            sb.push(bytes.clone());
+                        }
+
                         let _ = output_tx_clone.send(bytes);
 
                         let mut channels = flusher_channels.lock().unwrap();
@@ -177,6 +192,7 @@ impl PtyManager {
             writer,
             output_tx,
             frontend_channels,
+            scrollback,
         );
         let id = self.insert(session).await;
         Ok(id)
@@ -208,9 +224,13 @@ impl PtyManager {
 
     /// Write raw bytes to a session's stdin.
     pub async fn write(&self, id: &Uuid, data: &[u8]) -> Option<std::io::Result<()>> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions.get(id)?;
-        Some(session.write(data).await)
+        let stdin = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions.get(id)?;
+            session.clone_stdin()
+        };
+        let mut stdin = stdin.lock().await;
+        Some(stdin.write_all(data).and_then(|_| stdin.flush()))
     }
 
     /// Resize a session's PTY.
@@ -225,6 +245,18 @@ impl PtyManager {
         let sessions = self.sessions.lock().await;
         let session = sessions.get(id)?;
         Some(session.subscribe())
+    }
+
+    /// Retrieve scrollback buffer chunks for a session.
+    pub async fn get_scrollback(
+        &self,
+        id: &Uuid,
+        offset: usize,
+        limit: usize,
+    ) -> Option<Vec<Bytes>> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions.get(id)?;
+        Some(session.get_scrollback(offset, limit))
     }
 
     /// Register a frontend Tauri channel for a session's output.

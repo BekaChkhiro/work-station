@@ -1,17 +1,20 @@
 import { createSignal, createEffect } from "solid-js";
+import { getSetting, setSetting } from "../db/settings";
 
 export type Theme = "dark" | "light" | "system";
 
-function getInitialTheme(): Theme {
-  const stored = localStorage.getItem("ws-theme") as Theme | null;
+const STORAGE_KEY = "ws-theme";
+
+function resolveSystemTheme(): "dark" | "light" {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function getFallbackTheme(): Theme {
+  const stored = localStorage.getItem(STORAGE_KEY) as Theme | null;
   if (stored && ["dark", "light", "system"].includes(stored)) {
     return stored;
   }
   return "dark";
-}
-
-function resolveSystemTheme(): "dark" | "light" {
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function applyTheme(theme: Theme) {
@@ -19,19 +22,33 @@ function applyTheme(theme: Theme) {
   document.documentElement.setAttribute("data-theme", resolved === "light" ? "light" : "dark");
 }
 
-const [theme, setThemeSignal] = createSignal<Theme>(getInitialTheme());
+const [theme, setThemeSignal] = createSignal<Theme>(getFallbackTheme());
 
 export { theme };
 
 export function setTheme(next: Theme) {
-  localStorage.setItem("ws-theme", next);
+  localStorage.setItem(STORAGE_KEY, next);
   setThemeSignal(next);
+  // Persist to SQLite (fire-and-forget; DB may not be ready yet)
+  setSetting("theme", next).catch(() => {
+    // Silently ignore — localStorage already holds the value
+  });
 }
 
 export function toggleTheme() {
   const current = theme();
   const next = current === "dark" ? "light" : "dark";
   setTheme(next);
+}
+
+/** Load theme preference from SQLite, falling back to localStorage. */
+export async function loadThemeFromDb(): Promise<void> {
+  const dbValue = await getSetting("theme");
+  const next: Theme =
+    dbValue && ["dark", "light", "system"].includes(dbValue)
+      ? (dbValue as Theme)
+      : getFallbackTheme();
+  setThemeSignal(next);
 }
 
 // Apply on load and reactively on change

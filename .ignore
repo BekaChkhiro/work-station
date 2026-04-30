@@ -1,0 +1,9 @@
+# PlanFlow indexer exclusions
+node_modules/
+src-tauri/target/
+dist/
+.vite/
+.vite-temp/
+src-tauri/gen/
+.planflow/
+.claude/

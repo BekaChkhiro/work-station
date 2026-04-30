@@ -349,7 +349,7 @@ Solid wrapper around xterm.js with WebGL renderer. Connect to backend via IPC.
 
 #### T4.6: Auto-resize via ResizeObserver
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: Medium
 - **Dependencies**: T4.2, T2.7
 - **Description**:

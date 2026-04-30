@@ -44,10 +44,19 @@ export const CREATE_SESSIONS_PROJECT_INDEX = `
   CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 `;
 
+/** App settings table — key/value store for user preferences and hotkeys. */
+export const CREATE_APP_SETTINGS_TABLE = `
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`;
+
 /** Ordered list of all schema statements to run on init. */
 export const SCHEMA_STATEMENTS = [
   CREATE_PROJECTS_TABLE,
   CREATE_PROJECTS_POSITION_INDEX,
   CREATE_SESSIONS_TABLE,
   CREATE_SESSIONS_PROJECT_INDEX,
+  CREATE_APP_SETTINGS_TABLE,
 ];
