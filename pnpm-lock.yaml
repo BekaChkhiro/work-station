@@ -26,6 +26,9 @@ importers:
       solid-js:
         specifier: ^1.9.3
         version: 1.9.12
+      zod:
+        specifier: ^4.4.1
+        version: 4.4.1
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.1
@@ -1484,6 +1487,9 @@ packages:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
 
+  zod@4.4.1:
+    resolution: {integrity: sha512-a6ENMBBGZBsnlSebQ/eKCguSBeGKSf4O7BPnqVPmYGtpBYI7VSqoVqw+QcB7kPRjbqPwhYTpFbVj/RqNz/CT0Q==}
+
 snapshots:
 
   '@babel/code-frame@7.29.0':
@@ -2735,3 +2741,5 @@ snapshots:
   yallist@3.1.1: {}
 
   yocto-queue@0.1.0: {}
+
+  zod@4.4.1: {}
