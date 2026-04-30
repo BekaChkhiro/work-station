@@ -1,6 +1,8 @@
 import { onCleanup, onMount, untrack } from "solid-js";
 import { Terminal as XTermTerminal, type ITerminalOptions, type IDisposable } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { ptyResize } from "../ipc";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalProps {
@@ -32,8 +34,11 @@ export default function Terminal(props: TerminalProps) {
   // eslint-disable-next-line prefer-const
   let containerRef: HTMLDivElement | undefined = undefined;
   let term: XTermTerminal | undefined = undefined;
+  let fitAddon: FitAddon | undefined = undefined;
   let webglAddon: WebglAddon | undefined = undefined;
   let contextLossDisposer: IDisposable | undefined = undefined;
+  let resizeObserver: ResizeObserver | undefined = undefined;
+  let resizeTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
 
   onMount(() => {
     if (!containerRef) return;
@@ -63,6 +68,13 @@ export default function Terminal(props: TerminalProps) {
     term = new XTermTerminal(options);
     term.open(containerRef);
 
+    // Load FitAddon for automatic dimension calculation
+    fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+
+    // Initial fit to establish correct cols/rows
+    fitAddon.fit();
+
     // Load WebGL addon as default renderer
     try {
       webglAddon = new WebglAddon();
@@ -78,13 +90,35 @@ export default function Terminal(props: TerminalProps) {
     } catch {
       console.warn(`[Terminal ${untrack(() => props.sessionId)}] WebGL addon failed to load. Using canvas renderer.`);
     }
+
+    // Debounced resize handler: fit then notify backend
+    const doResize = () => {
+      if (!term || !fitAddon) return;
+      fitAddon.fit();
+      const cols = term.cols;
+      const rows = term.rows;
+      const sid = untrack(() => props.sessionId);
+      ptyResize(sid, cols, rows).catch(() => {
+        // Ignore errors for demo / stale sessions
+      });
+    };
+
+    resizeObserver = new ResizeObserver(() => {
+      if (resizeTimeout) clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(doResize, 150);
+    });
+    resizeObserver.observe(containerRef);
   });
 
   onCleanup(() => {
+    if (resizeTimeout) clearTimeout(resizeTimeout);
+    resizeObserver?.disconnect();
+    resizeObserver = undefined;
     contextLossDisposer?.dispose();
     contextLossDisposer = undefined;
     webglAddon?.dispose();
     webglAddon = undefined;
+    fitAddon = undefined;
     term?.dispose();
     term = undefined;
   });
