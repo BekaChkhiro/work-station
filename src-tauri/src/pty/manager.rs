@@ -130,6 +130,15 @@ impl PtyManager {
         let session = sessions.get(id)?;
         Some(session.subscribe())
     }
+
+    /// Gracefully kill a session and remove it from the registry.
+    ///
+    /// Returns `None` if the session does not exist.
+    pub async fn kill(&self, id: &Uuid) -> Option<anyhow::Result<()>> {
+        let mut sessions = self.sessions.lock().await;
+        let mut session = sessions.remove(id)?;
+        Some(session.kill().await)
+    }
 }
 
 impl Default for PtyManager {

@@ -3,6 +3,7 @@ use portable_pty::{Child, MasterPty};
 use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
+use tokio::time::{sleep, Duration};
 
 /// A single PTY session.
 ///
@@ -62,6 +63,35 @@ impl PtySession {
     /// Subscribe to the output broadcast channel.
     pub fn subscribe(&self) -> broadcast::Receiver<Bytes> {
         self.output_tx.subscribe()
+    }
+
+    /// Gracefully kill the child process.
+    ///
+    /// Unix: sends SIGTERM, waits up to 2 seconds, then SIGKILL if still alive.
+    /// Windows: immediate force kill (no standard graceful termination API).
+    pub async fn kill(&mut self) -> anyhow::Result<()> {
+        #[cfg(unix)]
+        {
+            if let Some(pid) = self.child.process_id() {
+                // Send SIGTERM for graceful shutdown.
+                unsafe {
+                    let _ = libc::kill(pid as i32, libc::SIGTERM);
+                }
+
+                // Poll for up to 2 seconds (40 × 50 ms).
+                for _ in 0..40 {
+                    sleep(Duration::from_millis(50)).await;
+                    match self.child.try_wait() {
+                        Ok(Some(_)) => return Ok(()),
+                        Ok(None) => continue,
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+        }
+
+        // Force kill (SIGKILL on Unix, TerminateProcess on Windows).
+        self.child.kill().map_err(|e| e.into())
     }
 }
 

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use tauri::State;
+use uuid::Uuid;
 
 use crate::pty::PtyManager;
 
@@ -31,4 +32,20 @@ pub async fn pty_spawn(
         .await
         .map_err(|e| e.to_string())?;
     Ok(id.to_string())
+}
+
+/// Kill a PTY session with graceful shutdown.
+///
+/// Args:
+/// - `id` – session UUID returned by `pty_spawn`
+///
+/// Sends SIGTERM (Unix) and waits up to 2s before force-killing.
+/// The session is removed from the registry regardless of outcome.
+#[tauri::command]
+pub async fn pty_kill(id: String, manager: State<'_, PtyManager>) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    match manager.kill(&uuid).await {
+        Some(result) => result.map_err(|e| e.to_string()),
+        None => Err("Session not found".to_string()),
+    }
 }
