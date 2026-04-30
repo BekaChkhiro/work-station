@@ -75,12 +75,16 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_path(path: &str) -> Result<(), String> {
+async fn validate_path(path: &str) -> Result<(), String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("Project path is required".to_string());
     }
-    Ok(())
+    match tokio::fs::metadata(trimmed).await {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err("Project path must be a directory".to_string()),
+        Err(_) => Err("Project path does not exist".to_string()),
+    }
 }
 
 /// List all projects ordered by position, then creation time.
@@ -102,11 +106,14 @@ pub async fn create_project(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     input: CreateProjectInput,
 ) -> Result<ProjectResponse, String> {
-    validate_name(&input.name)?;
-    validate_path(&input.path)?;
+    let name = input.name.trim().to_string();
+    let path = input.path.trim().to_string();
+
+    validate_name(&name)?;
+    validate_path(&path).await?;
 
     let existing: Option<(i64,)> = sqlx::query_as("SELECT id FROM projects WHERE name = ?")
-        .bind(&input.name)
+        .bind(&name)
         .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -119,8 +126,8 @@ pub async fn create_project(
         "INSERT INTO projects (name, path, color, icon, position)
          VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM projects))",
     )
-    .bind(&input.name)
-    .bind(&input.path)
+    .bind(&name)
+    .bind(&path)
     .bind(&input.color)
     .bind(&input.icon)
     .execute(pool)
@@ -158,10 +165,13 @@ pub async fn update_project(
 
     let existing = existing.ok_or("Project not found")?;
 
-    let name = input.name.as_ref().unwrap_or(&existing.name);
-    validate_name(name)?;
+    let name = input.name.as_ref().map(|n| n.trim().to_string());
+    let path = input.path.as_ref().map(|p| p.trim().to_string());
 
-    if let Some(ref new_name) = input.name {
+    let name_for_validation = name.as_ref().unwrap_or(&existing.name);
+    validate_name(name_for_validation)?;
+
+    if let Some(ref new_name) = name {
         if new_name != &existing.name {
             let duplicate: Option<(i64,)> =
                 sqlx::query_as("SELECT id FROM projects WHERE name = ? AND id != ?")
@@ -177,12 +187,12 @@ pub async fn update_project(
         }
     }
 
-    if let Some(ref path) = input.path {
-        validate_path(path)?;
+    if let Some(ref new_path) = path {
+        validate_path(new_path).await?;
     }
 
-    let name = input.name.unwrap_or(existing.name);
-    let path = input.path.unwrap_or(existing.path);
+    let name = name.unwrap_or(existing.name);
+    let path = path.unwrap_or(existing.path);
     let color = input.color.or(existing.color);
     let icon = input.icon.or(existing.icon);
     let default_cli = input.default_cli.or(existing.default_cli);
