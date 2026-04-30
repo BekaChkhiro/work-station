@@ -123,9 +123,9 @@ function handleKeyDown(event: KeyboardEvent): void {
     if (isEditable) return;
   }
 
-  // Ignore when focus is inside a terminal pane (xterm handles its own keys).
-  const inTerminal = target?.closest("[data-session-id]") !== null;
-  if (inTerminal) return;
+  // App-level shortcuts (e.g. Cmd+T) should work even when a terminal is
+  // focused. Unmodified keystrokes never match a binding, so they fall
+  // through to xterm.js naturally.
 
   for (const [action, binding] of Object.entries(state.bindings)) {
     if (matchBinding(event, binding)) {
