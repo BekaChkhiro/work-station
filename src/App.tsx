@@ -1,6 +1,7 @@
 import { createSignal, For } from "solid-js";
 import { Button, Dialog, Tabs } from "@kobalte/core";
 import { theme, setTheme, toggleTheme } from "./stores/theme";
+import Sidebar from "./components/Sidebar";
 
 /*
  * Design System Showcase — Work Station
@@ -26,13 +27,15 @@ export default function App() {
   const [dialogOpen, setDialogOpen] = createSignal(false);
 
   return (
-    <div class="min-h-screen bg-surface-base text-text-primary p-8 font-sans">
-      <header class="mb-10">
-        <h1 class="text-3xl font-bold tracking-tight mb-2">Work Station</h1>
-        <p class="text-text-secondary text-base">Design system foundation — T1.4</p>
-      </header>
+    <div class="flex h-screen w-screen overflow-hidden bg-surface-base text-text-primary font-sans">
+      {/* Main content area */}
+      <main class="flex-1 overflow-y-auto p-8">
+        <header class="mb-10">
+          <h1 class="text-3xl font-bold tracking-tight mb-2">Work Station</h1>
+          <p class="text-text-secondary text-base">Design system foundation — T1.4</p>
+        </header>
 
-      <Tabs.Root class="max-w-3xl">
+        <Tabs.Root class="max-w-3xl">
         <Tabs.List class="flex gap-1 border-b border-surface-border mb-6">
           <For each={["Theme", "Colors", "Spacing", "Typography", "Components"]}>
             {(label) => (
@@ -258,9 +261,13 @@ export default function App() {
         </Tabs.Content>
       </Tabs.Root>
 
-      <footer class="mt-16 pt-6 border-t border-surface-border text-xs text-text-tertiary">
-        Work Station v0.1.0 — Tauri 2 + Solid + Tailwind CSS v4 + Kobalte
-      </footer>
+        <footer class="mt-16 pt-6 border-t border-surface-border text-xs text-text-tertiary">
+          Work Station v0.1.0 — Tauri 2 + Solid + Tailwind CSS v4 + Kobalte
+        </footer>
+      </main>
+
+      {/* Right-side project sidebar */}
+      <Sidebar />
     </div>
   );
 }
