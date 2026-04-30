@@ -24,6 +24,8 @@
     "@kobalte/core": "^0.13.11",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-sql": "^2",
+    "@tauri-apps/plugin-store": "^2",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {
