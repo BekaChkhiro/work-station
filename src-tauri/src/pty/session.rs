@@ -2,6 +2,7 @@ use bytes::Bytes;
 use portable_pty::{Child, MasterPty};
 use std::io::Write;
 use std::sync::Arc;
+use tauri::ipc::InvokeResponseBody;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{sleep, Duration};
 
@@ -16,7 +17,7 @@ pub struct PtySession {
     child: Box<dyn Child + Send>,
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     output_tx: broadcast::Sender<Bytes>,
-    frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>>,
+    frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>>,
 }
 
 impl PtySession {
@@ -27,7 +28,7 @@ impl PtySession {
         child: Box<dyn Child + Send>,
         stdin: Box<dyn Write + Send>,
         output_tx: broadcast::Sender<Bytes>,
-        frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>>,
+        frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>>,
     ) -> Self {
         Self {
             id,
@@ -72,12 +73,12 @@ impl PtySession {
     /// holding a reference to `PtySession` across await points.
     pub fn frontend_channels(
         &self,
-    ) -> Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>> {
+    ) -> Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>> {
         self.frontend_channels.clone()
     }
 
     /// Register a frontend Tauri channel to receive output bytes.
-    pub fn add_frontend_channel(&self, channel: tauri::ipc::Channel<Vec<u8>>) {
+    pub fn add_frontend_channel(&self, channel: tauri::ipc::Channel<InvokeResponseBody>) {
         self.frontend_channels.lock().unwrap().push(channel);
     }
 
@@ -94,7 +95,7 @@ impl PtySession {
         let mut channels = self.frontend_channels.lock().unwrap();
         let mut alive = Vec::with_capacity(channels.len());
         for ch in channels.drain(..) {
-            if ch.send(data.clone()).is_ok() {
+            if ch.send(InvokeResponseBody::Raw(data.clone())).is_ok() {
                 alive.push(ch);
             }
         }

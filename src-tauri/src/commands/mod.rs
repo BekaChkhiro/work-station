@@ -3,6 +3,7 @@
 //! Exposes backend capabilities to the frontend via IPC.
 
 use std::collections::HashMap;
+use tauri::ipc::InvokeResponseBody;
 use tauri::State;
 use uuid::Uuid;
 
@@ -44,7 +45,7 @@ pub async fn pty_spawn(
 #[tauri::command]
 pub async fn pty_subscribe(
     id: String,
-    channel: tauri::ipc::Channel<Vec<u8>>,
+    channel: tauri::ipc::Channel<InvokeResponseBody>,
     manager: State<'_, PtyManager>,
 ) -> Result<(), String> {
     let uuid = Uuid::parse_str(&id).map_err(|e| e.to_string())?;

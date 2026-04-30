@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use tauri::ipc::InvokeResponseBody;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task;
 use tokio::time::{interval, Duration};
@@ -67,7 +68,7 @@ impl PtyManager {
 
         let (output_tx, _) = broadcast::channel::<Bytes>(1024);
         let frontend_channels: Arc<
-            std::sync::Mutex<Vec<tauri::ipc::Channel<Vec<u8>>>>,
+            std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>,
         > = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // ── Coalescing output reader ─────────────────────────────
@@ -129,7 +130,7 @@ impl PtyManager {
                     let mut channels = flusher_channels.lock().unwrap();
                     let mut alive = Vec::with_capacity(channels.len());
                     for ch in channels.drain(..) {
-                        if ch.send(data.clone()).is_ok() {
+                        if ch.send(InvokeResponseBody::Raw(data.clone())).is_ok() {
                             alive.push(ch);
                         }
                     }
@@ -157,7 +158,7 @@ impl PtyManager {
                         let mut channels = flusher_channels.lock().unwrap();
                         let mut alive = Vec::with_capacity(channels.len());
                         for ch in channels.drain(..) {
-                            if ch.send(data.clone()).is_ok() {
+                            if ch.send(InvokeResponseBody::Raw(data.clone())).is_ok() {
                                 alive.push(ch);
                             }
                         }
@@ -230,7 +231,7 @@ impl PtyManager {
     pub async fn add_frontend_channel(
         &self,
         id: &Uuid,
-        channel: tauri::ipc::Channel<Vec<u8>>,
+        channel: tauri::ipc::Channel<InvokeResponseBody>,
     ) -> Option<()> {
         let channels = {
             let sessions = self.sessions.lock().await;
