@@ -1,0 +1,33 @@
+#!/bin/sh
+# Conventional Commits hook
+# https://www.conventionalcommits.org/
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(head -n 1 "$COMMIT_MSG_FILE")
+
+# Allow merge commits, revert commits, and release commits
+if echo "$COMMIT_MSG" | grep -qE "^(Merge|Revert|release)"; then
+  exit 0
+fi
+
+# Conventional commit pattern
+PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .{1,}"
+
+if ! echo "$COMMIT_MSG" | grep -qE "$PATTERN"; then
+  echo ""
+  echo "❌ Invalid commit message format."
+  echo ""
+  echo "Commit message must follow Conventional Commits:"
+  echo "  type(scope)?: subject"
+  echo ""
+  echo "Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+  echo ""
+  echo "Examples:"
+  echo "  feat: add user authentication"
+  echo "  fix(ui): resolve button overlap on mobile"
+  echo "  docs(readme): update installation steps"
+  echo ""
+  exit 1
+fi
+
+exit 0
