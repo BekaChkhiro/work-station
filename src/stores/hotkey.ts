@@ -10,6 +10,7 @@ import { createStore, produce } from "solid-js/store";
 import type { HotkeyAction, HotkeyBinding, PhysicalModifier } from "../types/hotkey";
 import { resolveBindingModifiers, formatHotkey } from "../types/hotkey";
 import { setSetting, deleteSetting } from "../db/settings";
+import { DEFAULT_HOTKEY_BINDINGS } from "./hotkey-defaults";
 
 /* ─── State ─── */
 
@@ -181,6 +182,13 @@ export async function loadHotkeysFromDb(): Promise<void> {
       }
     } catch {
       // ignore malformed entries
+    }
+  }
+
+  // Merge defaults for any actions not customised by the user.
+  for (const [action, binding] of Object.entries(DEFAULT_HOTKEY_BINDINGS)) {
+    if (!(action in loaded)) {
+      loaded[action] = binding;
     }
   }
 
