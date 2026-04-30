@@ -1,0 +1,112 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* ───────────────────────────────────────────────
+   Tailwind v4 Theme Configuration
+   Maps design tokens to Tailwind theme keys
+   ─────────────────────────────────────────────── */
+
+@theme {
+  /* Colors */
+  --color-neutral-50:  var(--color-neutral-50);
+  --color-neutral-100: var(--color-neutral-100);
+  --color-neutral-200: var(--color-neutral-200);
+  --color-neutral-300: var(--color-neutral-300);
+  --color-neutral-400: var(--color-neutral-400);
+  --color-neutral-500: var(--color-neutral-500);
+  --color-neutral-600: var(--color-neutral-600);
+  --color-neutral-700: var(--color-neutral-700);
+  --color-neutral-800: var(--color-neutral-800);
+  --color-neutral-900: var(--color-neutral-900);
+  --color-neutral-950: var(--color-neutral-950);
+
+  --color-primary-50:  var(--color-primary-50);
+  --color-primary-100: var(--color-primary-100);
+  --color-primary-200: var(--color-primary-200);
+  --color-primary-300: var(--color-primary-300);
+  --color-primary-400: var(--color-primary-400);
+  --color-primary-500: var(--color-primary-500);
+  --color-primary-600: var(--color-primary-600);
+  --color-primary-700: var(--color-primary-700);
+  --color-primary-800: var(--color-primary-800);
+  --color-primary-900: var(--color-primary-900);
+  --color-primary-950: var(--color-primary-950);
+
+  --color-surface-base:         var(--surface-base);
+  --color-surface-elevated:     var(--surface-elevated);
+  --color-surface-sunken:       var(--surface-sunken);
+  --color-surface-overlay:      var(--surface-overlay);
+  --color-surface-hover:        var(--surface-hover);
+  --color-surface-active:       var(--surface-active);
+  --color-surface-selected:     var(--surface-selected);
+  --color-surface-border:       var(--surface-border);
+  --color-surface-border-subtle: var(--surface-border-subtle);
+
+  --color-text-primary:   var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary:  var(--text-tertiary);
+  --color-text-disabled:  var(--text-disabled);
+  --color-text-inverse:   var(--text-inverse);
+  --color-text-accent:    var(--text-accent);
+
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-danger:  var(--color-danger);
+  --color-info:    var(--color-info);
+
+  /* Typography */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --text-xs:   var(--text-xs);
+  --text-sm:   var(--text-sm);
+  --text-base: var(--text-base);
+  --text-md:   var(--text-md);
+  --text-lg:   var(--text-lg);
+  --text-xl:   var(--text-xl);
+  --text-2xl:  var(--text-2xl);
+  --text-3xl:  var(--text-3xl);
+
+  --font-weight-regular:  var(--font-regular);
+  --font-weight-medium:   var(--font-medium);
+  --font-weight-semibold: var(--font-semibold);
+  --font-weight-bold:     var(--font-bold);
+
+  --leading-tight:   var(--leading-tight);
+  --leading-snug:    var(--leading-snug);
+  --leading-normal:  var(--leading-normal);
+  --leading-relaxed: var(--leading-relaxed);
+
+  /* Spacing */
+  --spacing-px:  var(--space-px);
+  --spacing-0_5: var(--space-0_5);
+  --spacing-1_5: var(--space-1_5);
+  --spacing-2_5: var(--space-2_5);
+  --spacing-3_5: var(--space-3_5);
+
+  /* Radii */
+  --radius-sm:   var(--radius-sm);
+  --radius-md:   var(--radius-md);
+  --radius-lg:   var(--radius-lg);
+  --radius-xl:   var(--radius-xl);
+  --radius-2xl:  var(--radius-2xl);
+  --radius-full: var(--radius-full);
+
+  /* Shadows */
+  --shadow-sm:   var(--shadow-sm);
+  --shadow-md:   var(--shadow-md);
+  --shadow-lg:   var(--shadow-lg);
+  --shadow-xl:   var(--shadow-xl);
+  --shadow-focus: var(--shadow-focus);
+
+  /* Motion */
+  --ease-out:    var(--ease-out);
+  --ease-in-out: var(--ease-in-out);
+  --ease-spring: var(--ease-spring);
+
+  --duration-instant: var(--duration-instant);
+  --duration-fast:    var(--duration-fast);
+  --duration-normal:  var(--duration-normal);
+  --duration-slow:    var(--duration-slow);
+  --duration-slower:  var(--duration-slower);
+}
