@@ -12,7 +12,7 @@
        ─────────────────────────────────────────────── */
 
     /* Neutral scale (dark-first, 950 is near-black) */
-    --color-neutral-50:  #f6f6f7;
+    --color-neutral-50: #f6f6f7;
     --color-neutral-100: #e4e4e7;
     --color-neutral-200: #c4c4cc;
     --color-neutral-300: #a1a1aa;
@@ -25,7 +25,7 @@
     --color-neutral-950: #09090b;
 
     /* Primary accent — electric violet */
-    --color-primary-50:  #f5f3ff;
+    --color-primary-50: #f5f3ff;
     --color-primary-100: #ede9fe;
     --color-primary-200: #ddd6fe;
     --color-primary-300: #c4b5fd;
@@ -38,93 +38,92 @@
     --color-primary-950: #2e1065;
 
     /* Semantic colors */
-    --color-success:  #22c55e;
-    --color-warning:  #f59e0b;
-    --color-danger:   #ef4444;
-    --color-info:     #3b82f6;
+    --color-success: #22c55e;
+    --color-warning: #f59e0b;
+    --color-danger: #ef4444;
+    --color-info: #3b82f6;
 
     /* Terminal-specific */
-    --color-terminal-black:   #09090b;
-    --color-terminal-red:     #ef4444;
-    --color-terminal-green:   #22c55e;
-    --color-terminal-yellow:  #eab308;
-    --color-terminal-blue:    #3b82f6;
+    --color-terminal-black: #09090b;
+    --color-terminal-red: #ef4444;
+    --color-terminal-green: #22c55e;
+    --color-terminal-yellow: #eab308;
+    --color-terminal-blue: #3b82f6;
     --color-terminal-magenta: #a855f7;
-    --color-terminal-cyan:    #06b6d4;
-    --color-terminal-white:   #f6f6f7;
+    --color-terminal-cyan: #06b6d4;
+    --color-terminal-white: #f6f6f7;
 
     /* ───────────────────────────────────────────────
        Surfaces (semantic mapping)
        ─────────────────────────────────────────────── */
-    --surface-base:         var(--color-neutral-950);
-    --surface-elevated:     var(--color-neutral-900);
-    --surface-sunken:       var(--color-neutral-950);
-    --surface-overlay:      rgba(9, 9, 11, 0.85);
-    --surface-hover:        rgba(255, 255, 255, 0.05);
-    --surface-active:       rgba(255, 255, 255, 0.08);
-    --surface-selected:     rgba(139, 92, 246, 0.15);
-    --surface-border:       var(--color-neutral-800);
+    --surface-base: var(--color-neutral-950);
+    --surface-elevated: var(--color-neutral-900);
+    --surface-sunken: var(--color-neutral-950);
+    --surface-overlay: rgba(9, 9, 11, 0.85);
+    --surface-hover: rgba(255, 255, 255, 0.05);
+    --surface-active: rgba(255, 255, 255, 0.08);
+    --surface-selected: rgba(139, 92, 246, 0.15);
+    --surface-border: var(--color-neutral-800);
     --surface-border-subtle: rgba(255, 255, 255, 0.06);
 
     /* ───────────────────────────────────────────────
        Text
        ─────────────────────────────────────────────── */
-    --text-primary:   var(--color-neutral-50);
+    --text-primary: var(--color-neutral-50);
     --text-secondary: var(--color-neutral-300);
-    --text-tertiary:  var(--color-neutral-500);
-    --text-disabled:  var(--color-neutral-600);
-    --text-inverse:   var(--color-neutral-950);
-    --text-accent:    var(--color-primary-400);
+    --text-tertiary: var(--color-neutral-500);
+    --text-disabled: var(--color-neutral-600);
+    --text-inverse: var(--color-neutral-950);
+    --text-accent: var(--color-primary-400);
 
     /* ───────────────────────────────────────────────
        Typography
        ─────────────────────────────────────────────── */
-    --font-sans:      -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                      "Helvetica Neue", Arial, "Noto Sans", sans-serif,
-                      "Apple Color Emoji", "Segoe UI Emoji";
-    --font-mono:      "SF Mono", SFMono-Regular, ui-monospace, Menlo,
-                      Monaco, "Cascadia Mono", "Segoe UI Mono",
-                      "Roboto Mono", "Oxygen Mono", "Ubuntu Monospace",
-                      "Source Code Pro", "Fira Code", "Droid Sans Mono",
-                      "Courier New", monospace;
+    --font-sans:
+      -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
+      sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    --font-mono:
+      "SF Mono", SFMono-Regular, ui-monospace, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono",
+      "Roboto Mono", "Oxygen Mono", "Ubuntu Monospace", "Source Code Pro", "Fira Code",
+      "Droid Sans Mono", "Courier New", monospace;
 
-    --text-xs:   0.75rem;   /* 12px */
-    --text-sm:   0.8125rem; /* 13px */
-    --text-base: 0.875rem;  /* 14px */
-    --text-md:   1rem;      /* 16px */
-    --text-lg:   1.125rem;  /* 18px */
-    --text-xl:   1.25rem;   /* 20px */
-    --text-2xl:  1.5rem;    /* 24px */
-    --text-3xl:  1.875rem;  /* 30px */
+    --text-xs: 0.75rem; /* 12px */
+    --text-sm: 0.8125rem; /* 13px */
+    --text-base: 0.875rem; /* 14px */
+    --text-md: 1rem; /* 16px */
+    --text-lg: 1.125rem; /* 18px */
+    --text-xl: 1.25rem; /* 20px */
+    --text-2xl: 1.5rem; /* 24px */
+    --text-3xl: 1.875rem; /* 30px */
 
-    --font-regular:   400;
-    --font-medium:    500;
-    --font-semibold:  600;
-    --font-bold:      700;
+    --font-regular: 400;
+    --font-medium: 500;
+    --font-semibold: 600;
+    --font-bold: 700;
 
-    --leading-tight:  1.25;
-    --leading-snug:   1.375;
+    --leading-tight: 1.25;
+    --leading-snug: 1.375;
     --leading-normal: 1.5;
-    --leading-relaxed:1.625;
+    --leading-relaxed: 1.625;
 
     /* ───────────────────────────────────────────────
        Spacing (4px grid)
        ─────────────────────────────────────────────── */
-    --space-0:  0px;
+    --space-0: 0px;
     --space-px: 1px;
-    --space-0_5:2px;
-    --space-1:  4px;
-    --space-1_5:6px;
-    --space-2:  8px;
-    --space-2_5:10px;
-    --space-3:  12px;
-    --space-3_5:14px;
-    --space-4:  16px;
-    --space-5:  20px;
-    --space-6:  24px;
-    --space-7:  28px;
-    --space-8:  32px;
-    --space-9:  36px;
+    --space-0_5: 2px;
+    --space-1: 4px;
+    --space-1_5: 6px;
+    --space-2: 8px;
+    --space-2_5: 10px;
+    --space-3: 12px;
+    --space-3_5: 14px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-7: 28px;
+    --space-8: 32px;
+    --space-9: 36px;
     --space-10: 40px;
     --space-12: 48px;
     --space-14: 56px;
@@ -134,38 +133,34 @@
        Radii
        ─────────────────────────────────────────────── */
     --radius-none: 0px;
-    --radius-sm:   4px;
-    --radius-md:   6px;
-    --radius-lg:   8px;
-    --radius-xl:   12px;
-    --radius-2xl:  16px;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+    --radius-2xl: 16px;
     --radius-full: 9999px;
 
     /* ───────────────────────────────────────────────
        Shadows
        ─────────────────────────────────────────────── */
-    --shadow-sm:   0 1px 2px 0 rgba(0, 0, 0, 0.3);
-    --shadow-md:   0 4px 6px -1px rgba(0, 0, 0, 0.4),
-                   0 2px 4px -2px rgba(0, 0, 0, 0.3);
-    --shadow-lg:   0 10px 15px -3px rgba(0, 0, 0, 0.5),
-                   0 4px 6px -4px rgba(0, 0, 0, 0.4);
-    --shadow-xl:   0 20px 25px -5px rgba(0, 0, 0, 0.5),
-                   0 8px 10px -6px rgba(0, 0, 0, 0.4);
-    --shadow-focus:0 0 0 2px var(--color-primary-500),
-                   0 0 0 4px rgba(139, 92, 246, 0.2);
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -4px rgba(0, 0, 0, 0.4);
+    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+    --shadow-focus: 0 0 0 2px var(--color-primary-500), 0 0 0 4px rgba(139, 92, 246, 0.2);
 
     /* ───────────────────────────────────────────────
        Motion
        ─────────────────────────────────────────────── */
-    --ease-out:     cubic-bezier(0.16, 1, 0.3, 1);
-    --ease-in-out:  cubic-bezier(0.45, 0, 0.55, 1);
-    --ease-spring:  cubic-bezier(0.34, 1.56, 0.64, 1);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
     --duration-instant: 0ms;
-    --duration-fast:    100ms;
-    --duration-normal:  200ms;
-    --duration-slow:    300ms;
-    --duration-slower:  500ms;
+    --duration-fast: 100ms;
+    --duration-normal: 200ms;
+    --duration-slow: 300ms;
+    --duration-slower: 500ms;
 
     /* ───────────────────────────────────────────────
        Layout
@@ -181,30 +176,27 @@
      Light mode override
      ───────────────────────────────────────────────── */
   [data-theme="light"] {
-    --surface-base:         var(--color-neutral-50);
-    --surface-elevated:     #ffffff;
-    --surface-sunken:       var(--color-neutral-100);
-    --surface-overlay:      rgba(255, 255, 255, 0.92);
-    --surface-hover:        rgba(0, 0, 0, 0.04);
-    --surface-active:       rgba(0, 0, 0, 0.06);
-    --surface-selected:     rgba(139, 92, 246, 0.10);
-    --surface-border:       var(--color-neutral-200);
+    --surface-base: var(--color-neutral-50);
+    --surface-elevated: #ffffff;
+    --surface-sunken: var(--color-neutral-100);
+    --surface-overlay: rgba(255, 255, 255, 0.92);
+    --surface-hover: rgba(0, 0, 0, 0.04);
+    --surface-active: rgba(0, 0, 0, 0.06);
+    --surface-selected: rgba(139, 92, 246, 0.1);
+    --surface-border: var(--color-neutral-200);
     --surface-border-subtle: rgba(0, 0, 0, 0.06);
 
-    --text-primary:   var(--color-neutral-950);
+    --text-primary: var(--color-neutral-950);
     --text-secondary: var(--color-neutral-600);
-    --text-tertiary:  var(--color-neutral-400);
-    --text-disabled:  var(--color-neutral-300);
-    --text-inverse:   var(--color-neutral-50);
-    --text-accent:    var(--color-primary-600);
+    --text-tertiary: var(--color-neutral-400);
+    --text-disabled: var(--color-neutral-300);
+    --text-inverse: var(--color-neutral-50);
+    --text-accent: var(--color-primary-600);
 
-    --shadow-sm:   0 1px 2px 0 rgba(0, 0, 0, 0.06);
-    --shadow-md:   0 4px 6px -1px rgba(0, 0, 0, 0.08),
-                   0 2px 4px -2px rgba(0, 0, 0, 0.04);
-    --shadow-lg:   0 10px 15px -3px rgba(0, 0, 0, 0.08),
-                   0 4px 6px -4px rgba(0, 0, 0, 0.04);
-    --shadow-xl:   0 20px 25px -5px rgba(0, 0, 0, 0.08),
-                   0 8px 10px -6px rgba(0, 0, 0, 0.04);
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
+    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
   }
 
   /* ─────────────────────────────────────────────────

@@ -11,17 +11,12 @@ function getInitialTheme(): Theme {
 }
 
 function resolveSystemTheme(): "dark" | "light" {
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function applyTheme(theme: Theme) {
   const resolved = theme === "system" ? resolveSystemTheme() : theme;
-  document.documentElement.setAttribute(
-    "data-theme",
-    resolved === "light" ? "light" : "dark"
-  );
+  document.documentElement.setAttribute("data-theme", resolved === "light" ? "light" : "dark");
 }
 
 const [theme, setThemeSignal] = createSignal<Theme>(getInitialTheme());
@@ -45,10 +40,8 @@ createEffect(() => {
 });
 
 // Listen for system changes when in "system" mode
-window
-  .matchMedia("(prefers-color-scheme: dark)")
-  .addEventListener("change", () => {
-    if (theme() === "system") {
-      applyTheme("system");
-    }
-  });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if (theme() === "system") {
+    applyTheme("system");
+  }
+});

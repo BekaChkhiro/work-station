@@ -9,11 +9,7 @@ import { theme, setTheme, toggleTheme } from "./stores/theme";
  * once later tasks land.
  */
 
-const THEME_OPTIONS: Array<"dark" | "light" | "system"> = [
-  "dark",
-  "light",
-  "system",
-];
+const THEME_OPTIONS: Array<"dark" | "light" | "system"> = ["dark", "light", "system"];
 
 const COLOR_SWATCHES = [
   { name: "Primary 500", class: "bg-primary-500" },
@@ -32,12 +28,8 @@ export default function App() {
   return (
     <div class="min-h-screen bg-surface-base text-text-primary p-8 font-sans">
       <header class="mb-10">
-        <h1 class="text-3xl font-bold tracking-tight mb-2">
-          Work Station
-        </h1>
-        <p class="text-text-secondary text-base">
-          Design system foundation — T1.4
-        </p>
+        <h1 class="text-3xl font-bold tracking-tight mb-2">Work Station</h1>
+        <p class="text-text-secondary text-base">Design system foundation — T1.4</p>
       </header>
 
       <Tabs.Root class="max-w-3xl">
@@ -92,17 +84,13 @@ export default function App() {
 
           <div class="grid grid-cols-2 gap-4">
             <div class="bg-surface-elevated border border-surface-border rounded-lg p-6">
-              <h3 class="text-sm font-semibold text-text-secondary mb-2">
-                Surface Elevated
-              </h3>
+              <h3 class="text-sm font-semibold text-text-secondary mb-2">Surface Elevated</h3>
               <p class="text-text-tertiary text-sm">
                 Cards, modals, and popovers use this surface.
               </p>
             </div>
             <div class="bg-surface-sunken border border-surface-border-subtle rounded-lg p-6">
-              <h3 class="text-sm font-semibold text-text-secondary mb-2">
-                Surface Sunken
-              </h3>
+              <h3 class="text-sm font-semibold text-text-secondary mb-2">Surface Sunken</h3>
               <p class="text-text-tertiary text-sm">
                 Input fields and inset panels use this surface.
               </p>
@@ -118,9 +106,7 @@ export default function App() {
               <For each={COLOR_SWATCHES}>
                 {(swatch) => (
                   <div class="flex items-center gap-3">
-                    <div
-                      class={`w-10 h-10 rounded-md ${swatch.class} shadow-sm`}
-                    />
+                    <div class={`w-10 h-10 rounded-md ${swatch.class} shadow-sm`} />
                     <span class="text-sm text-text-secondary">{swatch.name}</span>
                   </div>
                 )}
@@ -138,9 +124,7 @@ export default function App() {
                       class={`w-full h-10 rounded-md bg-neutral-${n}`}
                       style={{ background: `var(--color-neutral-${n})` }}
                     />
-                    <span class="text-[10px] text-text-tertiary font-mono">
-                      {n}
-                    </span>
+                    <span class="text-[10px] text-text-tertiary font-mono">{n}</span>
                   </div>
                 )}
               </For>
@@ -156,16 +140,9 @@ export default function App() {
               <For each={SPACING_STEPS}>
                 {(n) => (
                   <div class="flex items-center gap-4">
-                    <span class="w-12 text-right text-xs text-text-tertiary font-mono">
-                      {n}
-                    </span>
-                    <div
-                      class="h-4 bg-primary-500 rounded-sm"
-                      style={{ width: `${n * 4}px` }}
-                    />
-                    <span class="text-xs text-text-tertiary">
-                      {n * 4}px
-                    </span>
+                    <span class="w-12 text-right text-xs text-text-tertiary font-mono">{n}</span>
+                    <div class="h-4 bg-primary-500 rounded-sm" style={{ width: `${n * 4}px` }} />
+                    <span class="text-xs text-text-tertiary">{n * 4}px</span>
                   </div>
                 )}
               </For>
@@ -189,9 +166,7 @@ export default function App() {
 
           <div class="bg-surface-elevated border border-surface-border rounded-lg p-6">
             <h2 class="text-lg font-semibold mb-2">Font stacks</h2>
-            <p class="font-sans text-base mb-2">
-              Sans-serif — UI chrome, labels, buttons
-            </p>
+            <p class="font-sans text-base mb-2">Sans-serif — UI chrome, labels, buttons</p>
             <p class="font-mono text-base text-text-secondary">
               Monospace — Terminal output, paths, hashes
             </p>
@@ -229,9 +204,11 @@ export default function App() {
               <Dialog.Root open={dialogOpen()} onOpenChange={setDialogOpen}>
                 <Dialog.Portal>
                   <Dialog.Overlay class="fixed inset-0 bg-surface-overlay z-50 data-[expanded]:animate-in data-[closed]:animate-out" />
-                  <Dialog.Content class="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50
+                  <Dialog.Content
+                    class="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50
                                          bg-surface-elevated border border-surface-border rounded-xl p-6 shadow-xl
-                                         w-full max-w-md data-[expanded]:animate-in data-[closed]:animate-out">
+                                         w-full max-w-md data-[expanded]:animate-in data-[closed]:animate-out"
+                  >
                     <div class="flex items-center justify-between mb-4">
                       <Dialog.Title class="text-lg font-semibold">
                         Design token preview
@@ -241,9 +218,8 @@ export default function App() {
                       </Dialog.CloseButton>
                     </div>
                     <Dialog.Description class="text-text-secondary text-sm mb-6">
-                      This dialog uses Kobalte&apos;s Dialog primitive with
-                      custom Tailwind styling. All motion and focus management
-                      is handled by the primitive.
+                      This dialog uses Kobalte&apos;s Dialog primitive with custom Tailwind styling.
+                      All motion and focus management is handled by the primitive.
                     </Dialog.Description>
                     <div class="flex justify-end gap-3">
                       <Dialog.CloseButton class="px-4 py-2 bg-surface-hover hover:bg-surface-active border border-surface-border rounded-md text-sm font-medium transition-colors">

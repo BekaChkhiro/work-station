@@ -8,7 +8,11 @@
     "dev": "vite",
     "build": "vite build",
     "serve": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "license": "MIT",
   "pnpm": {
@@ -23,10 +27,17 @@
     "solid-js": "^1.9.3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tailwindcss/vite": "^4.2.4",
     "@tauri-apps/cli": "^2",
+    "eslint": "^10.2.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-solid": "^0.14.5",
+    "globals": "^17.5.0",
+    "prettier": "^3.8.3",
     "tailwindcss": "^4.2.4",
     "typescript": "~5.6.2",
+    "typescript-eslint": "^8.59.1",
     "vite": "^6.0.3",
     "vite-plugin-solid": "^2.11.0"
   }
