@@ -6,6 +6,7 @@ pub mod db;
 pub mod ipc;
 pub mod pty;
 
+use tauri::Manager;
 use cli::CliRegistry;
 use commands::{
     cli_list_available, pty_get_scrollback, pty_kill, pty_resize, pty_spawn, pty_subscribe, pty_write,
@@ -22,6 +23,16 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let _window = app.get_webview_window("main").expect("main window not found");
+
+            #[cfg(target_os = "windows")]
+            {
+                window.set_decorations(false)?;
+            }
+
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_sql::Builder::new()
@@ -31,6 +42,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(PtyManager::new())
         .manage(CliRegistry::new())
         .invoke_handler(tauri::generate_handler![

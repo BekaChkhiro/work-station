@@ -2,6 +2,9 @@ import { createSignal, For } from "solid-js";
 import { Button, Dialog, Tabs } from "@kobalte/core";
 import { theme, setTheme, toggleTheme } from "./stores/theme";
 import Sidebar from "./components/Sidebar";
+import TitleBar from "./components/TitleBar";
+import { isMac } from "./utils/platform";
+import UpdateChecker from "./components/UpdateChecker";
 
 /*
  * Design System Showcase — Work Station
@@ -27,9 +30,13 @@ export default function App() {
   const [dialogOpen, setDialogOpen] = createSignal(false);
 
   return (
-    <div class="flex h-screen w-screen overflow-hidden bg-surface-base text-text-primary font-sans">
-      {/* Main content area */}
-      <main class="flex-1 overflow-y-auto p-8">
+    <div
+      class={`flex flex-col h-screen w-screen overflow-hidden bg-surface-base text-text-primary font-sans ${isMac() ? "pt-[var(--titlebar-height)]" : ""}`}
+    >
+      <TitleBar />
+      <div class="flex flex-1 overflow-hidden">
+        {/* Main content area */}
+        <main class="flex-1 overflow-y-auto p-8">
         <header class="mb-10">
           <h1 class="text-3xl font-bold tracking-tight mb-2">Work Station</h1>
           <p class="text-text-secondary text-base">Design system foundation — T1.4</p>
@@ -268,6 +275,10 @@ export default function App() {
 
       {/* Right-side project sidebar */}
       <Sidebar />
+
+      {/* Auto-update notification */}
+      <UpdateChecker />
+      </div>
     </div>
   );
 }
