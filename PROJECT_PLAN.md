@@ -1,6 +1,6 @@
-# Work Station — Project Plan (v2, audited)
+# Work Station — Project Plan (v3, personal-use)
 
-> Cross-platform desktop hub for managing multiple Claude Code / Kimi / Codex terminal sessions across projects. Built for raw performance and daily-driver comfort.
+> Cross-platform desktop hub for managing multiple Claude Code / Kimi / Codex terminal sessions across projects. Built for **personal daily-driver use** — no public release, no signing, no telemetry, no support burden.
 
 ---
 
@@ -16,15 +16,16 @@
 
 ### Is not (v0.1)
 
+- **Not a public release** — single-user, private repo, unsigned builds. First-launch OS warnings (Gatekeeper / SmartScreen) are accepted; no notarization, no Authenticode signing.
+- **No telemetry, no crash reporter, no auto-updater** — manual rebuild when you want a new version.
 - Not a Warp competitor on the AI/UX features (no AI command palette, blocks, command history search across machines).
 - Not a tmux replacement — sessions **do not survive full app quit** in v0.1 (see §3).
 - Not a Linux-first tool — Linux deferred to stretch (see §6).
 - Not an SSH client — local PTYs only.
-- Not a Tauri showcase — performance + reliability over fancy.
 
-### Why ship this
+### Why build this
 
-Niche but real: developers who run Claude Code / Kimi / Codex across 5–20 projects today juggle 5–20 iTerm/Windows Terminal tabs. This collapses that into one workspace with persistent layouts and per-project CLI presets. Expected v0.1 audience: low-thousands at most. Best motivator: dogfood it yourself daily.
+Personal productivity. The user runs Claude Code / Kimi / Codex across 5–20 projects daily and currently juggles 5–20 iTerm/Windows Terminal tabs. This collapses that into one workspace with persistent layouts and per-project CLI presets. Audience: **one person — the author**. Best motivator: dogfood from day 1; ship when it's better than the current setup.
 
 ---
 
@@ -39,9 +40,9 @@ Niche but real: developers who run Claude Code / Kimi / Codex across 5–20 proj
 | PTY | `portable-pty` crate | ConPTY (Win), forkpty (mac); only mature cross-platform option |
 | Async runtime | tokio | Standard |
 | Storage | SQLite via `tauri-plugin-sql` | Single-file, durable, WAL mode for concurrent reads |
-| Auto-update | `tauri-plugin-updater` | Tauri-native, signed manifest |
-| CI/CD | GitHub Actions | Free for public repos, matrix builds |
-| Crash reporter | Sentry (free tier) or self-hosted | Required for closing the feedback loop after launch |
+| Auto-update | — | **Dropped** for personal use; rebuild manually |
+| CI/CD | GitHub Actions (private repo: 2000 free min/mo) | Used to produce Windows artifacts from a Mac dev machine |
+| Crash reporter | — | **Dropped** for now; console.error + log files via `tracing` |
 
 ---
 
@@ -97,15 +98,16 @@ Use this when implementing — grep your task ID, open the listed file, copy the
 | T8.4 Animations + tooltips | `--ease` token, all 150–200ms transitions, `Tip` primitive (600ms hover delay) | `styles.css`, `phase2.jsx` |
 | T8.5 Native menu bar | macOS uses OS menu API; Windows uses `WinMenu` hamburger (data: `WS_WIN_MENU`) | `phase2.jsx`, `data.js` |
 | T8.6 Window chrome | `MacTraffic` (mac inset), `WinControls` (win min/max/close) | `components.jsx` |
-| T8.7 Settings page | `SettingsPage` + sub-sections: General / Appearance / Keys / CLIs / Privacy / About | `phase2.jsx` |
+| T8.7 Settings page | `SettingsPage` + sub-sections: General / Appearance / Keys / CLIs / Privacy / About (Privacy toggles render disabled in personal-use build) | `phase2.jsx` |
 | T8.9 Loading states | `SidebarSkeleton`, `WorkspaceSkeleton`, `PaneSpawnSkeleton` (braille spinner) | `phase2.jsx` |
-| T8.10 Telemetry UI | `SettingsPrivacy` toggle pair + "view what we collect" expandable; `Onboarding` step 2 | `phase2.jsx` |
-| T8.11 Crash reporter | `CrashBanner` (top of app), `Toast` (bottom-right stack) | `phase2.jsx` |
+| T9.3 App icon | `tauri icon` from 1024×1024 master | (asset, no prototype ref) |
 
 **Known prototype discrepancies** (fix during port):
 - About page mentions Electron/Node — replace with Tauri/Rust versions during T8.7 port.
 - Search overlay's `Aa` and `.*` toggles are visual-only in the prototype; wire to actual matching during T4.10.
 - Settings → Appearance → Theme `system` option falls back to `dark` in prototype; honor `prefers-color-scheme` in real implementation per T8.3.
+- Settings → Privacy section: in personal-use build, render the section but **disable** the toggles (greyed with "v0.2" badge). The whole section can also be hidden via a build flag.
+- `CrashBanner` and `Toast` components stay in the prototype but their wiring (Sentry / actual crash detection) is dropped in personal-use scope. Toasts are still useful for transient UI feedback (e.g. "Project created", "Failed to save layout"); keep that wiring.
 
 ---
 
@@ -165,47 +167,58 @@ This was a critical ambiguity in v1 of the plan. **v0.1 adopts the "session rest
 
 | Scenario | Calendar weeks | Working hours |
 |---|---|---|
-| Optimistic (full-time, no blockers) | 14 | ~560h |
-| **Realistic (full-time, normal blockers)** | **18–20** | **~720–800h** |
-| Pessimistic (full-time, hard problems) | 24 | ~960h |
-| Part-time, 20h/week | 36–40 | ~720–800h |
+| Optimistic (full-time, no blockers) | 11 | ~440h |
+| **Realistic (full-time, normal blockers)** | **13–15** | **~520–600h** |
+| Pessimistic (full-time, hard problems) | 18 | ~720h |
+| Part-time, 20h/week | 26–30 | ~520–600h |
 
-Add **20% buffer** for unknown unknowns (you will discover one or two).
+Add **20% buffer** for unknown unknowns. Personal-use scope removes ~4 weeks of build/sign/QA/launch effort vs. a public release.
 
 ### Money (ongoing per year)
 
-| Item | Cost | Required? |
-|---|---|---|
-| Apple Developer Program | $99/yr | Yes (notarization) |
-| Windows code-signing cert (OV) | $75–200/yr | Recommended for v0.1 |
-| Windows code-signing cert (EV) | $200–500/yr | Optional (cleaner SmartScreen) |
-| Sentry (crash reporter, free tier) | $0 | Sufficient for v0.1 |
-| GitHub Actions (public repo) | $0 | – |
-| **v0.1 minimum** | **~$200/yr** | – |
-| **v0.1 recommended** | **~$300/yr** | – |
+| Item | Cost |
+|---|---|
+| GitHub Actions (private repo) | **$0** (2000 free min/month is plenty) |
+| Apple Developer Program | dropped — accepting Gatekeeper warning |
+| Windows code-signing cert | dropped — accepting SmartScreen warning |
+| Sentry / telemetry | dropped |
+| **Total ongoing** | **$0/yr** |
 
-### Money (one-time)
+### One-time / hardware
 
 | Item | Cost | Notes |
 |---|---|---|
-| Windows VM / hardware | $0–$500 | If using Parallels/UTM, free (but needs license) |
-| Apple notarization key setup | $0 | Time only |
+| Windows VM (Parallels / UTM / Boot Camp) | $0 if free options used | Only needed for Windows local builds; can also build via GitHub Actions Windows runner |
 
 ---
 
 ## 6. Out of scope for v0.1 (explicit, not "we'll see")
 
-- Linux desktop release (Phase 11)
-- ARM64 Windows build (low volume, separate signing)
+### Personal-use scope drops (dropped vs. public-release plan)
+
+- Code signing (macOS notarization, Windows Authenticode) — accepting first-launch OS warnings
+- Auto-updater + update server — manual rebuild
+- Telemetry foundation
+- Crash reporter (Sentry, etc.)
+- Public GitHub release / changelog automation / versioning automation
+- Landing page / download page
+- QA matrix beyond personal machines
+- Accessibility pass (out of scope for personal-use; revisit if ever public)
+- Post-launch on-call window
+
+### Standard scope drops
+
+- Linux desktop (Phase 11)
+- ARM64 Windows build (Mac+Win x64 only)
 - Tmux-style daemon (PTY survives app quit) (Phase 11)
 - SSH / remote PTYs (Phase 11)
 - Cloud sync of projects (Phase 11)
-- AI command palette / suggestions panel (out of scope entirely — that's Warp's wedge)
+- AI command palette / suggestions panel (out of scope entirely — Warp's wedge)
 - Plugin system (Phase 11)
 - Multi-window (one window only in v0.1)
 - Session recording / playback
 - Workspace export/import file format
-- Mobile / tablet companion (out of scope entirely)
+- Mobile / tablet companion
 
 ---
 
@@ -216,30 +229,31 @@ Add **20% buffer** for unknown unknowns (you will discover one or two).
 | R1 | RAM target exceeded under real workloads | Medium | Medium | Targets revised in §2; benchmark continuously (T10.3) |
 | R2 | xterm.js WebGL context loss / GPU driver bug on Windows | Medium | High | Canvas fallback (T4.3); detect + report to Sentry |
 | R3 | PTY backpressure causes app hang when output exceeds frontend rendering speed | Medium | High | Backpressure handling (T2.16); drop-with-warning policy |
-| R4 | Apple notarization rejection on first submission | Medium | Medium | Submit early (T9.2); have hardening flags pre-validated |
-| R5 | Windows SmartScreen warns for weeks despite OV cert | High | Medium | Document explicitly in install docs; consider EV cert (T9.3) |
-| R6 | SQLite corruption from concurrent writes in dev mode | Low | High | WAL mode (T3.9); auto-backup before migration (T3.10) |
-| R7 | UTF-8 codepoint split across PTY reads breaks rendering | High | Medium | Streaming-safe decoder (T4.4); covered in plan |
-| R8 | xterm.js performance degrades with 20+ active terminals | Medium | Medium | Pause-when-hidden (T4.12); investigate render pooling later |
-| R9 | Signed releases blocked by certificate revocation / expiry | Low | High | Calendar reminders 60 days pre-expiry; document recovery path |
-| R10 | Solid.js ecosystem gap (less mature than React) costs us time | Medium | Low | Acceptable; willing to write primitives ourselves where needed |
-| R11 | Tauri 2.0 breaking changes between minor versions | Low | Medium | Pin Tauri version; upgrade only on documented stable releases |
-| R12 | "Just like tmux but…" feature creep delays v0.1 | High | High | This document. Phase 11 is the parking lot; do not pull in mid-flight |
+| R4 | Gatekeeper / SmartScreen warning on first launch (unsigned build) | High | Low | Accepted — Right-click → Open on macOS, "More info → Run anyway" on Windows. One-time per machine. |
+| R5 | SQLite corruption from concurrent writes in dev mode | Low | High | WAL mode (T3.9); auto-backup before migration (T3.10) |
+| R6 | UTF-8 codepoint split across PTY reads breaks rendering | High | Medium | Streaming-safe decoder (T4.4); covered in plan |
+| R7 | xterm.js performance degrades with 20+ active terminals | Medium | Medium | Pause-when-hidden (T4.12); investigate render pooling later |
+| R8 | Solid.js ecosystem gap (less mature than React) costs us time | Medium | Low | Acceptable; willing to write primitives ourselves where needed |
+| R9 | Tauri 2.0 breaking changes between minor versions | Low | Medium | Pin Tauri version; upgrade only on documented stable releases |
+| R10 | "Just like tmux but…" feature creep delays v0.1 | High | High | This document. Phase 11 is the parking lot; do not pull in mid-flight |
+| R11 | Cross-OS regressions found late (Mac works, Win doesn't) | Medium | Medium | Run Windows build via GHA matrix from Phase 1, not just at end (T9.1) |
 
 ---
 
-## 8. Upfront decisions to lock before Phase 1
+## 8. Decisions (locked for personal use)
 
-These are blocking — answer them now, in a `DECISIONS.md` file once Phase 1 starts:
+All resolved. No `DECISIONS.md` file needed.
 
-- [ ] **D1** Apple Developer Program — enrolled? (admin time: 1–2 days, $99)
-- [ ] **D2** Windows signing cert — OV ($75–200) or EV ($200–500)? OV recommended for v0.1.
-- [ ] **D3** Telemetry — opt-in only, or opt-out with prominent toggle?
-- [ ] **D4** License — MIT confirmed? (assumed)
-- [ ] **D5** Repository visibility — public from day 1, or private until v0.1?
-- [ ] **D6** Crash reporter — Sentry SaaS (free tier) or self-hosted?
-- [ ] **D7** Project name — `Work Station` final, or rename before any release?
-- [ ] **D8** Domain / landing page — needed for v0.1 download links?
+| # | Decision | Resolution |
+|---|---|---|
+| D1 | Apple Developer Program | **Skipped** — accepting Gatekeeper warning on first launch |
+| D2 | Windows signing cert | **Skipped** — accepting SmartScreen warning on first launch |
+| D3 | Telemetry | **Dropped** — single-user, no metrics collection |
+| D4 | License | **Skipped** — private repo, no public license needed; can add MIT later if ever shared |
+| D5 | Repository visibility | **Private** |
+| D6 | Crash reporter | **Skipped** — relying on `tracing` log files; Sentry can be added later if desired |
+| D7 | Project name | **Work Station** (placeholder, can rename anytime — no public branding lock-in) |
+| D8 | Domain / landing page | **Skipped** — no public presence needed |
 
 ---
 
@@ -1136,15 +1150,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
   - Backed by `app_settings` table.
 - **Acceptance**: All settings persist; rebound hotkeys apply without restart.
 
-#### T8.8: App icon
-
-- [ ] **Status**: TODO
-- **Complexity**: S
-- **Dependencies**: T1.6
-- **Description**:
-  - 1024×1024 master, generate iconset for both platforms.
-  - Tauri config wires icons.
-- **Acceptance**: Dock/taskbar shows icon; install bundles include all sizes.
+#### ~~T8.8: App icon~~ — moved to T9.3 (build-time concern)
 
 #### T8.9: Loading & empty states
 
@@ -1155,173 +1161,88 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
   - Skeleton loaders, friendly empty states everywhere (no projects, no panes, no detected CLIs).
 - **Acceptance**: Every "could be empty" surface has intentional UI.
 
-#### T8.10: Telemetry foundation (opt-in)
+#### ~~T8.10: Telemetry foundation~~ — DROPPED (personal use, no metrics collection)
 
-- [ ] **Status**: TODO
-- **Complexity**: M
-- **Dependencies**: T8.7
-- **Description**:
-  - **Moved up from v1's T10.10** — telemetry must ship in v0.1, not after.
-  - Event whitelist (per prototype `SettingsPrivacy`): `app.launch` (cold-start time), `app.crash` (stack hash), `pane.spawn` (CLI id, success/fail), `session.heartbeat` (session count, uptime).
-  - Never collected: command text, output, file paths, project names.
-  - Opt-in toggle in onboarding (Step 2) + settings (General + Privacy mirrored); default off (per design).
-  - "View what we collect" expandable card in Settings → Privacy lists exact event names.
-- **Acceptance**: Toggle works; no events sent when off; events visible in dashboard when on. Expandable card lists every event the app emits — no events outside that list exist in code.
+#### ~~T8.11: Crash reporter~~ — DROPPED (relying on `tracing` log files; Sentry can be added later if desired)
 
-#### T8.11: Crash reporter
-
-- [ ] **Status**: TODO
-- **Complexity**: M
-- **Dependencies**: T1.8, T1.9
-- **Description**:
-  - Sentry SDK (or alternative per D6) integrated in Rust + frontend.
-  - Stack traces + last N log lines; symbolicated builds in CI.
-  - Respects telemetry toggle (T8.10).
-- **Acceptance**: Forced crash sends report; PII (paths, env) scrubbed.
+> Settings → Privacy section in the prototype still renders for design coherence (telemetry/crash toggles visible but disabled with "v0.2" badge). Implementation skips wiring.
 
 ---
 
-### Phase 9 — Build, Sign, Distribute
+### Phase 9 — Build for personal use
 
-**Goal:** Cross-compile, sign, ship to both platforms.
-**Estimate:** 2 weeks (80h). Heavy bureaucracy phase.
+**Goal:** Produce working `.app` (macOS) and `.msi` / `.exe` (Windows) installers, **unsigned**, for the author's two machines. No public release, no notarization, no auto-updater.
+**Estimate:** 2–3 days (16–24h).
 
-#### T9.1: GitHub Actions matrix build
+#### T9.1: GitHub Actions matrix build (private repo)
 
 - [ ] **Status**: TODO
-- **Complexity**: L
+- **Complexity**: M
 - **Dependencies**: T1.6
 - **Description**:
   - Matrix: macOS-14 (universal — arm64+x64), windows-2022 (x64).
   - Cache Rust target dir + pnpm store.
-  - Artifacts: `.dmg`, `.msi`, `.exe`.
-- **Acceptance**: Push tag → unsigned artifacts uploaded to release.
+  - Artifacts: unsigned `.dmg` + `.app.tar.gz` (mac), unsigned `.msi` + `.exe` (win).
+  - Triggered manually (`workflow_dispatch`) or on `release/*` tag.
+  - Private repo: 2000 free GHA minutes/month is enough for a personal cadence.
+- **Acceptance**: Run workflow → artifacts downloadable from Actions page; both Mac and Windows builds succeed.
 
-#### T9.2: macOS code signing + notarization
-
-- [ ] **Status**: TODO
-- **Complexity**: L
-- **Dependencies**: T9.1, D1
-- **Description**:
-  - Developer ID Application cert.
-  - Hardened runtime entitlements for: JIT (xterm.js doesn't need; default off), camera/mic NO, network YES.
-  - Notarize `.app`, staple to `.dmg`.
-- **Acceptance**: Gatekeeper opens app on first try without warnings.
-
-#### T9.3: Windows Authenticode signing
-
-- [ ] **Status**: TODO
-- **Complexity**: L
-- **Dependencies**: T9.1, D2
-- **Description**:
-  - OV cert (recommended for v0.1) or EV cert.
-  - Sign `.exe` and `.msi` in CI using cert in GitHub Secrets.
-  - **Document SmartScreen reputation behavior** — OV may warn for first weeks.
-- **Acceptance**: Signed artifacts; SmartScreen behavior documented in install guide.
-
-#### T9.4: Auto-updater configuration
-
-- [ ] **Status**: TODO
-- **Complexity**: M
-- **Dependencies**: T9.2, T9.3
-- **Description**:
-  - `tauri-plugin-updater` with signed manifest.
-  - Pubkey embedded in app; private key in GitHub Secrets only.
-- **Acceptance**: Test build → push update → in-app update prompt installs new version.
-
-#### T9.5: Update server
-
-- [ ] **Status**: TODO
-- **Complexity**: M
-- **Dependencies**: T9.4
-- **Description**:
-  - GitHub Releases as update source (cheapest, simplest).
-  - `latest.json` manifest auto-generated by CI on each release.
-- **Acceptance**: App polls manifest; version comparison correct.
-
-#### T9.6: Versioning automation
+#### T9.2: Local build documentation
 
 - [ ] **Status**: TODO
 - **Complexity**: S
 - **Dependencies**: T9.1
 - **Description**:
-  - Semver. Script keeps `Cargo.toml`, `package.json`, `tauri.conf.json` in lockstep.
-- **Acceptance**: `pnpm version patch` updates all three; CI fails on mismatch.
+  - `BUILD.md` with: how to run `pnpm tauri build` on macOS; how to retrieve Windows artifact from GHA; how to install the unsigned build on each OS.
+  - macOS install: open Finder → Applications → Right-click app → Open → Open Anyway (one time per build).
+  - Windows install: run `.msi`, "More info" → "Run anyway" on SmartScreen warning (one time per build).
+- **Acceptance**: Docs reproducible in 5 minutes by following them on a fresh machine.
 
-#### T9.7: Changelog generation
-
-- [ ] **Status**: TODO
-- **Complexity**: S
-- **Dependencies**: T9.6
-- **Description**:
-  - `git-cliff` from conventional commits.
-  - Auto-PR on tag.
-- **Acceptance**: Releases page shows readable changelog without manual editing.
-
-#### T9.8: Download / landing page
+#### T9.3: App icon
 
 - [ ] **Status**: TODO
 - **Complexity**: S
-- **Dependencies**: T9.5, D8
+- **Dependencies**: T1.6
 - **Description**:
-  - Simple page: download buttons, SHA256 checksums, install instructions, screenshot.
-  - Hosted on GitHub Pages (free).
-- **Acceptance**: Page live; checksums match release artifacts.
-
-#### T9.9: Cert + key rotation runbook
-
-- [ ] **Status**: TODO
-- **Complexity**: S
-- **Dependencies**: T9.2, T9.3, T9.4
-- **Description**:
-  - Document: how to renew Apple Dev cert; how to rotate Win cert; how to rotate updater key (requires user re-install).
-  - Calendar reminders 60 days pre-expiry.
-- **Acceptance**: Runbook tested mentally; calendar entries set.
+  - 1024×1024 master, generate iconset for both platforms via `tauri icon`.
+  - Tauri config wires icons.
+- **Acceptance**: Dock/taskbar shows the icon; install bundles include all sizes. (Moved here from T8.8 since it's a build-bundling concern.)
 
 ---
 
-### Phase 10 — QA, Performance Benchmarks & Launch
+### Phase 10 — Personal validation & v0.1 ready
 
-**Goal:** Validate targets, fix regressions, dogfood, release v0.1.0.
-**Estimate:** 2 weeks (80h).
+**Goal:** Validate it's stable enough to be your daily driver. No public release, no QA matrix.
+**Estimate:** 3–5 days (24–40h).
 
-#### T10.1: QA matrix
-
-- [ ] **Status**: TODO
-- **Complexity**: M
-- **Dependencies**: T9.5
-- **Description**:
-  - macOS 12, 14, 15 (Apple Silicon + Intel).
-  - Windows 10 1809, Windows 11 23H2 (x64).
-  - Smoke test script per platform; results committed.
-- **Acceptance**: Pass criteria documented in `QA_MATRIX.md`.
+#### ~~T10.1: QA matrix~~ — DROPPED (only your two machines matter; cross-OS verified by GHA matrix in T9.1)
 
 #### T10.2: Cold start benchmark
 
 - [ ] **Status**: TODO
 - **Complexity**: S
-- **Dependencies**: T10.1
+- **Dependencies**: T9.1
 - **Description**:
-  - `hyperfine --warmup 3 -r 10` on signed binaries.
+  - `hyperfine --warmup 3 -r 10` on built binaries on your Mac and Windows machines.
   - Target: < 800ms (baseline), < 500ms (stretch).
-- **Acceptance**: Numbers in repo (`benches/cold_start.md`); regressions caught in CI.
+- **Acceptance**: Numbers recorded in `benches/cold_start.md`. If over 800ms, profile and fix before declaring v0.1 ready.
 
 #### T10.3: RAM benchmark
 
 - [ ] **Status**: TODO
 - **Complexity**: S
-- **Dependencies**: T10.1
+- **Dependencies**: T9.1
 - **Description**:
   - 10 idle PTYs: target < 500MB RSS.
   - 10 active (light load): target < 800MB RSS.
-  - Use `ps`/`Get-Process` sampler script.
-- **Acceptance**: Results in `benches/ram.md`.
+  - Use `ps`/`Get-Process` sampler script on each machine.
+- **Acceptance**: Results in `benches/ram.md`. If over 800MB active, investigate before v0.1.
 
 #### T10.4: Output stress test
 
 - [ ] **Status**: TODO
 - **Complexity**: M
-- **Dependencies**: T10.1, T2.16
+- **Dependencies**: T9.1, T2.16
 - **Description**:
   - `cat 1gb-random.bin` in active terminal.
   - Verify: 60fps maintained, no main-thread frame > 16ms, no crash, drops counted.
@@ -1331,74 +1252,49 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 - [ ] **Status**: TODO
 - **Complexity**: M
-- **Dependencies**: T10.1
+- **Dependencies**: T9.1
 - **Description**:
   - 5 sessions open for 24h with periodic small output.
-  - Track RSS growth, file handles (`lsof`), GPU memory.
+  - Track RSS growth, file handles (`lsof` / `handle.exe`), GPU memory.
 - **Acceptance**: RSS growth < 10% over 24h; no FD/handle leaks.
 
 #### T10.6: Crash recovery
 
 - [ ] **Status**: TODO
 - **Complexity**: L
-- **Dependencies**: T10.1, T2.12
+- **Dependencies**: T9.1, T2.12
 - **Description**:
   - Force-kill mid-session.
   - Relaunch: layout restored, sessions re-spawn in same cwd/CLI (per §3 model).
 - **Acceptance**: After hard kill, relaunch shows same panes within 1s.
 
-#### T10.7: Accessibility pass
+#### ~~T10.7: Accessibility pass~~ — DROPPED (personal-use; revisit only if ever public)
 
-- [ ] **Status**: TODO
-- **Complexity**: M
-- **Dependencies**: T8.7
-- **Description**:
-  - Keyboard-only nav for every feature.
-  - Screen reader sanity check on key screens (VoiceOver, Narrator).
-  - WCAG 2.1 AA color contrast check.
-- **Acceptance**: Every action reachable without mouse; obvious focus states.
-
-#### T10.8: Dogfood week
+#### T10.7: Continuous dogfooding (replaces T10.8)
 
 - [ ] **Status**: TODO
 - **Complexity**: S
-- **Dependencies**: T10.1
+- **Dependencies**: T6.1 (sidebar usable)
 - **Description**:
-  - Use as daily driver for 1 week minimum.
-  - Log all friction in GitHub Issues; tag `dogfood`.
-  - Triage before tagging v0.1.0.
-- **Acceptance**: ≥ 7 consecutive days of use; all P0 dogfood issues fixed.
+  - Use Work Station as your daily-driver from the moment it's barely usable (~end of Phase 6).
+  - Keep a `FRICTION.md` (or GitHub issue list in private repo) for every paper-cut.
+  - Triage the list before declaring v0.1 ready.
+- **Acceptance**: At least 14 consecutive days of dogfood use; FRICTION.md drained of "must fix" entries.
 
-#### T10.9: v0.1.0 release
+#### T10.8: v0.1 ready milestone (replaces T10.9)
 
 - [ ] **Status**: TODO
 - **Complexity**: S
-- **Dependencies**: T10.8
+- **Dependencies**: T10.7
 - **Description**:
-  - Tag `v0.1.0`, publish GitHub Release with signed installers.
-  - Announce: README badge, HN/Reddit if desired.
-- **Acceptance**: Public download links work; checksums validate.
+  - Tag `v0.1` in git (private repo).
+  - Build signed-or-not artifacts from GHA + install on both machines.
+  - Quit your old terminal app for a week and verify Work Station holds up.
+- **Acceptance**: Old terminal app uninstalled (or at least undocked) for 7 consecutive days.
 
-#### T10.10: Post-launch on-call window
+#### ~~T10.9, T10.10, T10.11~~ — DROPPED
 
-- [ ] **Status**: TODO
-- **Complexity**: S
-- **Dependencies**: T10.9
-- **Description**:
-  - First 7 days: monitor Sentry daily, triage GitHub issues within 24h.
-  - First patch release within 14 days if any P0 bug found.
-- **Acceptance**: No P0 bugs open at end of week 2.
-
-#### T10.11: Linux release (DEFERRED)
-
-- [ ] **Status**: STRETCH
-- **Complexity**: L
-- **Dependencies**: T10.9
-- **Description**:
-  - AppImage + .deb builds.
-  - QA on Ubuntu 22.04 LTS, Fedora 40.
-  - Defer until v0.1 macOS+Windows is stable.
-- **Acceptance**: Not in v0.1 scope.
+> T10.9 (public release), T10.10 (post-launch on-call), T10.11 (Linux release) are not personal-use concerns. Linux is parked in Phase 11 stretch.
 
 ---
 
@@ -1421,17 +1317,16 @@ Explicitly out of v0.1 scope. Reconsider after dogfood data + user feedback.
 
 ---
 
-## 11. Definition of Done — v0.1.0
+## 11. Definition of Done — v0.1 (personal-use)
 
-A v0.1.0 ships when **all** of these are true:
+You declare v0.1 when **all** of these are true on **both** of your machines (Mac + Windows):
 
-- [ ] All Phase 1–10 tasks marked DONE (excluding STRETCH).
-- [ ] All decisions D1–D8 locked in `DECISIONS.md`.
-- [ ] Cold start < 800ms on baseline machine (T10.2).
+- [ ] All non-DROPPED Phase 1–10 tasks marked DONE.
+- [ ] Cold start < 800ms (T10.2).
 - [ ] RAM < 500MB with 10 idle PTYs (T10.3).
-- [ ] 1GB output stress passes (T10.4).
-- [ ] 7 consecutive days of dogfood with no P0 issues open (T10.8).
-- [ ] Signed installers for macOS + Windows in GitHub Release (T9.2, T9.3, T10.9).
-- [ ] Auto-update verified end-to-end (T9.4).
-- [ ] Risk register reviewed; all risks rated High mitigated or accepted (§7).
-- [ ] Visual + interaction parity with `work-station-design/` prototype (§1.5) — every component implemented matches the prototype unless an explicit deviation is documented in this plan.
+- [ ] 1GB output stress passes — no freeze, no crash (T10.4).
+- [ ] 24h leak test passes — RSS growth < 10% (T10.5).
+- [ ] Crash recovery works — quit, kill, or panic → relaunch restores layout (T10.6).
+- [ ] 14 consecutive days of dogfood use with no must-fix items in `FRICTION.md` (T10.7).
+- [ ] Old terminal app undocked / uninstalled for 7 consecutive days (T10.8).
+- [ ] Visual + interaction parity with `work-station-design/` prototype (§1.5) — every implemented component matches the prototype, except where the plan explicitly says otherwise (e.g. Privacy toggles disabled).
