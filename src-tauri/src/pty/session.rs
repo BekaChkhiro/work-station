@@ -2,11 +2,24 @@ use bytes::Bytes;
 use portable_pty::{Child, MasterPty};
 use std::io::Write;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::ipc::InvokeResponseBody;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::{sleep, Duration};
 
 use crate::pty::scrollback::ScrollbackBuffer;
+
+/// Metadata for an active PTY session.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub id: uuid::Uuid,
+    pub pid: u32,
+    pub command: String,
+    pub cwd: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub created_at: u64,
+}
 
 /// A single PTY session.
 ///
@@ -15,6 +28,11 @@ use crate::pty::scrollback::ScrollbackBuffer;
 pub struct PtySession {
     pub id: uuid::Uuid,
     pub pid: u32,
+    pub command: String,
+    pub cwd: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub created_at: u64,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -27,6 +45,10 @@ impl PtySession {
     pub fn new(
         id: uuid::Uuid,
         pid: u32,
+        command: String,
+        cwd: String,
+        cols: u16,
+        rows: u16,
         master: Box<dyn MasterPty + Send>,
         child: Box<dyn Child + Send>,
         stdin: Box<dyn Write + Send>,
@@ -34,15 +56,37 @@ impl PtySession {
         frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>>,
         scrollback: Arc<std::sync::Mutex<ScrollbackBuffer>>,
     ) -> Self {
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         Self {
             id,
             pid,
+            command,
+            cwd,
+            cols,
+            rows,
+            created_at,
             master,
             child,
             stdin: Arc::new(Mutex::new(stdin)),
             output_tx,
             frontend_channels,
             scrollback,
+        }
+    }
+
+    /// Return a snapshot of session metadata.
+    pub fn info(&self) -> SessionInfo {
+        SessionInfo {
+            id: self.id,
+            pid: self.pid,
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            cols: self.cols,
+            rows: self.rows,
+            created_at: self.created_at,
         }
     }
 
@@ -61,13 +105,16 @@ impl PtySession {
     }
 
     /// Resize the PTY.
-    pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+    pub fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
         self.master.resize(portable_pty::PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
-        })
+        })?;
+        self.cols = cols;
+        self.rows = rows;
+        Ok(())
     }
 
     /// Clone a reader for the PTY output.

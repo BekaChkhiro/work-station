@@ -15,7 +15,7 @@ use tokio::task;
 use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
-use super::session::PtySession;
+use super::session::{PtySession, SessionInfo};
 use crate::pty::scrollback::ScrollbackBuffer;
 
 /// Central registry for all active PTY sessions.
@@ -68,9 +68,8 @@ impl PtyManager {
         let writer = master.take_writer()?;
 
         let (output_tx, _) = broadcast::channel::<Bytes>(1024);
-        let frontend_channels: Arc<
-            std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>,
-        > = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let frontend_channels: Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<InvokeResponseBody>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let scrollback = Arc::new(std::sync::Mutex::new(ScrollbackBuffer::default()));
 
@@ -187,6 +186,10 @@ impl PtyManager {
         let session = PtySession::new(
             Uuid::new_v4(),
             pid,
+            command.to_string(),
+            cwd.to_string(),
+            cols,
+            rows,
             master,
             child,
             writer,
@@ -222,6 +225,21 @@ impl PtyManager {
         self.sessions.lock().await.keys().copied().collect()
     }
 
+    /// List metadata for all active sessions.
+    pub async fn list_sessions(&self) -> Vec<SessionInfo> {
+        self.sessions
+            .lock()
+            .await
+            .values()
+            .map(|s| s.info())
+            .collect()
+    }
+
+    /// Get metadata for a single session.
+    pub async fn session_info(&self, id: &Uuid) -> Option<SessionInfo> {
+        self.sessions.lock().await.get(id).map(|s| s.info())
+    }
+
     /// Write raw bytes to a session's stdin.
     pub async fn write(&self, id: &Uuid, data: &[u8]) -> Option<std::io::Result<()>> {
         let stdin = {
@@ -235,8 +253,8 @@ impl PtyManager {
 
     /// Resize a session's PTY.
     pub async fn resize(&self, id: &Uuid, cols: u16, rows: u16) -> Option<anyhow::Result<()>> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions.get(id)?;
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions.get_mut(id)?;
         Some(session.resize(cols, rows))
     }
 
