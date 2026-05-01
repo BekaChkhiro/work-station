@@ -1,3 +1,11 @@
+// Module skeleton (T1.5). Each module is empty until its feature phase fills it in.
+mod cli;
+mod commands;
+mod db;
+mod ipc;
+mod menu;
+mod pty;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
