@@ -1,23 +1,27 @@
 //! Output stress test — validates backend throughput and memory bounds
 //! under high-volume PTY output.
 //!
-//! Simulates the equivalent of `cat large.log` (default 100 MiB,
-//! configurable up to 1 GiB via env) and asserts:
+//! Simulates the equivalent of `cat large.log` and asserts:
 //!
 //! 1. All bytes are received by the broadcast consumer.
-//! 2. Throughput stays above a minimum threshold (default 5 MB/s).
+//! 2. Throughput stays above a minimum threshold.
 //! 3. Scrollback buffer is capped at its configured limit (default 1 MiB).
+//!
+//! Three test variants are provided:
+//! - `stress_1gb_output` — **T10.4** dedicated 1 GiB stress test
+//! - `stress_high_volume_output` — configurable size (default 100 MiB for CI)
+//! - `stress_rapid_small_lines` — burst of 10 000 short lines
 //!
 //! # Environment variables
 //!
 //! | Variable | Default | Description |
 //! |----------|---------|-------------|
-//! | `STRESS_TEST_SIZE_MB` | 100 | Output size in MiB |
+//! | `STRESS_TEST_SIZE_MB` | 100 | Output size in MiB (high_volume only) |
 //! | `STRESS_TEST_MIN_MBPS` | 5.0 | Minimum acceptable throughput |
 //!
-//! To run the full 1 GB test locally:
+//! To run the full stress suite locally:
 //! ```bash
-//! STRESS_TEST_SIZE_MB=1024 cargo test --test output_stress -- --nocapture
+//! cargo test --test output_stress -- --nocapture
 //! ```
 
 use std::collections::HashMap;
@@ -94,6 +98,94 @@ async fn collect_output(
 
 // ------------------------------------------------------------------
 // Stress test
+// ------------------------------------------------------------------
+
+// ------------------------------------------------------------------
+// 1 GiB dedicated stress test (T10.4)
+// ------------------------------------------------------------------
+
+#[tokio::test]
+async fn stress_1gb_output() {
+    let size_mb: usize = 1024;
+    let min_mbps: f64 = 5.0;
+
+    let total_bytes = size_mb * 1024 * 1024;
+    let timeout_sec = 180; // 3 minutes is generous for 1 GiB
+
+    let file_path = create_stress_file(total_bytes);
+
+    let mgr = PtyManager::new();
+    let shell = default_shell();
+    let cwd = file_path.parent().unwrap().to_string_lossy().to_string();
+
+    let id = mgr
+        .spawn(&cwd, shell, HashMap::new(), 80, 24)
+        .await
+        .expect("spawn should succeed");
+
+    let mut rx = mgr.subscribe(&id).await.expect("subscribe should succeed");
+
+    // Drain any initial banner / prompt output.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = collect_output(&mut rx, 1024 * 1024, 2).await;
+
+    let cat_cmd = if cfg!(windows) {
+        format!("type {}\r\n", file_path.file_name().unwrap().to_string_lossy())
+    } else {
+        format!("cat {}\n", file_path.file_name().unwrap().to_string_lossy())
+    };
+
+    mgr.write(&id, cat_cmd.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let (received, elapsed) = collect_output(&mut rx, total_bytes, timeout_sec).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let scrollback = mgr.get_scrollback(&id, 0, usize::MAX).await.unwrap_or_default();
+    let scrollback_bytes: usize = scrollback.iter().map(|b| b.len()).sum();
+
+    let _ = mgr.kill(&id).await;
+    let _ = std::fs::remove_file(&file_path);
+
+    let received_bytes = received.len();
+    let throughput_mbps = (received_bytes as f64 / elapsed.as_secs_f64()) / (1024.0 * 1024.0);
+
+    println!(
+        "1gb stress test: size={}MB received={}B elapsed={:.2}s throughput={:.1}MB/s scrollback={}B",
+        size_mb, received_bytes, elapsed.as_secs_f64(), throughput_mbps, scrollback_bytes,
+    );
+
+    assert!(
+        received_bytes >= total_bytes,
+        "expected at least {} bytes of file data, got {} (throughput {:.1} MB/s)",
+        total_bytes,
+        received_bytes,
+        throughput_mbps
+    );
+
+    assert!(
+        throughput_mbps >= min_mbps,
+        "throughput too low: {:.1} MB/s (minimum {} MB/s)",
+        throughput_mbps,
+        min_mbps
+    );
+
+    let max_scrollback = ScrollbackBuffer::default().max_bytes();
+    let bytes_per_tick = (throughput_mbps * 1024.0 * 1024.0 * 0.016) as usize;
+    let allowed_headroom = (bytes_per_tick * 2).max(65536);
+    assert!(
+        scrollback_bytes <= max_scrollback + allowed_headroom,
+        "scrollback unbounded: {} bytes (soft limit ~{} bytes, headroom {} bytes)",
+        scrollback_bytes,
+        max_scrollback,
+        allowed_headroom
+    );
+}
+
+// ------------------------------------------------------------------
+// Configurable high-volume stress test (default 100 MiB for CI)
 // ------------------------------------------------------------------
 
 #[tokio::test]
