@@ -350,7 +350,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 - **Dependencies**: T1.4
 - **Description**:
   - Solid `ErrorBoundary` at app root + at each major panel (sidebar, terminal pane, layout tree).
-  - Boundaries report to crash reporter (T8.11) and show recoverable UI.
+  - Boundaries log full error + stack to `tracing` (T1.9) and show recoverable UI fallback.
 - **Acceptance**: Throwing in a child component shows fallback UI without killing the app.
 
 #### T1.9: Logging infrastructure
@@ -580,7 +580,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 - **Complexity**: S
 - **Dependencies**: T3.1
 - **Description**:
-  - `app_settings(key TEXT PK, value TEXT)` for theme, hotkeys, last-active project, telemetry-opt-in, scrollback size.
+  - `app_settings(key TEXT PK, value TEXT)` for theme, hotkeys, last-active project, scrollback size, default fallback CLI.
 - **Acceptance**: Get/set wrapper handles type coercion safely.
 
 #### T3.5: Migration runner
@@ -1069,10 +1069,10 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 ---
 
-### Phase 8 — Polish, Telemetry, Settings
+### Phase 8 — Polish & Settings
 
-**Goal:** Feel native and fast on both platforms; observability for launch.
-**Estimate:** 2 weeks (80h).
+**Goal:** Feel native and fast on both platforms.
+**Estimate:** 1.5 weeks (60h). Telemetry + crash reporter dropped per personal-use scope.
 
 #### T8.1: Hotkey registry
 
@@ -1270,7 +1270,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### ~~T10.7: Accessibility pass~~ — DROPPED (personal-use; revisit only if ever public)
 
-#### T10.7: Continuous dogfooding (replaces T10.8)
+#### T10.8: Continuous dogfooding
 
 - [ ] **Status**: TODO
 - **Complexity**: S
@@ -1281,20 +1281,20 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
   - Triage the list before declaring v0.1 ready.
 - **Acceptance**: At least 14 consecutive days of dogfood use; FRICTION.md drained of "must fix" entries.
 
-#### T10.8: v0.1 ready milestone (replaces T10.9)
+#### T10.9: v0.1 ready milestone
 
 - [ ] **Status**: TODO
 - **Complexity**: S
-- **Dependencies**: T10.7
+- **Dependencies**: T10.8
 - **Description**:
   - Tag `v0.1` in git (private repo).
-  - Build signed-or-not artifacts from GHA + install on both machines.
+  - Build artifacts from GHA + install on both machines.
   - Quit your old terminal app for a week and verify Work Station holds up.
 - **Acceptance**: Old terminal app uninstalled (or at least undocked) for 7 consecutive days.
 
-#### ~~T10.9, T10.10, T10.11~~ — DROPPED
+#### ~~T10.10, T10.11~~ — DROPPED
 
-> T10.9 (public release), T10.10 (post-launch on-call), T10.11 (Linux release) are not personal-use concerns. Linux is parked in Phase 11 stretch.
+> T10.10 (post-launch on-call), T10.11 (Linux release) are not personal-use concerns. Linux is parked in Phase 11 stretch.
 
 ---
 
@@ -1327,6 +1327,6 @@ You declare v0.1 when **all** of these are true on **both** of your machines (Ma
 - [ ] 1GB output stress passes — no freeze, no crash (T10.4).
 - [ ] 24h leak test passes — RSS growth < 10% (T10.5).
 - [ ] Crash recovery works — quit, kill, or panic → relaunch restores layout (T10.6).
-- [ ] 14 consecutive days of dogfood use with no must-fix items in `FRICTION.md` (T10.7).
-- [ ] Old terminal app undocked / uninstalled for 7 consecutive days (T10.8).
+- [ ] 14 consecutive days of dogfood use with no must-fix items in `FRICTION.md` (T10.8).
+- [ ] Old terminal app undocked / uninstalled for 7 consecutive days (T10.9).
 - [ ] Visual + interaction parity with `work-station-design/` prototype (§1.5) — every implemented component matches the prototype, except where the plan explicitly says otherwise (e.g. Privacy toggles disabled).
