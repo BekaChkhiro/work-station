@@ -1,0 +1,26 @@
+{
+  "name": "work-station",
+  "version": "0.1.0",
+  "description": "Cross-platform desktop hub for managing multiple Claude Code / Kimi / Codex terminal sessions across projects.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "vite",
+    "dev": "vite",
+    "build": "vite build",
+    "serve": "vite preview",
+    "tauri": "tauri"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@tauri-apps/api": "2.11.0",
+    "@tauri-apps/plugin-opener": "2.5.3",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.0",
+    "typescript": "5.6.3",
+    "vite": "6.4.2",
+    "vite-plugin-solid": "2.11.12"
+  }
+}
