@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Pre-commit gate (T1.3): lint + format both sides on staged files.
+# CI runs the full suite (clippy --all-targets, full eslint, full prettier);
+# this hook is intentionally fast and scoped to staged changes.
+#
+# Bypass: `git commit --no-verify` (use sparingly).
+
+set -eu
+
+# Move to repo root so relative paths work regardless of where `git commit` runs.
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+staged() {
+    git diff --cached --name-only --diff-filter=ACMR
+}
+
+fail=0
+
+# ── Frontend: prettier --check + eslint on staged TS/JS/JSON/CSS/HTML/MD ──
+fe_files=$(staged | grep -E '\.(ts|tsx|js|jsx|cjs|mjs|json|css|html|md)$' || true)
+if [ -n "$fe_files" ]; then
+    printf '▶ prettier --check (staged frontend files)\n'
+    if ! echo "$fe_files" | xargs pnpm exec prettier --check; then
+        echo "✗ prettier found unformatted files. Run: pnpm format" >&2
+        fail=1
+    fi
+
+    lint_files=$(echo "$fe_files" | grep -E '\.(ts|tsx|js|jsx|cjs|mjs)$' || true)
+    if [ -n "$lint_files" ]; then
+        printf '▶ eslint (staged JS/TS files)\n'
+        if ! echo "$lint_files" | xargs pnpm exec eslint; then
+            echo "✗ eslint reported errors. Fix or run: pnpm lint:fix" >&2
+            fail=1
+        fi
+    fi
+fi
+
+# ── Rust: cargo fmt --check on staged .rs files ──────────────────────────
+rust_files=$(staged | grep -E '\.rs$' || true)
+if [ -n "$rust_files" ]; then
+    printf '▶ cargo fmt --check (staged Rust files)\n'
+    if ! (cd src-tauri && cargo fmt --check); then
+        echo "✗ rustfmt reported diffs. Run: (cd src-tauri && cargo fmt)" >&2
+        fail=1
+    fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Pre-commit checks failed. Bypass with --no-verify only when truly necessary." >&2
+    exit 1
+fi

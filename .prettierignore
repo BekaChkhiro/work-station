@@ -1,0 +1,14 @@
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+src-tauri/Cargo.lock
+work-station-design
+pnpm-lock.yaml
+*.min.js
+*.min.css
+
+# Long-form authored docs — preserve manual formatting (tables, alignment)
+PROJECT_PLAN.md
+DESIGN_PROMPT.md
+DESIGN_PROMPT_PHASE2.md

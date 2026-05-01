@@ -33,6 +33,20 @@ The first `pnpm tauri dev` compiles the Tauri 2.x dependency tree (~2–4 min). 
 
 Tauri and core frontend deps are pinned to exact versions (no `^` / no `~`). Bumps go through a manual PR.
 
+### Quality scripts
+
+| Command                        | What it does                                                        |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `pnpm typecheck`               | `tsc --noEmit` — strict TS (incl. `noUncheckedIndexedAccess`)       |
+| `pnpm lint`                    | ESLint v9 flat config (typescript-eslint strict + Solid + Prettier) |
+| `pnpm lint:fix`                | ESLint with auto-fix                                                |
+| `pnpm format:check`            | Prettier check across the repo                                      |
+| `pnpm format`                  | Prettier write                                                      |
+| `cargo fmt --check`            | rustfmt gate (run inside `src-tauri/`)                              |
+| `cargo clippy ... -D warnings` | clippy::all + clippy::pedantic, errors-as-failures                  |
+
+A `.githooks/pre-commit` hook runs prettier + eslint on staged frontend files and `cargo fmt --check` on staged Rust. Bypass with `--no-verify` only when truly necessary.
+
 ## Layout
 
 ```
