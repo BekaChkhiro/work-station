@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Conventional Commits validator — see https://www.conventionalcommits.org/
+# Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+# Format: <type>(<scope>)?!?: <subject>
+#   examples:
+#     feat: add quick switcher
+#     fix(pty): handle UTF-8 split across reads
+#     refactor!: rename Workspace to Project
+
+set -eu
+
+msg_file="$1"
+first_line=$(head -n1 "$msg_file")
+
+# Skip merge / fixup / revert auto-generated subjects and empty messages
+case "$first_line" in
+    "Merge "*|"Revert "*|"fixup!"*|"squash!"*|"")
+        exit 0
+        ;;
+esac
+
+pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._-]+\))?!?: .+'
+
+if ! [[ "$first_line" =~ $pattern ]]; then
+    cat >&2 <<EOF
+✗ Commit rejected: subject does not match Conventional Commits.
+
+  Got:    $first_line
+  Expect: <type>(<scope>)?!?: <subject>
+  Types:  feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+
+  Examples:
+    feat: add quick switcher
+    fix(pty): handle UTF-8 split across reads
+    refactor!: rename Workspace to Project
+
+EOF
+    exit 1
+fi
+
+if [ ${#first_line} -gt 72 ]; then
+    echo "✗ Commit rejected: subject line is ${#first_line} chars (max 72)." >&2
+    exit 1
+fi
