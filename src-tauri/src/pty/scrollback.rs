@@ -48,6 +48,11 @@ impl ScrollbackBuffer {
         self.current_bytes
     }
 
+    /// Maximum byte limit for this buffer.
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
     /// Number of chunks stored.
     pub fn len_chunks(&self) -> usize {
         self.buffer.len()

@@ -50,10 +50,7 @@ pub async fn project_update(
 
 /// Delete a project by ID.
 #[tauri::command]
-pub async fn project_delete(
-    id: String,
-    db: State<'_, DbInstances>,
-) -> Result<(), String> {
+pub async fn project_delete(id: String, db: State<'_, DbInstances>) -> Result<(), String> {
     let id = id.parse::<i64>().map_err(|_| "Invalid project ID")?;
     let pool = get_db_pool(&db).await?;
     delete_project(&pool, id).await

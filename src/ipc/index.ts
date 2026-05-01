@@ -12,6 +12,7 @@ export interface Project {
   icon: string | null;
   default_cli: string | null;
   env_json: string | null;
+  startup_commands: string | null;
   position: number;
   created_at: string;
 }
@@ -199,6 +200,7 @@ export async function projectUpdate(
     icon?: string | null;
     default_cli?: string | null;
     env_json?: string | null;
+    startup_commands?: string | null;
     position?: number;
   }
 ): Promise<Project> {

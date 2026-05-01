@@ -1,10 +1,11 @@
-import { createSignal, For } from "solid-js";
+import { createSignal, For, onCleanup, onMount } from "solid-js";
 import { Button, Dialog, Tabs } from "@kobalte/core";
 import { theme, setTheme, toggleTheme } from "./stores/theme";
 import Sidebar from "./components/Sidebar";
 import TitleBar from "./components/TitleBar";
 import { isMac } from "./utils/platform";
 import UpdateChecker from "./components/UpdateChecker";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /*
  * Design System Showcase — Work Station
@@ -28,6 +29,48 @@ const SPACING_STEPS = [1, 2, 3, 4, 5, 6, 8, 10, 12];
 
 export default function App() {
   const [dialogOpen, setDialogOpen] = createSignal(false);
+
+  onMount(() => {
+    let unlisten: UnlistenFn | undefined;
+
+    listen("menu:event", (event) => {
+      const action = (event.payload as { action: string }).action;
+      switch (action) {
+        case "toggle-theme":
+          toggleTheme();
+          break;
+        case "reload":
+          window.location.reload();
+          break;
+        case "new-terminal":
+        case "new-terminal-tab":
+        case "close-pane":
+        case "new-project":
+        case "open-project":
+        case "clear-terminal":
+        case "zoom-in":
+        case "zoom-out":
+        case "zoom-reset":
+        case "bring-all-front":
+        case "help":
+        case "check-updates":
+        case "preferences":
+          // TODO: wire up as corresponding frontend features land
+          console.log("[menu] unimplemented action:", action);
+          break;
+        default:
+          console.log("[menu] unknown action:", action);
+      }
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {
+        // Ignore when running outside Tauri (e.g. vite dev in browser).
+      });
+
+    onCleanup(() => unlisten?.());
+  });
 
   return (
     <div

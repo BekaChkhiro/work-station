@@ -8,4 +8,4 @@ pub mod session;
 
 pub use manager::PtyManager;
 pub use scrollback::ScrollbackBuffer;
-pub use session::PtySession;
+pub use session::{PtySession, SessionInfo};

@@ -8,7 +8,7 @@
 
 import type { HotkeyAction } from "../types/hotkey";
 import { isMac } from "../types/hotkey";
-import { ptyKill, ptySpawn } from "../ipc";
+import { ptyKill, ptySpawn, ptyWrite } from "../ipc";
 import {
   getActivePaneId,
   getProjectLayout,
@@ -67,6 +67,22 @@ function spawnForActiveProject(direction?: "vertical" | "horizontal"): void {
         }
       }
       setActivePane(project.id, sessionId);
+
+      // Run per-project startup commands if configured
+      if (project.startup_commands) {
+        const commands = project.startup_commands
+          .split("\n")
+          .map((c) => c.trim())
+          .filter((c) => c.length > 0);
+        commands.forEach((cmd, i) => {
+          setTimeout(() => {
+            const data = new TextEncoder().encode(cmd + "\r\n");
+            ptyWrite(sessionId, data).catch((err: unknown) => {
+              console.error("[hotkey] Failed to write startup command:", err);
+            });
+          }, 100 * (i + 1));
+        });
+      }
     })
     .catch((err: unknown) => {
       console.error("[hotkey] Failed to spawn terminal:", err);

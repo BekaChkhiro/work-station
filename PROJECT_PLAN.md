@@ -686,7 +686,7 @@ Make it feel native and fast on both platforms.
 
 #### T8.5: Native menu bar (macOS)
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: Medium
 - **Dependencies**: T8.2
 - **Description**:

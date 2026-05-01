@@ -46,6 +46,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [color, setColor] = createSignal(untrack(() => props.project.color ?? ""));
   const [icon, setIcon] = createSignal(untrack(() => props.project.icon ?? ""));
   const [defaultCli, setDefaultCli] = createSignal(untrack(() => props.project.default_cli ?? ""));
+  const [startupCommands, setStartupCommands] = createSignal(untrack(() => props.project.startup_commands ?? ""));
   const [envEntries, setEnvEntries] = createSignal<EnvEntry[]>(untrack(() => parseEnv(props.project.env_json)));
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -60,6 +61,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         color: color().trim() || null,
         icon: icon().trim() || null,
         default_cli: defaultCli().trim() || null,
+        startup_commands: startupCommands().trim() || null,
         env_json: serializeEnv(envEntries()),
       });
       props.onOpenChange(false);
@@ -158,6 +160,19 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                   placeholder="/bin/zsh"
                   class="rounded-md border border-surface-border bg-surface-base px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-primary-500 focus:outline-none"
                 />
+              </div>
+
+              {/* Startup Commands */}
+              <div class="flex flex-col gap-1">
+                <label class="text-xs font-medium text-text-secondary">Startup Commands</label>
+                <textarea
+                  value={startupCommands()}
+                  onInput={(e) => setStartupCommands(e.currentTarget.value)}
+                  placeholder="nvm use 20&#10;source .env"
+                  rows={3}
+                  class="resize-none rounded-md border border-surface-border bg-surface-base px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-primary-500 focus:outline-none"
+                />
+                <p class="text-xs text-text-tertiary">One command per line. Run automatically in each new terminal.</p>
               </div>
 
               {/* Env vars */}

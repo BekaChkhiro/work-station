@@ -11,6 +11,7 @@ pub struct Project {
     pub icon: Option<String>,
     pub default_cli: Option<String>,
     pub env_json: Option<String>,
+    pub startup_commands: Option<String>,
     pub position: i32,
     pub created_at: String,
 }
@@ -25,6 +26,7 @@ pub struct ProjectResponse {
     pub icon: Option<String>,
     pub default_cli: Option<String>,
     pub env_json: Option<String>,
+    pub startup_commands: Option<String>,
     pub position: i32,
     pub created_at: String,
 }
@@ -39,6 +41,7 @@ impl From<Project> for ProjectResponse {
             icon: p.icon,
             default_cli: p.default_cli,
             env_json: p.env_json,
+            startup_commands: p.startup_commands,
             position: p.position,
             created_at: p.created_at,
         }
@@ -62,6 +65,7 @@ pub struct UpdateProjectInput {
     pub icon: Option<String>,
     pub default_cli: Option<String>,
     pub env_json: Option<String>,
+    pub startup_commands: Option<String>,
     pub position: Option<i32>,
 }
 
@@ -89,9 +93,11 @@ async fn validate_path(path: &str) -> Result<(), String> {
 }
 
 /// List all projects ordered by position, then creation time.
-pub async fn list_projects(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<Vec<ProjectResponse>, String> {
+pub async fn list_projects(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+) -> Result<Vec<ProjectResponse>, String> {
     let projects: Vec<Project> = sqlx::query_as::<_, Project>(
-        "SELECT id, name, path, color, icon, default_cli, env_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands, position, created_at
          FROM projects
          ORDER BY position ASC, created_at ASC",
     )
@@ -139,7 +145,7 @@ pub async fn create_project(
     let id = result.last_insert_rowid();
 
     let project: Project = sqlx::query_as(
-        "SELECT id, name, path, color, icon, default_cli, env_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands, position, created_at
          FROM projects WHERE id = ?",
     )
     .bind(id)
@@ -157,7 +163,7 @@ pub async fn update_project(
     input: UpdateProjectInput,
 ) -> Result<ProjectResponse, String> {
     let existing: Option<Project> = sqlx::query_as(
-        "SELECT id, name, path, color, icon, default_cli, env_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands, position, created_at
          FROM projects WHERE id = ?",
     )
     .bind(id)
@@ -199,11 +205,12 @@ pub async fn update_project(
     let icon = input.icon.or(existing.icon);
     let default_cli = input.default_cli.or(existing.default_cli);
     let env_json = input.env_json.or(existing.env_json);
+    let startup_commands = input.startup_commands.or(existing.startup_commands);
     let position = input.position.unwrap_or(existing.position);
 
     sqlx::query(
         "UPDATE projects
-         SET name = ?, path = ?, color = ?, icon = ?, default_cli = ?, env_json = ?, position = ?
+         SET name = ?, path = ?, color = ?, icon = ?, default_cli = ?, env_json = ?, startup_commands = ?, position = ?
          WHERE id = ?",
     )
     .bind(&name)
@@ -212,6 +219,7 @@ pub async fn update_project(
     .bind(&icon)
     .bind(&default_cli)
     .bind(&env_json)
+    .bind(&startup_commands)
     .bind(position)
     .bind(id)
     .execute(pool)
@@ -219,7 +227,7 @@ pub async fn update_project(
     .map_err(|e| e.to_string())?;
 
     let project: Project = sqlx::query_as(
-        "SELECT id, name, path, color, icon, default_cli, env_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands, position, created_at
          FROM projects WHERE id = ?",
     )
     .bind(id)
