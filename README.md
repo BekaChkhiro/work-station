@@ -18,12 +18,20 @@ v0.1 in progress — see Phase tracker in `PROJECT_PLAN.md`.
 
 ## Develop
 
-> Tauri toolchain (Rust 1.77+, pnpm, platform deps) is set up in T1.2.
+Toolchain (macOS):
+
+- Rust 1.77+ (stable) — `rustup install stable`
+- Node 20+ and pnpm 10+
+- Xcode Command Line Tools — `xcode-select --install`
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
+
+The first `pnpm tauri dev` compiles the Tauri 2.x dependency tree (~2–4 min). Subsequent runs are incremental. Vite HMR is wired — edits to `src/**` reload in place.
+
+Tauri and core frontend deps are pinned to exact versions (no `^` / no `~`). Bumps go through a manual PR.
 
 ## Layout
 
@@ -33,8 +41,19 @@ work-station/
 ├── DESIGN_PROMPT.md          Phase 1 design brief
 ├── DESIGN_PROMPT_PHASE2.md   Phase 2 design brief
 ├── work-station-design/      Interactive React prototype (canonical UX reference)
-├── src/                      Solid.js frontend (added in T1.2)
-└── src-tauri/                Rust backend (added in T1.2)
+├── index.html                Vite entry
+├── vite.config.ts            Vite + Solid plugin config
+├── tsconfig.json             TS strict mode (frontend)
+├── src/                      Solid.js frontend
+│   ├── index.tsx             Solid render bootstrap
+│   ├── App.tsx, App.css      Placeholder app (replaced in later tasks)
+│   └── assets/
+└── src-tauri/                Rust backend
+    ├── Cargo.toml            Pinned: tauri 2.11.0, tauri-build 2.6.0
+    ├── tauri.conf.json       App config (1280×800, identifier com.workstation.dev)
+    ├── capabilities/         Window permissions
+    ├── icons/                Bundle icons
+    └── src/{main,lib}.rs     Entry + greet command stub
 ```
 
 ## Conventions
