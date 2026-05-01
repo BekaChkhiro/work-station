@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node / pnpm
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Rust / Tauri (future)
+target/
+**/*.rs.bk
+src-tauri/target/
+
+# Logs
+*.log
+logs/
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Misc
+*.pem
+.cache/
