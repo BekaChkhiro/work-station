@@ -109,6 +109,16 @@ Use this when implementing — grep your task ID, open the listed file, copy the
 - Settings → Privacy section: in personal-use build, render the section but **disable** the toggles (greyed with "v0.2" badge). The whole section can also be hidden via a build flag.
 - `CrashBanner` and `Toast` components stay in the prototype but their wiring (Sentry / actual crash detection) is dropped in personal-use scope. Toasts are still useful for transient UI feedback (e.g. "Project created", "Failed to save layout"); keep that wiring.
 
+**Known design gaps** (prototype does NOT yet cover these tasks — implement using prototype's existing patterns as reference):
+
+| Task | Gap | Suggested approach |
+|---|---|---|
+| T6.7 Drag-to-reorder projects | Sidebar `.sb-row` is static; no drag handle | Reuse `dnd-kit` (already pattern for tab drag in T5.3); add 6×6 grip dots on hover at left edge of row, animation pattern matches tab reorder |
+| T7.5 Per-project env vars | `EditProjectModal` has name/folder/color/glyph/CLI only — no env editor | Add a new collapsible section "Environment" with KEY=VALUE rows + "+ Add variable" button. Visual: similar to Settings → CLIs row pattern (label + mono path-style input). Validation: KEY must match `[A-Z_][A-Z0-9_]*` |
+| T7.6 Per-project startup commands | Not in `EditProjectModal` | Below env vars: "Startup commands" section with reorderable list of shell-line inputs + "+ Add command". Mono font, monospace, multi-line allowed. |
+
+These three gaps are small. Either: (a) add them to the prototype during T6.5 / T6.6 / T6.7 work and update §1.5 mapping, or (b) implement directly in Tauri+Solid following the suggested approach. Either is fine — just don't invent a totally different visual language for them.
+
 ---
 
 ## 2. Targets (audited — honest numbers)
@@ -965,10 +975,11 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 - [ ] **Status**: TODO
 - **Complexity**: M
 - **Dependencies**: T6.1
+- **Design ref**: Not yet in prototype. Pattern: `dnd-kit` (same lib as T5.3 tab reorder); 6×6 grip-dots icon visible on hover at left edge of `.sb-row`; lift Y -2px during drag with `--shadow-popover`; 150ms reorder animation matches tab drag.
 - **Description**:
-  - Drag handle in sidebar.
-  - Persist `position` column atomically.
-- **Acceptance**: Reorder survives restart; numeric hotkeys map to new positions.
+  - Drag handle in sidebar (visible on row hover).
+  - Persist `position` column atomically (single SQLite transaction).
+- **Acceptance**: Reorder survives restart; numeric hotkeys (T6.3) map to new positions immediately. Visual matches tab drag pattern from T5.3.
 
 #### T6.8: Empty state
 
@@ -1031,21 +1042,24 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 - [ ] **Status**: TODO
 - **Complexity**: M
-- **Dependencies**: T3.6
+- **Dependencies**: T3.6, T6.6
+- **Design ref**: Not yet in prototype. Add new collapsible section "Environment" inside `EditProjectModal` (between "Default CLI" and "Icon glyph"). Each row: monospace KEY input + `=` separator + monospace VALUE input + delete `×` button. Footer: "+ Add variable" ghost button. Match input styling from existing modal fields. Save toggle "dirty" when any row changes.
 - **Description**:
-  - Editor for key/value pairs (string-only).
-  - Saved to SQLite; injected on spawn (merged with platform defaults).
-- **Acceptance**: `printenv NODE_ENV` shows project value.
+  - Editor for key/value pairs (string-only) inside Edit Project modal.
+  - Validation: KEY matches `[A-Z_][A-Z0-9_]*`; VALUE is any string.
+  - Saved to SQLite (`projects.env_json`); injected on spawn (merged with platform defaults).
+- **Acceptance**: Add `NODE_ENV=development` to a project → new pane in that project shows `printenv NODE_ENV` returns `development`. Invalid KEY shows inline error.
 
 #### T7.6: Per-project startup commands
 
 - [ ] **Status**: TODO
 - **Complexity**: M
 - **Dependencies**: T7.5
+- **Design ref**: Not yet in prototype. Add new section "Startup commands" below env vars in `EditProjectModal`. Reorderable list of single-line monospace inputs (e.g. `nvm use 20`, `source .env.local`). Each row: drag-handle (re-use grip-dots from T6.7) + monospace input + delete `×`. Footer: "+ Add command" ghost button.
 - **Description**:
   - Optional list of commands run before main CLI in same shell (e.g. `nvm use 20`).
   - Run via shell wrapper; failures are logged but don't block CLI launch.
-- **Acceptance**: `nvm use` works; failure shows warning, CLI still launches.
+- **Acceptance**: `nvm use` works; failure shows warning toast (`Toast` component from `phase2.jsx` — UI is still wired even though crash reporter wiring is dropped), CLI still launches.
 
 #### T7.7: CLI badge on tabs
 
