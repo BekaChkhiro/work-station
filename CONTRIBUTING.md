@@ -6,11 +6,16 @@ This project is a personal-use Tauri 2.x desktop app. The build supports **macOS
 
 ```bash
 git clone <repo-url> work-station && cd work-station
+git config core.hooksPath .githooks   # enable pre-commit + commit-msg gates
 pnpm install
 pnpm tauri dev
 ```
 
 First `pnpm tauri dev` compiles the Tauri 2.x dependency graph (~2–4 min on a warm cache, longer cold). Subsequent runs are incremental.
+
+**Smoke test:** a 1280×800 native window opens with the placeholder app and the Vite "ready in <ms>" line in the terminal. Editing `src/App.tsx` should hot-reload in place.
+
+If you don't have the platform deps yet, jump to [Platform dependencies](#platform-dependencies) below before running `pnpm install`.
 
 ## Toolchain matrix
 
@@ -99,16 +104,33 @@ Unsigned `.msi` and `.exe` will trigger SmartScreen on first run:
 | `cargo fmt --check`            | rustfmt gate (run inside `src-tauri/`)                              |
 | `cargo clippy ... -D warnings` | clippy::all + clippy::pedantic, errors-as-failures                  |
 
+## Repository layout
+
+```
+work-station/
+├── PROJECT_PLAN.md           Plan of record — phases, tasks, decisions
+├── DESIGN_PROMPT.md          Phase 1 design brief
+├── DESIGN_PROMPT_PHASE2.md   Phase 2 design brief
+├── work-station-design/      Interactive React prototype (canonical UX reference)
+├── AGENTS.md                 Contract for AI-assisted contributors
+├── src/                      Solid.js frontend
+│   └── {components,db,ipc,routes,stores,styles,types,utils}
+└── src-tauri/
+    └── src/{cli,commands,db,ipc,menu,pty}
+```
+
+The interactive design prototype in `work-station-design/` is the canonical visual + interaction reference for v0.1. When the implementation could go either way, match the prototype. See `PROJECT_PLAN.md` §1.5 for the task → component mapping.
+
 ## Git hooks
 
-Hooks live in `.githooks/`. After cloning, point `core.hooksPath` at them:
+Hooks live in `.githooks/`. The Quickstart already wires `core.hooksPath` — if you cloned before adding it, run:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
 - `pre-commit` — Prettier + ESLint on staged frontend files; `cargo fmt --check` on staged Rust.
-- `commit-msg` — Conventional Commits format check.
+- `commit-msg` — Conventional Commits format check (max 72-char subject).
 
 Bypass with `--no-verify` only when truly necessary (e.g. WIP commits on a personal branch).
 
