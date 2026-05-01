@@ -138,7 +138,9 @@ pub async fn pty_kill(id: String, manager: State<'_, PtyManager>) -> Result<(), 
 /// Returns the cached array of `{ name, path, version? }` detected at app boot.
 /// Scans for: `claude`, `kimi`, `codex`, `bash`, `zsh`, `pwsh`.
 #[tauri::command]
-pub fn cli_list_available(registry: tauri::State<'_, crate::cli::CliRegistry>) -> Vec<crate::cli::DetectedCli> {
+pub fn cli_list_available(
+    registry: tauri::State<'_, crate::cli::CliRegistry>,
+) -> Vec<crate::cli::DetectedCli> {
     registry.list()
 }
 

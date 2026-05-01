@@ -122,7 +122,7 @@ function main() {
       cwd: resolve(root, "src-tauri"),
       stdio: "inherit",
     });
-  } catch (e) {
+  } catch {
     console.warn("⚠️  Could not update Cargo.lock automatically. Run `cargo generate-lockfile` manually in src-tauri/.");
   }
 

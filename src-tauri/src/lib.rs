@@ -4,16 +4,17 @@ pub mod cli;
 pub mod commands;
 pub mod db;
 pub mod ipc;
+pub mod menu;
 pub mod pty;
 
-use tauri::Manager;
 use cli::CliRegistry;
-use commands::{
-    cli_list_available, pty_get_scrollback, pty_kill, pty_resize, pty_spawn, pty_subscribe, pty_write,
-    pick_folder,
-};
 use commands::project::{project_create, project_delete, project_list, project_update};
+use commands::{
+    cli_list_available, pick_folder, pty_get_scrollback, pty_kill, pty_resize, pty_spawn,
+    pty_subscribe, pty_write,
+};
 use pty::PtyManager;
+use tauri::Manager;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -24,12 +25,16 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let _window = app.get_webview_window("main").expect("main window not found");
+            let _window = app
+                .get_webview_window("main")
+                .expect("main window not found");
 
             #[cfg(target_os = "windows")]
             {
                 window.set_decorations(false)?;
             }
+
+            menu::setup_menu(app)?;
 
             Ok(())
         })

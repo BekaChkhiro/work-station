@@ -34,7 +34,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 /// These are applied automatically by `tauri-plugin-sql` when the database
 /// is preloaded during app startup.
 pub fn up_migrations() -> Vec<Migration> {
-    vec![v1_initial_schema()]
+    vec![v1_initial_schema(), v2_startup_commands()]
 }
 
 /// All Down migrations, ordered by version.
@@ -42,7 +42,7 @@ pub fn up_migrations() -> Vec<Migration> {
 /// These are **not** run automatically. They exist for manual rollback
 /// operations only.
 pub fn down_migrations() -> Vec<Migration> {
-    vec![v1_initial_schema_down()]
+    vec![v2_startup_commands_down(), v1_initial_schema_down()]
 }
 
 // ------------------------------------------------------------------
@@ -117,4 +117,56 @@ const V1_DOWN_SQL: &str = r#"
 DROP TABLE IF EXISTS app_settings;
 DROP TABLE IF EXISTS sessions;
 DROP TABLE IF EXISTS projects;
+"#;
+
+// ------------------------------------------------------------------
+// V2 — Per-project startup commands (T7.6)
+// ------------------------------------------------------------------
+
+fn v2_startup_commands() -> Migration {
+    Migration {
+        version: 2,
+        description: "add_startup_commands",
+        sql: V2_UP_SQL,
+        kind: MigrationKind::Up,
+    }
+}
+
+fn v2_startup_commands_down() -> Migration {
+    Migration {
+        version: 2,
+        description: "add_startup_commands_rollback",
+        sql: V2_DOWN_SQL,
+        kind: MigrationKind::Down,
+    }
+}
+
+const V2_UP_SQL: &str = r#"
+-- Add startup_commands column to projects table (T7.6)
+ALTER TABLE projects ADD COLUMN startup_commands TEXT;
+"#;
+
+const V2_DOWN_SQL: &str = r#"
+-- SQLite does not support DROP COLUMN directly.
+-- To roll back V2, recreate the projects table without startup_commands.
+CREATE TABLE projects_new (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    color       TEXT,
+    icon        TEXT,
+    default_cli TEXT,
+    env_json    TEXT,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO projects_new (id, name, path, color, icon, default_cli, env_json, position, created_at)
+SELECT id, name, path, color, icon, default_cli, env_json, position, created_at FROM projects;
+
+DROP TABLE projects;
+ALTER TABLE projects_new RENAME TO projects;
+
+CREATE UNIQUE INDEX idx_projects_name ON projects(name);
+CREATE INDEX idx_projects_position ON projects(position);
 "#;
