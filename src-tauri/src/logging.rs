@@ -165,8 +165,11 @@ pub fn level_from_str(level: &str) -> Level {
 
 #[cfg(test)]
 mod tests {
-    use super::{level_from_str, log_dir};
+    use super::{install_panic_hook, level_from_str, log_dir};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
     use tracing::Level;
+    use tracing_subscriber::fmt::MakeWriter;
 
     #[test]
     fn level_from_str_maps_known_levels() {
@@ -189,5 +192,55 @@ mod tests {
         assert!(s.ends_with("work-station\\logs"), "got {s}");
         #[cfg(target_os = "linux")]
         assert!(s.ends_with("work-station/logs"), "got {s}");
+    }
+
+    #[derive(Clone)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn panic_hook_emits_panic_event_through_tracing() {
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = BufWriter(buffer.clone());
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(Level::ERROR)
+            .with_ansi(false)
+            .with_target(true)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            install_panic_hook();
+            let _ = std::panic::catch_unwind(|| {
+                panic!("hook test panic message");
+            });
+        });
+
+        let captured = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("panic"),
+            "expected target/event 'panic' in captured output, got: {captured}"
+        );
+        assert!(
+            captured.contains("hook test panic message"),
+            "expected panic payload in captured output, got: {captured}"
+        );
     }
 }
