@@ -158,6 +158,7 @@ pub fn level_from_str(level: &str) -> Level {
         "error" => Level::ERROR,
         "warn" => Level::WARN,
         "debug" => Level::DEBUG,
+        "trace" => Level::TRACE,
         _ => Level::INFO,
     }
 }
@@ -173,6 +174,7 @@ mod tests {
         assert_eq!(level_from_str("warn"), Level::WARN);
         assert_eq!(level_from_str("info"), Level::INFO);
         assert_eq!(level_from_str("debug"), Level::DEBUG);
+        assert_eq!(level_from_str("trace"), Level::TRACE);
         assert_eq!(level_from_str("nonsense"), Level::INFO);
     }
 

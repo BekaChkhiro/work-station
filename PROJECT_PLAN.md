@@ -284,10 +284,11 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 - **Complexity**: S
 - **Dependencies**: None
 - **Description**:
-  - Init git, `.gitignore` (Rust + Node + macOS + Windows), MIT `LICENSE`, `README.md` skeleton, `DECISIONS.md` skeleton (see §8).
+  - Init git, `.gitignore` (Rust + Node + macOS + Windows), `README.md` skeleton.
+  - LICENSE and `DECISIONS.md` are skipped — see §8 D4 / preamble.
   - Conventional-commits commit-msg hook (husky or `.githooks/`).
-  - GitHub branch protection on `master`: require PR, require linear history, dismiss stale reviews.
-- **Acceptance**: `git log` shows initial commit; PR cannot be merged without review.
+  - GitHub branch protection on `master`: require PR, require linear history, dismiss stale reviews. Branch protection is a paid GitHub feature on private repos — when on the free plan, treat the PR-only workflow as a personal convention rather than an enforced rule.
+- **Acceptance**: `git log` shows initial commit; the PR-based workflow is followed (enforced by GitHub branch protection where available).
 
 #### T1.2: Scaffold Tauri 2.0 + Solid.js
 
@@ -369,9 +370,10 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 - **Complexity**: S
 - **Dependencies**: T1.5
 - **Description**:
-  - Rust: `tracing` + `tracing-subscriber` with file rotation (daily, capped MB).
-  - Frontend: thin logger that mirrors levels to backend in production.
-  - Logs go to platform standard locations (macOS: `~/Library/Logs/work-station`, Windows: `%LOCALAPPDATA%\work-station\logs`).
+  - Rust: `tracing` + `tracing-subscriber` + `tracing-appender` with daily rotation, keep last 7 daily files (`tracing-appender` does not support a byte-size cap; the keep-N strategy is the practical equivalent for a personal-use app and avoids unbounded growth).
+  - Frontend: thin logger that always logs to `console` and additionally forwards entries to the backend `tracing` subscriber whenever the Tauri runtime is available (dev or production).
+  - Logs go to platform standard locations (macOS: `~/Library/Logs/work-station`, Windows: `%LOCALAPPDATA%\work-station\logs`, Linux: `$XDG_DATA_HOME/work-station/logs`).
+  - Panic hook routes panics through `tracing::error!` so the last lines of the daily file capture crashes.
 - **Acceptance**: Logs visible at platform location after first run; crash includes last N lines.
 
 ---
