@@ -1,8 +1,9 @@
 // Frontend logger (T1.9).
-// Always logs through `console` so dev surfaces failures inline; in production
-// builds running inside Tauri we additionally forward each entry to the Rust
-// `tracing` subscriber via the `log_from_frontend` command so it lands in the
-// rotating log file alongside backend logs.
+// Always logs through `console` so dev surfaces failures inline; whenever the
+// Tauri runtime is available (dev OR production) we additionally forward each
+// entry to the Rust `tracing` subscriber via the `log_from_frontend` command
+// so it lands in the rotating log file alongside backend logs. Pure-browser
+// contexts (vite preview, tests) silently skip the forward.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -21,7 +22,6 @@ export interface LoggedError {
 }
 
 const shouldForwardToBackend = (): boolean => {
-  if (!import.meta.env.PROD) return false;
   if (typeof window === "undefined") return false;
   return "__TAURI_INTERNALS__" in window;
 };

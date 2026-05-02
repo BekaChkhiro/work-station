@@ -53,6 +53,11 @@ pub fn log_from_frontend(payload: LogPayload) {
             context = %context_repr,
             "{message}"
         ),
+        Level::TRACE => tracing::trace!(
+            target: "frontend",
+            context = %context_repr,
+            "{message}"
+        ),
         _ => tracing::info!(
             target: "frontend",
             context = %context_repr,
