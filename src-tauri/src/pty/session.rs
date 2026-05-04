@@ -11,13 +11,15 @@
 #![allow(dead_code)]
 
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use portable_pty::{Child, MasterPty};
 use tokio::sync::broadcast;
 use uuid::Uuid;
+
+use super::scrollback::Scrollback;
 
 /// Default capacity for the per-session output broadcast channel.
 ///
@@ -46,6 +48,11 @@ pub(crate) struct PtySession {
     pub(crate) writer: Mutex<Box<dyn Write + Send>>,
     pub(crate) child: Mutex<Box<dyn Child + Send + Sync>>,
     pub(crate) output_tx: broadcast::Sender<Bytes>,
+    /// Bounded scrollback (T2.9) — `Arc` so the reader can clone-and-tap
+    /// without keeping the whole session alive past EOF. Default cap is
+    /// [`scrollback::DEFAULT_SCROLLBACK_BYTES`]; T3.4 will plumb the
+    /// user-configured value from `app_settings`.
+    pub(crate) scrollback: Arc<Mutex<Scrollback>>,
     pub(crate) created_at: SystemTime,
 }
 
@@ -68,6 +75,7 @@ impl PtySession {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             output_tx,
+            scrollback: Arc::new(Mutex::new(Scrollback::new())),
             created_at: SystemTime::now(),
         }
     }
