@@ -37,6 +37,11 @@ bytes = "=1.11.1"
 uuid = { version = "=1.23.1", features = ["v4", "serde"] }
 thiserror = "=2.0.18"
 
+# T2.8: SIGTERM for graceful PTY shutdown (Unix only — portable-pty's
+# `Child::kill` always sends SIGKILL).
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.186"
+
 # Lint policy (T1.3): clippy::all + clippy::pedantic at warn, with a
 # pragmatic allow-list for noise that fights idiomatic Tauri/Solid code.
 [lints.clippy]

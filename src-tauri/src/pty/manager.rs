@@ -10,12 +10,19 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use super::session::PtySession;
+
+/// SIGTERM → SIGKILL escalation window for `PtyManager::kill` (T2.8).
+///
+/// Gives well-behaved shells time to run trap handlers, flush, and
+/// teardown subprocesses before we resort to force-kill.
+pub(crate) const KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Error)]
 pub(crate) enum PtyError {
@@ -123,14 +130,39 @@ impl PtyManager {
         self.inner.read().ok()?.get(&id).cloned()
     }
 
-    /// Remove the session from the registry. The underlying child is
-    /// reaped when the last `Arc<PtySession>` is dropped (see
-    /// `PtySession::drop`); T2.8 will layer SIGTERM → SIGKILL grace on
-    /// top of this.
+    /// Graceful kill (T2.8): SIGTERM (or close-stdin on Windows), wait
+    /// up to [`KILL_GRACE`], then SIGKILL if still alive. The session is
+    /// removed from the registry *before* we start signalling so a slow
+    /// shutdown never blocks lookups for other sessions, and concurrent
+    /// `kill` calls for the same id resolve to a single `NotFound` for
+    /// the loser.
     ///
-    /// The pulled-out `Arc` is dropped *after* the lock is released so a
-    /// slow `wait` never blocks other sessions.
+    /// The pulled-out `Arc` is dropped after termination — its `Drop` is
+    /// a no-op at that point because the child has already been waited
+    /// on.
     pub fn kill(&self, id: Uuid) -> Result<(), PtyError> {
+        let session = self
+            .inner
+            .write()
+            .map_err(|_| PtyError::LockPoisoned)?
+            .remove(&id)
+            .ok_or(PtyError::NotFound(id))?;
+        session.terminate_gracefully(KILL_GRACE);
+        // Closes the broadcast channel once the last receiver hangs up,
+        // which signals subscribers (frontend handlers, future scrollback
+        // tap) that the session is done.
+        drop(session);
+        Ok(())
+    }
+
+    /// Remove a session from the registry without termination logic.
+    ///
+    /// Used by the reader task's EOF path (T2.4): the child has already
+    /// exited, so `terminate_gracefully` would just round-trip a
+    /// `try_wait`. Skipping it keeps the call cheap inside the tokio
+    /// coalescer and avoids a dead-pid SIGTERM that would only ever land
+    /// in the kernel's bit-bucket.
+    pub fn remove(&self, id: Uuid) -> Result<(), PtyError> {
         let session = self
             .inner
             .write()

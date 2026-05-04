@@ -183,12 +183,15 @@ async fn run_coalescer(
                     pid,
                     "pty reader: session EOF; removing from registry",
                 );
-                if let Err(error) = manager.kill(session_id) {
+                // Child has already exited — `remove` skips the
+                // SIGTERM/SIGKILL dance that `kill` performs so this
+                // stays cheap inside the tokio coalescer.
+                if let Err(error) = manager.remove(session_id) {
                     tracing::debug!(
                         session_id = %session_id,
                         pid,
                         %error,
-                        "pty reader: kill on EOF: session already gone",
+                        "pty reader: remove on EOF: session already gone",
                     );
                 }
                 return;
