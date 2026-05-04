@@ -19,6 +19,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::log::log_from_frontend,
             commands::pty::pty_spawn,
+            commands::pty::pty_write,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
