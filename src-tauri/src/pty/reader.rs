@@ -1,0 +1,304 @@
+//! Per-session PTY reader with output coalescing (T2.4).
+//!
+//! `spawn_reader` wires up two halves around a single PTY session:
+//!
+//!   * a `std::thread` doing blocking 64KB reads off the cloned master
+//!     reader, pushing raw chunks into a bounded `tokio::mpsc`;
+//!   * an async `tokio::spawn`ed coalescer that flushes the accumulated
+//!     bytes either when ≥4KB have piled up or after a ~12ms timer.
+//!
+//! Coalescing is what keeps `cat huge.log` from drowning the IPC bus —
+//! one ~4KB `Bytes` frame per flush instead of hundreds of tiny ones.
+//!
+//! On EOF the coalescer flushes any tail bytes, removes the session
+//! from the registry (so it isn't dangling), and exits. Dropping the
+//! task drops its broadcast `Sender` clone, which lets the channel
+//! close once the session itself is gone, signalling subscribers.
+
+#![allow(dead_code)] // call site lands in T2.5 (pty_spawn).
+
+use std::io::Read;
+use std::time::{Duration, Instant};
+
+use bytes::{Bytes, BytesMut};
+use tokio::sync::{broadcast, mpsc};
+use uuid::Uuid;
+
+use super::manager::PtyManager;
+use super::session::PtySession;
+
+/// Size at which the coalescer flushes early. One IPC frame's worth so
+/// `cat huge.log` lands in O(N/4KB) sends instead of O(N).
+const FLUSH_BYTES: usize = 4 * 1024;
+
+/// Time-based flush window. Mid-range of the 8–16ms target so latency
+/// stays sub-frame at 60Hz while still amortising small writes.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(12);
+
+/// Read buffer for the blocking reader thread; matches the typical
+/// max per-iteration yield from a Linux pty master.
+const READ_BUF_BYTES: usize = 64 * 1024;
+
+/// Bounded backpressure between the blocking reader and the async
+/// coalescer. Small enough that a slow coalescer applies pressure on
+/// the reader, large enough to absorb bursty child output.
+const RAW_CHANNEL_CAPACITY: usize = 32;
+
+/// Spawn the per-session reader pipeline.
+///
+/// Holds neither the session nor the manager any longer than needed:
+///   * the blocking thread keeps only the cloned `Read` and the mpsc
+///     `Sender`;
+///   * the coalescer task keeps a `broadcast::Sender<Bytes>` clone and
+///     a `PtyManager` clone (cheap `Arc`).
+///
+/// That means an external `manager.kill` can drop the registry's
+/// `Arc<PtySession>` without the reader holding the session alive
+/// indefinitely.
+pub(crate) fn spawn_reader(manager: PtyManager, session: &PtySession) {
+    let session_id = session.id;
+    let pid = session.pid;
+    let output_tx = session.output_tx.clone();
+
+    let reader = {
+        let Ok(guard) = session.master.lock() else {
+            tracing::warn!(
+                session_id = %session_id,
+                pid,
+                "pty reader: master mutex poisoned; not starting reader",
+            );
+            return;
+        };
+        match guard.try_clone_reader() {
+            Ok(r) => r,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    pid,
+                    %error,
+                    "pty reader: try_clone_reader failed; not starting reader",
+                );
+                return;
+            }
+        }
+    };
+
+    let (raw_tx, raw_rx) = mpsc::channel::<Bytes>(RAW_CHANNEL_CAPACITY);
+
+    std::thread::Builder::new()
+        .name(format!("pty-read-{session_id}"))
+        .spawn(move || run_blocking_reader(session_id, pid, reader, raw_tx))
+        .expect("spawn pty reader thread");
+
+    tokio::spawn(run_coalescer(session_id, pid, raw_rx, output_tx, manager));
+}
+
+fn run_blocking_reader(
+    session_id: Uuid,
+    pid: u32,
+    mut reader: Box<dyn Read + Send>,
+    tx: mpsc::Sender<Bytes>,
+) {
+    let mut buf = vec![0u8; READ_BUF_BYTES];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    pid,
+                    "pty reader: EOF on master",
+                );
+                return;
+            }
+            Ok(n) => {
+                let chunk = Bytes::copy_from_slice(&buf[..n]);
+                if tx.blocking_send(chunk).is_err() {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        pid,
+                        "pty reader: coalescer dropped; exiting",
+                    );
+                    return;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    pid,
+                    %error,
+                    "pty reader: read error; exiting",
+                );
+                return;
+            }
+        }
+    }
+}
+
+enum Event {
+    Chunk(Option<Bytes>),
+    Timer,
+}
+
+async fn run_coalescer(
+    session_id: Uuid,
+    pid: u32,
+    mut raw_rx: mpsc::Receiver<Bytes>,
+    output_tx: broadcast::Sender<Bytes>,
+    manager: PtyManager,
+) {
+    let mut buf = BytesMut::with_capacity(FLUSH_BYTES * 2);
+    let mut deadline: Option<Instant> = None;
+
+    loop {
+        let event = match deadline {
+            Some(when) => {
+                let timeout = when.saturating_duration_since(Instant::now());
+                tokio::select! {
+                    biased;
+                    chunk = raw_rx.recv() => Event::Chunk(chunk),
+                    () = tokio::time::sleep(timeout) => Event::Timer,
+                }
+            }
+            None => Event::Chunk(raw_rx.recv().await),
+        };
+
+        match event {
+            Event::Chunk(Some(chunk)) => {
+                buf.extend_from_slice(&chunk);
+                if deadline.is_none() {
+                    deadline = Some(Instant::now() + FLUSH_INTERVAL);
+                }
+                if buf.len() >= FLUSH_BYTES {
+                    flush(session_id, &mut buf, &output_tx, "size");
+                    deadline = None;
+                }
+            }
+            Event::Chunk(None) => {
+                if !buf.is_empty() {
+                    flush(session_id, &mut buf, &output_tx, "eof");
+                }
+                tracing::info!(
+                    session_id = %session_id,
+                    pid,
+                    "pty reader: session EOF; removing from registry",
+                );
+                if let Err(error) = manager.kill(session_id) {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        pid,
+                        %error,
+                        "pty reader: kill on EOF: session already gone",
+                    );
+                }
+                return;
+            }
+            Event::Timer => {
+                if !buf.is_empty() {
+                    flush(session_id, &mut buf, &output_tx, "timer");
+                }
+                deadline = None;
+            }
+        }
+    }
+}
+
+fn flush(
+    session_id: Uuid,
+    buf: &mut BytesMut,
+    output_tx: &broadcast::Sender<Bytes>,
+    reason: &'static str,
+) {
+    let frame = buf.split().freeze();
+    let bytes = frame.len();
+    tracing::trace!(
+        session_id = %session_id,
+        bytes,
+        reason,
+        "pty reader: flush",
+    );
+    // Err = no active subscribers; routine and not worth logging.
+    let _ = output_tx.send(frame);
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::pty::manager::SpawnConfig;
+    use std::collections::HashMap;
+    use tokio::sync::broadcast::error::RecvError;
+
+    fn spawn_config(command: &str, args: &[&str]) -> SpawnConfig {
+        SpawnConfig {
+            command: command.to_string(),
+            args: args.iter().map(|s| (*s).to_string()).collect(),
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    async fn drain(rx: &mut broadcast::Receiver<Bytes>) -> Vec<Bytes> {
+        let mut frames = Vec::new();
+        loop {
+            match rx.recv().await {
+                Ok(frame) => frames.push(frame),
+                Err(RecvError::Closed) => return frames,
+                // Test config wouldn't normally lag; just keep going.
+                Err(RecvError::Lagged(_)) => {}
+            }
+        }
+    }
+
+    /// On EOF the reader must flush trailing bytes, drop the session
+    /// from the registry, and close the broadcast channel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streams_output_and_clears_registry_on_eof() {
+        let m = PtyManager::new();
+        let id = m.spawn(spawn_config("/bin/echo", &["hi"])).expect("spawn");
+        let session = m.get(id).expect("get");
+        let mut rx = session.output_tx.subscribe();
+        spawn_reader(m.clone(), &session);
+        drop(session);
+
+        let frames = drain(&mut rx).await;
+        let combined: Vec<u8> = frames.iter().flat_map(|b| b.iter().copied()).collect();
+        let text = String::from_utf8_lossy(&combined);
+        assert!(text.contains("hi"), "expected 'hi' in output, got {text:?}");
+
+        // EOF path runs `manager.kill`; channel close means the
+        // coalescer task already exited, so the kill has happened.
+        assert_eq!(m.count(), 0, "session should be removed on EOF");
+    }
+
+    /// `seq 1 10000` emits ~48KB. With 4KB-size coalescing we expect
+    /// the total to come through in well under a hundred frames.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coalesces_burst_output() {
+        let m = PtyManager::new();
+        let id = m
+            .spawn(spawn_config("/usr/bin/seq", &["1", "10000"]))
+            .expect("spawn");
+        let session = m.get(id).expect("get");
+        let mut rx = session.output_tx.subscribe();
+        spawn_reader(m.clone(), &session);
+        drop(session);
+
+        let frames = drain(&mut rx).await;
+        let total: usize = frames.iter().map(Bytes::len).sum();
+
+        // `seq 1 10000` produces 48894 bytes; pty cooked-mode `\n`->`\r\n`
+        // expansion can roughly double that, so accept a wide range.
+        assert!(
+            (40_000..=120_000).contains(&total),
+            "expected ~48–96KB total, got {total}",
+        );
+        assert!(
+            frames.len() < 200,
+            "coalescing should keep frame count modest, got {}",
+            frames.len(),
+        );
+        assert_eq!(m.count(), 0, "session should be removed on EOF");
+    }
+}
