@@ -1,9 +1,8 @@
-//! `pty_spawn` Tauri command (T2.5).
+//! PTY Tauri commands (T2.5 spawn, T2.6 write).
 //!
-//! Validates input from the frontend, spawns a child via `PtyManager`,
-//! kicks off the per-session reader pipeline (T2.4), and returns the new
-//! session id. Errors are mapped to a Serialize-able enum so the webview
-//! can branch on `kind` rather than parse free-form strings.
+//! Validates input from the frontend, forwards to `PtyManager`, and maps
+//! crate errors onto Serialize-able enums so the webview can branch on
+//! `kind` rather than parse free-form strings.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -55,7 +54,9 @@ impl From<PtyError> for SpawnError {
             PtyError::OpenPty(msg) | PtyError::Spawn(msg) | PtyError::Writer(msg) => {
                 Self::SpawnFailed(msg)
             }
-            PtyError::NotFound(_) | PtyError::LockPoisoned => Self::Internal(error.to_string()),
+            PtyError::WriteIo(_) | PtyError::NotFound(_) | PtyError::LockPoisoned => {
+                Self::Internal(error.to_string())
+            }
         }
     }
 }
@@ -114,6 +115,47 @@ fn merge_env_defaults(env: HashMap<String, String>) -> HashMap<String, String> {
     merged.insert("COLORTERM".to_string(), "truecolor".to_string());
     merged.extend(env);
     merged
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteArgs {
+    pub session_id: Uuid,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+pub enum WriteError {
+    #[error("session not found: {0}")]
+    NotFound(String),
+    #[error("write failed: {0}")]
+    WriteFailed(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+impl From<PtyError> for WriteError {
+    fn from(error: PtyError) -> Self {
+        match error {
+            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
+            PtyError::WriteIo(msg) => Self::WriteFailed(msg),
+            other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn pty_write(args: WriteArgs, manager: State<'_, PtyManager>) -> Result<(), WriteError> {
+    let manager = manager.inner().clone();
+    tokio::task::spawn_blocking(move || write_inner(&manager, args))
+        .await
+        .map_err(|e| WriteError::Internal(format!("blocking task join failed: {e}")))?
+}
+
+fn write_inner(manager: &PtyManager, args: WriteArgs) -> Result<(), WriteError> {
+    manager.write(args.session_id, &args.data)?;
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
@@ -210,5 +252,133 @@ mod tests {
             merged.get("COLORTERM").map(String::as_str),
             Some("truecolor")
         );
+    }
+
+    #[test]
+    fn write_unknown_session_returns_not_found() {
+        let m = PtyManager::new();
+        let err = write_inner(
+            &m,
+            WriteArgs {
+                session_id: Uuid::new_v4(),
+                data: b"hello".to_vec(),
+            },
+        )
+        .expect_err("unknown session should fail");
+        assert!(matches!(err, WriteError::NotFound(_)));
+    }
+
+    #[test]
+    fn write_empty_data_is_noop_for_unknown_session() {
+        // Empty payloads short-circuit before the registry lookup, so
+        // even an unregistered id succeeds — this lets the frontend
+        // fire-and-forget zero-byte debounced writes.
+        let m = PtyManager::new();
+        write_inner(
+            &m,
+            WriteArgs {
+                session_id: Uuid::new_v4(),
+                data: vec![],
+            },
+        )
+        .expect("empty write must be a no-op");
+    }
+
+    /// Smoke test for T2.6 acceptance: drive `/bin/cat` over the pty,
+    /// write ASCII then UTF-8 input, and observe both round-trip back
+    /// through the reader's broadcast channel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn write_round_trips_ascii_and_utf8_via_pty() {
+        use tokio::sync::broadcast::error::RecvError;
+        use tokio::time::{timeout, Duration};
+
+        async fn await_substring(
+            rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>,
+            needle: &[u8],
+        ) -> Vec<u8> {
+            let mut combined: Vec<u8> = Vec::new();
+            loop {
+                match rx.recv().await {
+                    Ok(b) => {
+                        combined.extend_from_slice(&b);
+                        if combined.windows(needle.len()).any(|w| w == needle) {
+                            return combined;
+                        }
+                    }
+                    Err(RecvError::Closed) => return combined,
+                    Err(RecvError::Lagged(_)) => {}
+                }
+            }
+        }
+
+        let m = PtyManager::new();
+        let resp = spawn_inner(m.clone(), args("/bin/cat")).expect("spawn cat");
+        let session_id = resp.session_id;
+        let mut rx = m
+            .get(session_id)
+            .expect("get session")
+            .output_tx
+            .subscribe();
+
+        // ASCII
+        let m_w = m.clone();
+        tokio::task::spawn_blocking(move || {
+            write_inner(
+                &m_w,
+                WriteArgs {
+                    session_id,
+                    data: b"hello\n".to_vec(),
+                },
+            )
+            .expect("ascii write");
+        })
+        .await
+        .expect("ascii join");
+
+        let received = timeout(Duration::from_secs(3), await_substring(&mut rx, b"hello"))
+            .await
+            .expect("ascii round-trip timed out");
+        assert!(
+            received.windows(5).any(|w| w == b"hello"),
+            "ascii bytes missing in {:?}",
+            String::from_utf8_lossy(&received),
+        );
+
+        // UTF-8 — uses multi-byte sequences (é, en-dash, Greek) to prove
+        // the writer doesn't mangle bytes in transit.
+        let utf8 = "héllo–αβγ\n".as_bytes().to_vec();
+        let needle = "αβγ".as_bytes().to_vec();
+        let m_w = m.clone();
+        let payload = utf8.clone();
+        tokio::task::spawn_blocking(move || {
+            write_inner(
+                &m_w,
+                WriteArgs {
+                    session_id,
+                    data: payload,
+                },
+            )
+            .expect("utf8 write");
+        })
+        .await
+        .expect("utf8 join");
+
+        let received = timeout(Duration::from_secs(3), await_substring(&mut rx, &needle))
+            .await
+            .expect("utf8 round-trip timed out");
+        let h_e = "hé".as_bytes();
+        let dash = "–".as_bytes();
+        assert!(
+            received.windows(h_e.len()).any(|w| w == h_e),
+            "utf8 'hé' missing in {:?}",
+            String::from_utf8_lossy(&received),
+        );
+        assert!(
+            received.windows(dash.len()).any(|w| w == dash),
+            "utf8 en-dash missing in {:?}",
+            String::from_utf8_lossy(&received),
+        );
+
+        m.kill(session_id).expect("kill cat");
     }
 }

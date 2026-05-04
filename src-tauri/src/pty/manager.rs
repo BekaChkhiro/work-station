@@ -7,6 +7,7 @@
 #![allow(dead_code)] // T2.5 wires this into the Tauri command surface.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -26,6 +27,8 @@ pub(crate) enum PtyError {
     Spawn(String),
     #[error("take_writer failed: {0}")]
     Writer(String),
+    #[error("write to pty failed: {0}")]
+    WriteIo(String),
     #[error("session not found: {0}")]
     NotFound(Uuid),
     #[error("registry lock poisoned")]
@@ -133,6 +136,35 @@ impl PtyManager {
             .remove(&id)
             .ok_or(PtyError::NotFound(id))?;
         drop(session);
+        Ok(())
+    }
+
+    /// Forward raw bytes to the session's pty stdin.
+    ///
+    /// Resolves the session under a short read lock, releases it, then
+    /// holds only the per-session writer mutex while doing the blocking
+    /// `write_all` + `flush`. Other registry ops aren't blocked by a slow
+    /// child reading its end of the pty.
+    ///
+    /// `data.is_empty()` is treated as a no-op so the frontend can
+    /// debounce keystrokes without conditional branches.
+    pub fn write(&self, id: Uuid, data: &[u8]) -> Result<(), PtyError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let session = {
+            let map = self.inner.read().map_err(|_| PtyError::LockPoisoned)?;
+            map.get(&id).cloned()
+        }
+        .ok_or(PtyError::NotFound(id))?;
+
+        let mut writer = session.writer.lock().map_err(|_| PtyError::LockPoisoned)?;
+        writer
+            .write_all(data)
+            .map_err(|e| PtyError::WriteIo(e.to_string()))?;
+        writer
+            .flush()
+            .map_err(|e| PtyError::WriteIo(e.to_string()))?;
         Ok(())
     }
 
