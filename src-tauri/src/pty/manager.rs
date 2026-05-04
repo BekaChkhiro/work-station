@@ -433,3 +433,101 @@ mod tests {
         assert_eq!(m1.count(), 0);
     }
 }
+
+/// Cross-platform manager smoke tests for T2.13.
+///
+/// The unix tests above lean on `ps` to assert no-zombie reaping; this
+/// module exercises the same registry / portable-pty surface using a
+/// command available on the host OS so coverage stays meaningful on
+/// Windows CI.
+#[cfg(test)]
+mod xplat_tests {
+    use super::*;
+
+    fn long_running() -> SpawnConfig {
+        #[cfg(unix)]
+        let (command, args) = ("/bin/sleep".to_string(), vec!["60".to_string()]);
+        // `ping -n 60 127.0.0.1 > NUL` keeps cmd.exe alive ~60s without
+        // printing to stdout. Avoids `timeout`, which refuses to run
+        // when stdin is redirected (which a pty effectively is).
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), "ping -n 60 127.0.0.1 > NUL".to_string()],
+        );
+        SpawnConfig {
+            command,
+            args,
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    #[test]
+    fn spawn_then_kill_clears_registry() {
+        let m = PtyManager::new();
+        let id = m.spawn(long_running()).expect("spawn");
+
+        assert_eq!(m.count(), 1);
+        assert_eq!(m.list(), vec![id]);
+        let session = m.get(id).expect("get");
+        assert_eq!(session.id, id);
+        assert!(session.pid > 0);
+        drop(session);
+
+        m.kill(id).expect("kill");
+        assert_eq!(m.count(), 0);
+        assert!(m.get(id).is_none());
+    }
+
+    #[test]
+    fn write_unknown_returns_not_found() {
+        let m = PtyManager::new();
+        let unknown = Uuid::new_v4();
+        match m.write(unknown, b"hello") {
+            Err(PtyError::NotFound(id)) => assert_eq!(id, unknown),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    /// Empty payloads short-circuit before the registry lookup so the
+    /// frontend can fire-and-forget zero-byte debounced writes.
+    #[test]
+    fn write_empty_is_noop_for_unknown_session() {
+        let m = PtyManager::new();
+        m.write(Uuid::new_v4(), &[])
+            .expect("empty write must be a no-op");
+    }
+
+    #[test]
+    fn write_to_live_session_succeeds() {
+        let m = PtyManager::new();
+        let id = m.spawn(long_running()).expect("spawn");
+        // Long-running probe doesn't read stdin — the pty master's own
+        // buffer absorbs the write so the call must not block or error.
+        m.write(id, b"hello\n").expect("write");
+        m.kill(id).expect("kill");
+    }
+
+    #[test]
+    fn resize_unknown_returns_not_found() {
+        let m = PtyManager::new();
+        let unknown = Uuid::new_v4();
+        match m.resize(unknown, 100, 30) {
+            Err(PtyError::NotFound(id)) => assert_eq!(id, unknown),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resize_live_session_succeeds_repeatedly() {
+        let m = PtyManager::new();
+        let id = m.spawn(long_running()).expect("spawn");
+        for (cols, rows) in [(100u16, 30u16), (132, 50), (80, 24)] {
+            m.resize(id, cols, rows).expect("resize");
+        }
+        m.kill(id).expect("kill");
+    }
+}
