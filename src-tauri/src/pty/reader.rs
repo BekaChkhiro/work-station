@@ -424,3 +424,65 @@ mod tests {
         );
     }
 }
+
+/// Cross-platform reader tests for T2.13.
+///
+/// The unix-only tests above lean on `/usr/bin/seq` and `/bin/echo`;
+/// this module uses `cmd.exe /C echo` on Windows so the reader pipeline
+/// (blocking thread → coalescer → broadcast → registry cleanup on EOF)
+/// is exercised on Windows CI as well.
+#[cfg(test)]
+mod xplat_tests {
+    use super::*;
+    use crate::pty::manager::SpawnConfig;
+    use std::collections::HashMap;
+    use tokio::sync::broadcast::error::RecvError;
+
+    fn echo_then_exit(text: &str) -> SpawnConfig {
+        #[cfg(unix)]
+        let (command, args) = ("/bin/echo".to_string(), vec![text.to_string()]);
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), format!("echo {text}")],
+        );
+        SpawnConfig {
+            command,
+            args,
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    async fn drain(rx: &mut broadcast::Receiver<Bytes>) -> Vec<Bytes> {
+        let mut frames = Vec::new();
+        loop {
+            match rx.recv().await {
+                Ok(frame) => frames.push(frame),
+                Err(RecvError::Closed) => return frames,
+                Err(RecvError::Lagged(_)) => {}
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streams_output_and_clears_registry_on_eof() {
+        let m = PtyManager::new();
+        let id = m.spawn(echo_then_exit("xplat-marker")).expect("spawn echo");
+        let session = m.get(id).expect("get session");
+        let mut rx = session.output_tx.subscribe();
+        spawn_reader(m.clone(), &session);
+        drop(session);
+
+        let frames = drain(&mut rx).await;
+        let combined: Vec<u8> = frames.iter().flat_map(|b| b.iter().copied()).collect();
+        let text = String::from_utf8_lossy(&combined);
+        assert!(
+            text.contains("xplat-marker"),
+            "expected 'xplat-marker' in output, got {text:?}",
+        );
+        assert_eq!(m.count(), 0, "session should be removed on EOF");
+    }
+}

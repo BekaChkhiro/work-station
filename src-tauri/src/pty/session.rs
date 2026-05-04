@@ -421,6 +421,37 @@ mod tests {
         }
     }
 
+    /// Fast-path: an already-exited child should report graceful
+    /// termination immediately without firing SIGTERM or SIGKILL. We
+    /// can't observe the absence of `kill(2)` directly here, but the
+    /// near-zero elapsed time is a good proxy.
+    #[test]
+    fn terminate_gracefully_short_circuits_when_child_already_exited() {
+        let session = open_session(&["/bin/sh", "-c", "exit 0"]);
+
+        // Wait until the child reaps so the fast-path branch is taken.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            {
+                let mut child = session.child.lock().expect("child lock");
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "child failed to exit in time");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let started = Instant::now();
+        let graceful = session.terminate_gracefully(Duration::from_secs(5));
+        assert!(graceful);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "fast-path should not poll: {:?}",
+            started.elapsed(),
+        );
+    }
+
     /// SIGTERM-trapping child that refuses to exit forces the
     /// SIGKILL escalation. Use a short grace so the test stays fast.
     ///
@@ -459,6 +490,90 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
+        }
+    }
+}
+
+/// Cross-platform session lifecycle tests for T2.13.
+///
+/// These complement the unix-only tests above (which use `ps` for
+/// zombie verification) so the Drop and terminate paths get exercised
+/// on Windows CI too.
+#[cfg(test)]
+mod xplat_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    fn open_long_running() -> PtySession {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+
+        #[cfg(unix)]
+        let cmd = {
+            let mut c = CommandBuilder::new("/bin/sleep");
+            c.arg("60");
+            c
+        };
+        #[cfg(windows)]
+        let cmd = {
+            let mut c = CommandBuilder::new("cmd.exe");
+            c.arg("/C");
+            c.arg("ping -n 60 127.0.0.1 > NUL");
+            c
+        };
+
+        let child = pair.slave.spawn_command(cmd).expect("spawn_command");
+        let writer = pair.master.take_writer().expect("take_writer");
+        drop(pair.slave);
+        PtySession::new(pair.master, writer, child)
+    }
+
+    /// Drop must not panic and must complete promptly on either OS,
+    /// even when the child is non-cooperative.
+    #[test]
+    fn drop_on_long_running_child_completes_promptly() {
+        let session = open_long_running();
+        assert!(session.pid > 0);
+        let started = Instant::now();
+        drop(session);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "Drop took too long: {:?}",
+            started.elapsed(),
+        );
+    }
+
+    /// `terminate_gracefully` must end a non-cooperative child within
+    /// (grace + escalation) on both OSes. We can't assert which path
+    /// (graceful vs. forced) wins because /bin/sleep happily exits on
+    /// SIGTERM while ping.exe ignores stdin closure, so we just bound
+    /// the wall-time and verify the child is reaped afterwards.
+    #[test]
+    fn terminate_gracefully_terminates_long_running_child() {
+        let session = open_long_running();
+        let started = Instant::now();
+        let _ = session.terminate_gracefully(Duration::from_millis(200));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "termination took too long: {:?}",
+            started.elapsed(),
+        );
+
+        // Child must be reaped (or already gone) by the time
+        // terminate_gracefully returns. Repeating try_wait should yield
+        // `Some(_)` immediately.
+        let mut child = session.child.lock().expect("child lock");
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("child still running after terminate_gracefully"),
+            Err(error) => panic!("try_wait failed: {error}"),
         }
     }
 }
