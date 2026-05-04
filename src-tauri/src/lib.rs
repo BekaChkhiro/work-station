@@ -21,6 +21,7 @@ pub fn run() {
             commands::pty::pty_spawn,
             commands::pty::pty_write,
             commands::pty::pty_resize,
+            commands::pty::pty_kill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,4 @@
-//! PTY Tauri commands (T2.5 spawn, T2.6 write, T2.7 resize).
+//! PTY Tauri commands (T2.5 spawn, T2.6 write, T2.7 resize, T2.8 kill).
 //!
 //! Validates input from the frontend, forwards to `PtyManager`, and maps
 //! crate errors onto Serialize-able enums so the webview can branch on
@@ -208,6 +208,49 @@ fn resize_inner(manager: &PtyManager, args: ResizeArgs) -> Result<(), ResizeErro
         ));
     }
     manager.resize(args.session_id, args.cols, args.rows)?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KillArgs {
+    pub session_id: Uuid,
+}
+
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+pub enum KillError {
+    #[error("session not found: {0}")]
+    NotFound(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+impl From<PtyError> for KillError {
+    fn from(error: PtyError) -> Self {
+        match error {
+            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
+            other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+/// Graceful PTY shutdown (T2.8).
+///
+/// Off-loaded to `spawn_blocking` because the manager's graceful path
+/// can sleep up to `KILL_GRACE` (2s) waiting on the child to honour
+/// SIGTERM. Repeat calls for the same id resolve to `NotFound` after
+/// the first one removes the session.
+#[tauri::command]
+pub async fn pty_kill(args: KillArgs, manager: State<'_, PtyManager>) -> Result<(), KillError> {
+    let manager = manager.inner().clone();
+    tokio::task::spawn_blocking(move || kill_inner(&manager, args))
+        .await
+        .map_err(|e| KillError::Internal(format!("blocking task join failed: {e}")))?
+}
+
+fn kill_inner(manager: &PtyManager, args: KillArgs) -> Result<(), KillError> {
+    manager.kill(args.session_id)?;
     Ok(())
 }
 
@@ -463,6 +506,99 @@ mod tests {
         )
         .expect_err("unknown session should fail");
         assert!(matches!(err, ResizeError::NotFound(_)));
+    }
+
+    #[test]
+    fn kill_unknown_session_returns_not_found() {
+        let m = PtyManager::new();
+        let err = kill_inner(
+            &m,
+            KillArgs {
+                session_id: Uuid::new_v4(),
+            },
+        )
+        .expect_err("unknown session should fail");
+        assert!(matches!(err, KillError::NotFound(_)));
+    }
+
+    /// T2.8 acceptance: `pty_kill` ends the child (no zombie) and
+    /// decrements the manager's session count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn kill_terminates_child_and_decrements_count() {
+        use std::time::{Duration, Instant};
+
+        let m = PtyManager::new();
+        let mut a = args("/bin/sleep");
+        a.args = vec!["60".into()];
+        let resp = spawn_inner(m.clone(), a).expect("spawn sleep");
+        assert_eq!(m.count(), 1, "session should be registered");
+        let pid = m.get(resp.session_id).expect("get session").pid;
+        assert!(pid > 0);
+
+        let m_k = m.clone();
+        tokio::task::spawn_blocking(move || {
+            kill_inner(
+                &m_k,
+                KillArgs {
+                    session_id: resp.session_id,
+                },
+            )
+            .expect("kill");
+        })
+        .await
+        .expect("kill join");
+
+        assert_eq!(m.count(), 0, "kill should decrement manager count");
+        assert!(m.get(resp.session_id).is_none());
+
+        // Verify the child is fully reaped (not a zombie). `ps -p` exits
+        // 1 once the kernel clears the entry.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let out = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "stat="])
+                .output()
+                .expect("ps");
+            let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if stat.is_empty() {
+                return;
+            }
+            assert!(
+                !stat.starts_with('Z'),
+                "child {pid} ended as a zombie: {stat}",
+            );
+            assert!(
+                Instant::now() < deadline,
+                "child {pid} still tracked by ps after pty_kill: {stat}",
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Calling `pty_kill` twice in a row resolves to `NotFound` on the
+    /// second call rather than racing inside the registry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn kill_twice_returns_not_found_second_time() {
+        let m = PtyManager::new();
+        let mut a = args("/bin/sleep");
+        a.args = vec!["60".into()];
+        let resp = spawn_inner(m.clone(), a).expect("spawn sleep");
+
+        let m1 = m.clone();
+        let id = resp.session_id;
+        tokio::task::spawn_blocking(move || {
+            kill_inner(&m1, KillArgs { session_id: id }).expect("first kill");
+        })
+        .await
+        .expect("first kill join");
+
+        let m2 = m.clone();
+        let err = tokio::task::spawn_blocking(move || {
+            kill_inner(&m2, KillArgs { session_id: id }).expect_err("second kill should fail")
+        })
+        .await
+        .expect("second kill join");
+        assert!(matches!(err, KillError::NotFound(_)));
     }
 
     /// T2.7 acceptance: after resize the child must observe the new

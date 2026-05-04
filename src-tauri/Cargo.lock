@@ -5059,6 +5059,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "dirs",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",
