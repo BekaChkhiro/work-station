@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 use thiserror::Error;
 use uuid::Uuid;
@@ -339,9 +340,105 @@ fn get_scrollback_inner(
     Ok(chunk.into())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeArgs {
+    pub session_id: Uuid,
+}
+
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+pub enum SubscribeError {
+    #[error("session not found: {0}")]
+    NotFound(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+impl From<PtyError> for SubscribeError {
+    fn from(error: PtyError) -> Self {
+        match error {
+            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
+            other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+/// Stream PTY output to the frontend as raw bytes (T2.11).
+///
+/// Backed by `tauri::ipc::Channel<InvokeResponseBody>` so each frame
+/// rides the IPC bus as `Raw(Vec<u8>)` — the JS side observes an
+/// `ArrayBuffer` and skips the base64 → JSON → text-decoder dance the
+/// historical "emit a JSON string event" path forces.
+///
+/// Subscribers come and go via the broadcast tap, so this handler does
+/// not own the session: dropping the JS-side `Channel`, killing the
+/// session, or hitting EOF all converge on the spawned forwarder
+/// noticing a closed channel and exiting.
+///
+/// `Lagged(n)` from the broadcast receiver is logged and skipped — slow
+/// consumers see a gap rather than a stall, which T2.16's backpressure
+/// matrix will surface as a counter.
+#[tauri::command]
+pub async fn pty_subscribe(
+    args: SubscribeArgs,
+    on_data: Channel<InvokeResponseBody>,
+    manager: State<'_, PtyManager>,
+) -> Result<(), SubscribeError> {
+    subscribe_inner(manager.inner(), args.session_id, on_data)
+}
+
+fn subscribe_inner(
+    manager: &PtyManager,
+    session_id: Uuid,
+    on_data: Channel<InvokeResponseBody>,
+) -> Result<(), SubscribeError> {
+    let session = manager
+        .get(session_id)
+        .ok_or_else(|| SubscribeError::NotFound(session_id.to_string()))?;
+    let mut rx = session.output_tx.subscribe();
+
+    tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match rx.recv().await {
+                Ok(frame) => {
+                    if on_data
+                        .send(InvokeResponseBody::Raw(frame.to_vec()))
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "pty_subscribe: channel closed; ending forwarder",
+                        );
+                        return;
+                    }
+                }
+                Err(RecvError::Closed) => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "pty_subscribe: broadcast closed (session ended); ending forwarder",
+                    );
+                    return;
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        skipped = n,
+                        "pty_subscribe: subscriber lagged; frames dropped",
+                    );
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// Drain a broadcast receiver until the accumulated bytes contain
     /// `needle`. Tolerates `Lagged` (slow consumer) and returns whatever
@@ -811,6 +908,83 @@ mod tests {
         .await
         .expect("second kill join");
         assert!(matches!(err, KillError::NotFound(_)));
+    }
+
+    #[test]
+    fn subscribe_unknown_session_returns_not_found() {
+        let m = PtyManager::new();
+        let ch: Channel<InvokeResponseBody> = Channel::new(|_| Ok(()));
+        let err = subscribe_inner(&m, Uuid::new_v4(), ch).expect_err("unknown session should fail");
+        assert!(matches!(err, SubscribeError::NotFound(_)));
+    }
+
+    /// T2.11 acceptance: bytes broadcast by the reader reach the
+    /// frontend through `Channel<InvokeResponseBody::Raw>` byte-for-byte.
+    /// Drives `/bin/cat`, writes a UTF-8 payload through the pty, and
+    /// verifies the channel receives the same bytes the reader echoes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn subscribe_streams_raw_bytes_to_channel() {
+        use std::sync::Mutex as StdMutex;
+        use tokio::time::{sleep, timeout, Duration};
+
+        let m = PtyManager::new();
+        let resp = spawn_inner(m.clone(), args("/bin/cat")).expect("spawn cat");
+        let session_id = resp.session_id;
+
+        let recorder: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
+        let recorder_for_channel = Arc::clone(&recorder);
+        let ch: Channel<InvokeResponseBody> = Channel::new(move |body| {
+            // Only Raw frames are exercised — a Json arrival here would
+            // be a regression we want to fail loudly on.
+            match body {
+                InvokeResponseBody::Raw(bytes) => {
+                    recorder_for_channel
+                        .lock()
+                        .expect("recorder lock")
+                        .extend_from_slice(&bytes);
+                    Ok(())
+                }
+                InvokeResponseBody::Json(_) => {
+                    panic!("pty_subscribe must send Raw bytes, got Json")
+                }
+            }
+        });
+        subscribe_inner(&m, session_id, ch).expect("subscribe");
+
+        // Drive the pty so the reader has bytes to forward.
+        let payload = "héllo–αβγ\n".as_bytes().to_vec();
+        let needle = "αβγ".as_bytes();
+        let m_w = m.clone();
+        let p = payload.clone();
+        tokio::task::spawn_blocking(move || {
+            write_inner(
+                &m_w,
+                WriteArgs {
+                    session_id,
+                    data: p,
+                },
+            )
+            .expect("write");
+        })
+        .await
+        .expect("write join");
+
+        let recorder_for_wait = Arc::clone(&recorder);
+        timeout(Duration::from_secs(3), async move {
+            loop {
+                {
+                    let buf = recorder_for_wait.lock().expect("recorder lock");
+                    if buf.windows(needle.len()).any(|w| w == needle) {
+                        return;
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("channel did not receive UTF-8 payload in time");
+
+        m.kill(session_id).expect("kill cat");
     }
 
     /// T2.7 acceptance: after resize the child must observe the new

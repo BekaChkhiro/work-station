@@ -42,6 +42,17 @@ thiserror = "=2.0.18"
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
 
+# T2.11: bench-only deps. base64 reproduces the legacy IPC path
+# (base64-encoded JSON string) we're benchmarking against the new
+# Channel<Bytes> raw path.
+[dev-dependencies]
+criterion = { version = "=0.5.1", features = ["html_reports"] }
+base64 = "=0.22.1"
+
+[[bench]]
+name = "ipc_throughput"
+harness = false
+
 # Lint policy (T1.3): clippy::all + clippy::pedantic at warn, with a
 # pragmatic allow-list for noise that fights idiomatic Tauri/Solid code.
 [lints.clippy]
