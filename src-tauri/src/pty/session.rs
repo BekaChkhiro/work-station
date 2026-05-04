@@ -6,11 +6,12 @@
 //!
 //! Drop reaps the child so dropping a session never leaves a zombie.
 
-// T2.3 (PtyManager) is the first consumer; until it lands, the surface is
-// only exercised by the in-module test below.
+// T2.3 (PtyManager) is the first consumer; remaining fields are exercised
+// by later tasks (T2.4 reader, T2.6 writer, T2.7 resize).
 #![allow(dead_code)]
 
 use std::io::Write;
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -25,11 +26,16 @@ use uuid::Uuid;
 pub(crate) const DEFAULT_OUTPUT_CAPACITY: usize = 1024;
 
 /// Live PTY session.
+///
+/// `master` and `writer` are wrapped in `Mutex` so the whole struct is
+/// `Sync`, which lets the registry (T2.3) hand out `Arc<PtySession>` from
+/// Tauri-managed state. Lock holds are short — clone-the-reader for T2.4
+/// and per-write-call for T2.6.
 pub(crate) struct PtySession {
     pub(crate) id: Uuid,
     pub(crate) pid: u32,
-    pub(crate) master: Box<dyn MasterPty + Send>,
-    pub(crate) writer: Box<dyn Write + Send>,
+    pub(crate) master: Mutex<Box<dyn MasterPty + Send>>,
+    pub(crate) writer: Mutex<Box<dyn Write + Send>>,
     pub(crate) child: Box<dyn Child + Send + Sync>,
     pub(crate) output_tx: broadcast::Sender<Bytes>,
     pub(crate) created_at: SystemTime,
@@ -50,8 +56,8 @@ impl PtySession {
         Self {
             id: Uuid::new_v4(),
             pid,
-            master,
-            writer,
+            master: Mutex::new(master),
+            writer: Mutex::new(writer),
             child,
             output_tx,
             created_at: SystemTime::now(),
