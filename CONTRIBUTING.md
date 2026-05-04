@@ -91,18 +91,19 @@ Unsigned `.msi` and `.exe` will trigger SmartScreen on first run:
 
 ## Development scripts
 
-| Command                        | What it does                                                        |
-| ------------------------------ | ------------------------------------------------------------------- |
-| `pnpm dev`                     | Vite-only dev server (no Tauri shell)                               |
-| `pnpm tauri dev`               | Tauri shell + Vite HMR (the usual workflow)                         |
-| `pnpm tauri build`             | Release bundle for the host platform                                |
-| `pnpm typecheck`               | `tsc --noEmit` — strict TS (incl. `noUncheckedIndexedAccess`)       |
-| `pnpm lint`                    | ESLint v9 flat config (typescript-eslint strict + Solid + Prettier) |
-| `pnpm lint:fix`                | ESLint with auto-fix                                                |
-| `pnpm format:check`            | Prettier check across the repo                                      |
-| `pnpm format`                  | Prettier write                                                      |
-| `cargo fmt --check`            | rustfmt gate (run inside `src-tauri/`)                              |
-| `cargo clippy ... -D warnings` | clippy::all + clippy::pedantic, errors-as-failures                  |
+| Command                                                                                                                                                  | What it does                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `pnpm dev`                                                                                                                                               | Vite-only dev server (no Tauri shell)                                                          |
+| `pnpm tauri dev`                                                                                                                                         | Tauri shell + Vite HMR (the usual workflow)                                                    |
+| `pnpm tauri build`                                                                                                                                       | Release bundle for the host platform                                                           |
+| `pnpm typecheck`                                                                                                                                         | `tsc --noEmit` — strict TS (incl. `noUncheckedIndexedAccess`)                                  |
+| `pnpm lint`                                                                                                                                              | ESLint v9 flat config (typescript-eslint strict + Solid + Prettier)                            |
+| `pnpm lint:fix`                                                                                                                                          | ESLint with auto-fix                                                                           |
+| `pnpm format:check`                                                                                                                                      | Prettier check across the repo                                                                 |
+| `pnpm format`                                                                                                                                            | Prettier write                                                                                 |
+| `cargo fmt --check`                                                                                                                                      | rustfmt gate (run inside `src-tauri/`)                                                         |
+| `cargo clippy ... -D warnings`                                                                                                                           | clippy::all + clippy::pedantic, errors-as-failures                                             |
+| `cargo llvm-cov --lib --ignore-filename-regex '(cli/\|commands/(log\|mod)\.rs\|db/\|ipc/\|lib\.rs\|logging\.rs\|main\.rs\|menu/)' --fail-under-lines 80` | T2.13 coverage gate — pty/ + commands/pty.rs ≥80% lines (CI: `.github/workflows/coverage.yml`) |
 
 ## Repository layout
 
