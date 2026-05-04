@@ -16,7 +16,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // PTY registry (T2.3) — app-scoped so sessions survive webview reloads.
         .manage(pty::PtyManager::new())
-        .invoke_handler(tauri::generate_handler![commands::log::log_from_frontend])
+        .invoke_handler(tauri::generate_handler![
+            commands::log::log_from_frontend,
+            commands::pty::pty_spawn,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
