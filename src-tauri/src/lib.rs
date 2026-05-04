@@ -20,6 +20,7 @@ pub fn run() {
             commands::log::log_from_frontend,
             commands::pty::pty_spawn,
             commands::pty::pty_write,
+            commands::pty::pty_resize,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

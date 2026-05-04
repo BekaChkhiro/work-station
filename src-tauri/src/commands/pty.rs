@@ -1,4 +1,4 @@
-//! PTY Tauri commands (T2.5 spawn, T2.6 write).
+//! PTY Tauri commands (T2.5 spawn, T2.6 write, T2.7 resize).
 //!
 //! Validates input from the frontend, forwards to `PtyManager`, and maps
 //! crate errors onto Serialize-able enums so the webview can branch on
@@ -54,9 +54,10 @@ impl From<PtyError> for SpawnError {
             PtyError::OpenPty(msg) | PtyError::Spawn(msg) | PtyError::Writer(msg) => {
                 Self::SpawnFailed(msg)
             }
-            PtyError::WriteIo(_) | PtyError::NotFound(_) | PtyError::LockPoisoned => {
-                Self::Internal(error.to_string())
-            }
+            PtyError::WriteIo(_)
+            | PtyError::ResizeIo(_)
+            | PtyError::NotFound(_)
+            | PtyError::LockPoisoned => Self::Internal(error.to_string()),
         }
     }
 }
@@ -155,6 +156,58 @@ pub async fn pty_write(args: WriteArgs, manager: State<'_, PtyManager>) -> Resul
 
 fn write_inner(manager: &PtyManager, args: WriteArgs) -> Result<(), WriteError> {
     manager.write(args.session_id, &args.data)?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeArgs {
+    pub session_id: Uuid,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+pub enum ResizeError {
+    #[error("invalid arguments: {0}")]
+    InvalidArgs(String),
+    #[error("session not found: {0}")]
+    NotFound(String),
+    #[error("resize failed: {0}")]
+    ResizeFailed(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+impl From<PtyError> for ResizeError {
+    fn from(error: PtyError) -> Self {
+        match error {
+            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
+            PtyError::ResizeIo(msg) => Self::ResizeFailed(msg),
+            other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn pty_resize(
+    args: ResizeArgs,
+    manager: State<'_, PtyManager>,
+) -> Result<(), ResizeError> {
+    let manager = manager.inner().clone();
+    tokio::task::spawn_blocking(move || resize_inner(&manager, args))
+        .await
+        .map_err(|e| ResizeError::Internal(format!("blocking task join failed: {e}")))?
+}
+
+fn resize_inner(manager: &PtyManager, args: ResizeArgs) -> Result<(), ResizeError> {
+    if args.cols == 0 || args.rows == 0 {
+        return Err(ResizeError::InvalidArgs(
+            "cols and rows must be greater than zero".into(),
+        ));
+    }
+    manager.resize(args.session_id, args.cols, args.rows)?;
     Ok(())
 }
 
@@ -380,5 +433,127 @@ mod tests {
         );
 
         m.kill(session_id).expect("kill cat");
+    }
+
+    #[test]
+    fn resize_rejects_zero_dimensions() {
+        let m = PtyManager::new();
+        let err = resize_inner(
+            &m,
+            ResizeArgs {
+                session_id: Uuid::new_v4(),
+                cols: 0,
+                rows: 24,
+            },
+        )
+        .expect_err("zero cols should fail");
+        assert!(matches!(err, ResizeError::InvalidArgs(_)));
+    }
+
+    #[test]
+    fn resize_unknown_session_returns_not_found() {
+        let m = PtyManager::new();
+        let err = resize_inner(
+            &m,
+            ResizeArgs {
+                session_id: Uuid::new_v4(),
+                cols: 100,
+                rows: 30,
+            },
+        )
+        .expect_err("unknown session should fail");
+        assert!(matches!(err, ResizeError::NotFound(_)));
+    }
+
+    /// T2.7 acceptance: after resize the child must observe the new
+    /// winsize. Drives `/bin/sh` and reads `stty size` before/after.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resize_propagates_to_child_via_stty() {
+        use tokio::sync::broadcast::error::RecvError;
+        use tokio::time::{timeout, Duration};
+
+        async fn await_substring(
+            rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>,
+            needle: &[u8],
+        ) -> Vec<u8> {
+            let mut combined: Vec<u8> = Vec::new();
+            loop {
+                match rx.recv().await {
+                    Ok(b) => {
+                        combined.extend_from_slice(&b);
+                        if combined.windows(needle.len()).any(|w| w == needle) {
+                            return combined;
+                        }
+                    }
+                    Err(RecvError::Closed) => return combined,
+                    Err(RecvError::Lagged(_)) => {}
+                }
+            }
+        }
+
+        let m = PtyManager::new();
+        let resp = spawn_inner(m.clone(), args("/bin/sh")).expect("spawn sh");
+        let session_id = resp.session_id;
+        let mut rx = m
+            .get(session_id)
+            .expect("get session")
+            .output_tx
+            .subscribe();
+
+        // Initial dims: spawn defaults to 80x24 — see `args(...)` helper.
+        let m_w = m.clone();
+        tokio::task::spawn_blocking(move || {
+            write_inner(
+                &m_w,
+                WriteArgs {
+                    session_id,
+                    data: b"stty size\n".to_vec(),
+                },
+            )
+            .expect("write stty 1");
+        })
+        .await
+        .expect("join 1");
+
+        let _ = timeout(Duration::from_secs(3), await_substring(&mut rx, b"24 80"))
+            .await
+            .expect("initial '24 80' not seen from stty");
+
+        // Resize via the command-layer entry point so the validation +
+        // error mapping it adds is exercised end-to-end.
+        let m_r = m.clone();
+        tokio::task::spawn_blocking(move || {
+            resize_inner(
+                &m_r,
+                ResizeArgs {
+                    session_id,
+                    cols: 120,
+                    rows: 40,
+                },
+            )
+            .expect("resize");
+        })
+        .await
+        .expect("resize join");
+
+        let m_w = m.clone();
+        tokio::task::spawn_blocking(move || {
+            write_inner(
+                &m_w,
+                WriteArgs {
+                    session_id,
+                    data: b"stty size\n".to_vec(),
+                },
+            )
+            .expect("write stty 2");
+        })
+        .await
+        .expect("join 2");
+
+        let _ = timeout(Duration::from_secs(3), await_substring(&mut rx, b"40 120"))
+            .await
+            .expect("post-resize '40 120' not seen from stty");
+
+        m.kill(session_id).expect("kill sh");
     }
 }

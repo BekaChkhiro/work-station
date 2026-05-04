@@ -8,5 +8,5 @@ mod session;
 
 pub(crate) use manager::{PtyError, PtyManager, SpawnConfig};
 pub(crate) use reader::spawn_reader;
-#[allow(unused_imports)] // wider consumers land in T2.6+ (write, resize).
+#[allow(unused_imports)] // direct consumers grow as later phases land.
 pub(crate) use session::PtySession;
