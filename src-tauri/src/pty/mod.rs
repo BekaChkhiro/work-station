@@ -4,6 +4,7 @@
 
 mod manager;
 mod reader;
+mod scrollback;
 mod session;
 
 pub(crate) use manager::{PtyError, PtyManager, SpawnConfig};

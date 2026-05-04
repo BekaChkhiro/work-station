@@ -18,6 +18,7 @@
 #![allow(dead_code)] // call site lands in T2.5 (pty_spawn).
 
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
@@ -25,6 +26,7 @@ use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use super::manager::PtyManager;
+use super::scrollback::Scrollback;
 use super::session::PtySession;
 
 /// Size at which the coalescer flushes early. One IPC frame's worth so
@@ -59,6 +61,11 @@ pub(crate) fn spawn_reader(manager: PtyManager, session: &PtySession) {
     let session_id = session.id;
     let pid = session.pid;
     let output_tx = session.output_tx.clone();
+    // Cloning the Arc — not the session — so a `manager.kill` can drop
+    // the session while the coalescer still has somewhere to deposit its
+    // last frame. The session's own clone goes away on drop, leaving
+    // the coalescer's clone as the last reference until it exits.
+    let scrollback = Arc::clone(&session.scrollback);
 
     let reader = {
         let Ok(guard) = session.master.lock() else {
@@ -90,7 +97,9 @@ pub(crate) fn spawn_reader(manager: PtyManager, session: &PtySession) {
         .spawn(move || run_blocking_reader(session_id, pid, reader, raw_tx))
         .expect("spawn pty reader thread");
 
-    tokio::spawn(run_coalescer(session_id, pid, raw_rx, output_tx, manager));
+    tokio::spawn(run_coalescer(
+        session_id, pid, raw_rx, output_tx, scrollback, manager,
+    ));
 }
 
 fn run_blocking_reader(
@@ -145,6 +154,7 @@ async fn run_coalescer(
     pid: u32,
     mut raw_rx: mpsc::Receiver<Bytes>,
     output_tx: broadcast::Sender<Bytes>,
+    scrollback: Arc<Mutex<Scrollback>>,
     manager: PtyManager,
 ) {
     let mut buf = BytesMut::with_capacity(FLUSH_BYTES * 2);
@@ -170,13 +180,13 @@ async fn run_coalescer(
                     deadline = Some(Instant::now() + FLUSH_INTERVAL);
                 }
                 if buf.len() >= FLUSH_BYTES {
-                    flush(session_id, &mut buf, &output_tx, "size");
+                    flush(session_id, &mut buf, &output_tx, &scrollback, "size");
                     deadline = None;
                 }
             }
             Event::Chunk(None) => {
                 if !buf.is_empty() {
-                    flush(session_id, &mut buf, &output_tx, "eof");
+                    flush(session_id, &mut buf, &output_tx, &scrollback, "eof");
                 }
                 tracing::info!(
                     session_id = %session_id,
@@ -198,7 +208,7 @@ async fn run_coalescer(
             }
             Event::Timer => {
                 if !buf.is_empty() {
-                    flush(session_id, &mut buf, &output_tx, "timer");
+                    flush(session_id, &mut buf, &output_tx, &scrollback, "timer");
                 }
                 deadline = None;
             }
@@ -210,6 +220,7 @@ fn flush(
     session_id: Uuid,
     buf: &mut BytesMut,
     output_tx: &broadcast::Sender<Bytes>,
+    scrollback: &Mutex<Scrollback>,
     reason: &'static str,
 ) {
     let frame = buf.split().freeze();
@@ -220,6 +231,19 @@ fn flush(
         reason,
         "pty reader: flush",
     );
+
+    // Tap the scrollback first — `Bytes::clone` is a refcount bump, no
+    // copy. A poisoned mutex shouldn't kill the broadcast path, so we
+    // log and keep going; the live stream still reaches subscribers.
+    match scrollback.lock() {
+        Ok(mut sb) => sb.push(frame.clone()),
+        Err(error) => tracing::warn!(
+            session_id = %session_id,
+            %error,
+            "pty reader: scrollback mutex poisoned; frame skipped",
+        ),
+    }
+
     // Err = no active subscribers; routine and not worth logging.
     let _ = output_tx.send(frame);
 }
@@ -303,5 +327,95 @@ mod tests {
             frames.len(),
         );
         assert_eq!(m.count(), 0, "session should be removed on EOF");
+    }
+
+    /// T2.9 acceptance: every frame the reader broadcasts is also
+    /// stored in the per-session scrollback, byte-for-byte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scrollback_captures_broadcast_frames() {
+        let m = PtyManager::new();
+        let id = m
+            .spawn(spawn_config("/usr/bin/seq", &["1", "200"]))
+            .expect("spawn");
+        let session = m.get(id).expect("get");
+        // Hold a scrollback handle independent of the session — drop
+        // the session before draining so the broadcast channel can
+        // close (otherwise drain hangs on the session's own sender).
+        let scrollback_handle = Arc::clone(&session.scrollback);
+        let mut rx = session.output_tx.subscribe();
+        spawn_reader(m.clone(), &session);
+        drop(session);
+
+        let frames = drain(&mut rx).await;
+        let broadcast_total: usize = frames.iter().map(Bytes::len).sum();
+        assert!(broadcast_total > 0, "expected non-empty output");
+
+        let sb = scrollback_handle.lock().expect("scrollback lock");
+        assert_eq!(
+            sb.total_bytes(),
+            broadcast_total,
+            "scrollback total must match broadcast total",
+        );
+        assert_eq!(
+            sb.frame_count(),
+            frames.len(),
+            "scrollback should contain one entry per broadcast frame",
+        );
+        let scrollback_bytes: Vec<u8> = sb.iter().flat_map(|b| b.iter().copied()).collect();
+        let broadcast_bytes: Vec<u8> = frames.iter().flat_map(|b| b.iter().copied()).collect();
+        assert_eq!(
+            scrollback_bytes, broadcast_bytes,
+            "scrollback bytes must match broadcast bytes",
+        );
+    }
+
+    /// T2.9 acceptance: with a tight cap, scrollback total stays
+    /// bounded and the oldest output is dropped while live broadcast
+    /// is unaffected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scrollback_cap_bounds_memory_under_burst() {
+        // Constrain to 8 KiB so a `seq 1 10000` burst (~50KB+) forces
+        // multiple eviction passes during the run.
+        const CAP: usize = 8 * 1024;
+
+        let m = PtyManager::new();
+        let id = m
+            .spawn(spawn_config("/usr/bin/seq", &["1", "10000"]))
+            .expect("spawn");
+        let session = m.get(id).expect("get");
+        // Replace the default 4MB scrollback with a tight cap before
+        // the reader starts pushing into it.
+        {
+            let mut sb = session.scrollback.lock().expect("scrollback lock");
+            *sb = Scrollback::with_capacity(CAP);
+        }
+        let scrollback_handle = Arc::clone(&session.scrollback);
+        let mut rx = session.output_tx.subscribe();
+        spawn_reader(m.clone(), &session);
+        drop(session);
+
+        let frames = drain(&mut rx).await;
+        let broadcast_total: usize = frames.iter().map(Bytes::len).sum();
+        assert!(
+            broadcast_total > CAP,
+            "test pre-condition: broadcast {broadcast_total} should exceed cap {CAP}",
+        );
+
+        let sb = scrollback_handle.lock().expect("scrollback lock");
+        assert!(
+            sb.total_bytes() <= CAP,
+            "scrollback {} exceeded cap {CAP}",
+            sb.total_bytes(),
+        );
+        assert!(!sb.is_empty(), "scrollback must retain a tail of output");
+
+        // The retained tail is a suffix of the broadcast stream — i.e.
+        // the most-recent N bytes, byte-identical to the broadcast.
+        let broadcast_bytes: Vec<u8> = frames.iter().flat_map(|b| b.iter().copied()).collect();
+        let scrollback_bytes: Vec<u8> = sb.iter().flat_map(|b| b.iter().copied()).collect();
+        assert!(
+            broadcast_bytes.ends_with(&scrollback_bytes),
+            "scrollback should be a contiguous tail of the broadcast",
+        );
     }
 }
