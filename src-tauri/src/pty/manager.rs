@@ -29,6 +29,8 @@ pub(crate) enum PtyError {
     Writer(String),
     #[error("write to pty failed: {0}")]
     WriteIo(String),
+    #[error("resize pty failed: {0}")]
+    ResizeIo(String),
     #[error("session not found: {0}")]
     NotFound(Uuid),
     #[error("registry lock poisoned")]
@@ -165,6 +167,32 @@ impl PtyManager {
         writer
             .flush()
             .map_err(|e| PtyError::WriteIo(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Resize the pty so the child sees a SIGWINCH and re-flows its output.
+    ///
+    /// Calls `MasterPty::resize` under a short master-mutex hold; the
+    /// reader task (T2.4) only locks the master once at startup to clone
+    /// its reader, so this can't deadlock against an in-flight read.
+    /// Zero dimensions are a frontend bug and rejected up-front rather
+    /// than forwarded to the kernel where they'd silently no-op.
+    pub fn resize(&self, id: Uuid, cols: u16, rows: u16) -> Result<(), PtyError> {
+        let session = {
+            let map = self.inner.read().map_err(|_| PtyError::LockPoisoned)?;
+            map.get(&id).cloned()
+        }
+        .ok_or(PtyError::NotFound(id))?;
+
+        let master = session.master.lock().map_err(|_| PtyError::LockPoisoned)?;
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| PtyError::ResizeIo(e.to_string()))?;
         Ok(())
     }
 

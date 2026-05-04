@@ -6,8 +6,8 @@
 //!
 //! Drop reaps the child so dropping a session never leaves a zombie.
 
-// T2.3 (PtyManager) is the first consumer; remaining fields are exercised
-// by later tasks (T2.4 reader, T2.6 writer, T2.7 resize).
+// T2.3 (PtyManager) is the first consumer; remaining fields land in
+// later phase-2 tasks (e.g. scrollback + binary IPC).
 #![allow(dead_code)]
 
 use std::io::Write;
