@@ -1,4 +1,5 @@
-//! PTY Tauri commands (T2.5 spawn, T2.6 write, T2.7 resize, T2.8 kill).
+//! PTY Tauri commands (T2.5 spawn, T2.6 write, T2.7 resize, T2.8 kill,
+//! T2.10 `get_scrollback`).
 //!
 //! Validates input from the frontend, forwards to `PtyManager`, and maps
 //! crate errors onto Serialize-able enums so the webview can branch on
@@ -12,7 +13,7 @@ use tauri::State;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
+use crate::pty::{spawn_reader, PtyError, PtyManager, ScrollbackChunk, SpawnConfig};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,9 +255,116 @@ fn kill_inner(manager: &PtyManager, args: KillArgs) -> Result<(), KillError> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetScrollbackArgs {
+    pub session_id: Uuid,
+    pub offset_bytes: usize,
+    pub limit_bytes: usize,
+}
+
+/// Frontend response for `pty_get_scrollback` (T2.10).
+///
+/// `data` is the byte slice from the requested window.
+/// `total_bytes` is the size of the scrollback at read time — useful
+/// for detecting eviction across paginated calls. `next_offset` is the
+/// offset to pass on the next call to continue reading; equals
+/// `total_bytes` once the caller has drained the snapshot.
+///
+/// **Consistency:** offsets are into the *current* ring snapshot, which
+/// can shift if the reader evicts frames or appends new ones between
+/// calls. For a stable view (e.g. terminal replay on mount), do a
+/// single call with `limit_bytes = usize::MAX`. Use pagination only
+/// when the caller is OK with a best-effort tail of a live, mutating
+/// buffer — the loop's only safe termination condition is `data.is_empty()`,
+/// since a buffer growing faster than the reader paginates will never
+/// settle on `next_offset == total_bytes`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetScrollbackResponse {
+    pub data: Vec<u8>,
+    pub total_bytes: usize,
+    pub next_offset: usize,
+}
+
+impl From<ScrollbackChunk> for GetScrollbackResponse {
+    fn from(chunk: ScrollbackChunk) -> Self {
+        Self {
+            data: chunk.data,
+            total_bytes: chunk.total_bytes,
+            next_offset: chunk.next_offset,
+        }
+    }
+}
+
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+pub enum GetScrollbackError {
+    #[error("session not found: {0}")]
+    NotFound(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+impl From<PtyError> for GetScrollbackError {
+    fn from(error: PtyError) -> Self {
+        match error {
+            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
+            other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+/// Read a window of stored output from a session's scrollback (T2.10).
+///
+/// Off-loaded to `spawn_blocking` because copying up to ~4 MiB out of
+/// the ring under the scrollback mutex is non-trivial and would block
+/// the tokio runtime.
+#[tauri::command]
+pub async fn pty_get_scrollback(
+    args: GetScrollbackArgs,
+    manager: State<'_, PtyManager>,
+) -> Result<GetScrollbackResponse, GetScrollbackError> {
+    let manager = manager.inner().clone();
+    tokio::task::spawn_blocking(move || get_scrollback_inner(&manager, args))
+        .await
+        .map_err(|e| GetScrollbackError::Internal(format!("blocking task join failed: {e}")))?
+}
+
+fn get_scrollback_inner(
+    manager: &PtyManager,
+    args: GetScrollbackArgs,
+) -> Result<GetScrollbackResponse, GetScrollbackError> {
+    let chunk = manager.read_scrollback(args.session_id, args.offset_bytes, args.limit_bytes)?;
+    Ok(chunk.into())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Drain a broadcast receiver until the accumulated bytes contain
+    /// `needle`. Tolerates `Lagged` (slow consumer) and returns whatever
+    /// has been received once the channel closes.
+    async fn await_substring(
+        rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>,
+        needle: &[u8],
+    ) -> Vec<u8> {
+        use tokio::sync::broadcast::error::RecvError;
+        let mut combined: Vec<u8> = Vec::new();
+        loop {
+            match rx.recv().await {
+                Ok(b) => {
+                    combined.extend_from_slice(&b);
+                    if combined.windows(needle.len()).any(|w| w == needle) {
+                        return combined;
+                    }
+                }
+                Err(RecvError::Closed) => return combined,
+                Err(RecvError::Lagged(_)) => {}
+            }
+        }
+    }
 
     fn args(command: &str) -> SpawnArgs {
         SpawnArgs {
@@ -385,27 +493,7 @@ mod tests {
     /// through the reader's broadcast channel.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn write_round_trips_ascii_and_utf8_via_pty() {
-        use tokio::sync::broadcast::error::RecvError;
         use tokio::time::{timeout, Duration};
-
-        async fn await_substring(
-            rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>,
-            needle: &[u8],
-        ) -> Vec<u8> {
-            let mut combined: Vec<u8> = Vec::new();
-            loop {
-                match rx.recv().await {
-                    Ok(b) => {
-                        combined.extend_from_slice(&b);
-                        if combined.windows(needle.len()).any(|w| w == needle) {
-                            return combined;
-                        }
-                    }
-                    Err(RecvError::Closed) => return combined,
-                    Err(RecvError::Lagged(_)) => {}
-                }
-            }
-        }
 
         let m = PtyManager::new();
         let resp = spawn_inner(m.clone(), args("/bin/cat")).expect("spawn cat");
@@ -575,6 +663,130 @@ mod tests {
         }
     }
 
+    #[test]
+    fn get_scrollback_unknown_session_returns_not_found() {
+        let m = PtyManager::new();
+        let err = get_scrollback_inner(
+            &m,
+            GetScrollbackArgs {
+                session_id: Uuid::new_v4(),
+                offset_bytes: 0,
+                limit_bytes: 16,
+            },
+        )
+        .expect_err("unknown session should fail");
+        assert!(matches!(err, GetScrollbackError::NotFound(_)));
+    }
+
+    /// T2.10 acceptance: after streaming output through the session, a
+    /// fresh subscriber can rebuild the same byte sequence by reading
+    /// scrollback front-to-back — the "replay full buffer on mount"
+    /// path the frontend exercises when re-attaching to a live session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn get_scrollback_replays_full_buffer_for_live_session() {
+        use tokio::time::{timeout, Duration};
+
+        let m = PtyManager::new();
+        let resp = spawn_inner(m.clone(), args("/bin/cat")).expect("spawn cat");
+        let session_id = resp.session_id;
+        let mut rx = m
+            .get(session_id)
+            .expect("get session")
+            .output_tx
+            .subscribe();
+
+        // Drive a few writes through cat so the reader fills scrollback.
+        for line in [b"alpha\n".as_ref(), b"beta\n".as_ref(), b"gamma\n".as_ref()] {
+            let m_w = m.clone();
+            let payload = line.to_vec();
+            tokio::task::spawn_blocking(move || {
+                write_inner(
+                    &m_w,
+                    WriteArgs {
+                        session_id,
+                        data: payload,
+                    },
+                )
+                .expect("write");
+            })
+            .await
+            .expect("write join");
+        }
+        // Wait until the last echo round-trips before reading scrollback,
+        // otherwise the read can race ahead of the reader's flush.
+        let _ = timeout(Duration::from_secs(3), await_substring(&mut rx, b"gamma"))
+            .await
+            .expect("gamma not echoed in time");
+
+        // Full read on mount.
+        let m_r = m.clone();
+        let full = tokio::task::spawn_blocking(move || {
+            get_scrollback_inner(
+                &m_r,
+                GetScrollbackArgs {
+                    session_id,
+                    offset_bytes: 0,
+                    limit_bytes: usize::MAX,
+                },
+            )
+            .expect("get_scrollback")
+        })
+        .await
+        .expect("scrollback join");
+
+        assert!(
+            full.total_bytes > 0,
+            "scrollback should have captured live output",
+        );
+        assert_eq!(
+            full.data.len(),
+            full.total_bytes,
+            "full read must return exactly total_bytes",
+        );
+        assert_eq!(full.next_offset, full.total_bytes);
+        for needle in [b"alpha".as_ref(), b"beta".as_ref(), b"gamma".as_ref()] {
+            assert!(
+                full.data.windows(needle.len()).any(|w| w == needle),
+                "expected {:?} in replay, got {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&full.data),
+            );
+        }
+
+        // Paginated read: walking 8-byte windows must reproduce the same
+        // bytes the full read returned.
+        let mut offset = 0usize;
+        let mut pieced = Vec::with_capacity(full.total_bytes);
+        let limit = 8usize;
+        loop {
+            let m_p = m.clone();
+            let page = tokio::task::spawn_blocking(move || {
+                get_scrollback_inner(
+                    &m_p,
+                    GetScrollbackArgs {
+                        session_id,
+                        offset_bytes: offset,
+                        limit_bytes: limit,
+                    },
+                )
+                .expect("get_scrollback page")
+            })
+            .await
+            .expect("page join");
+            if page.data.is_empty() {
+                break;
+            }
+            pieced.extend_from_slice(&page.data);
+            offset = page.next_offset;
+            if offset >= page.total_bytes {
+                break;
+            }
+        }
+        assert_eq!(pieced, full.data, "paginated read must equal full read");
+
+        m.kill(session_id).expect("kill cat");
+    }
+
     /// Calling `pty_kill` twice in a row resolves to `NotFound` on the
     /// second call rather than racing inside the registry.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -605,27 +817,7 @@ mod tests {
     /// winsize. Drives `/bin/sh` and reads `stty size` before/after.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn resize_propagates_to_child_via_stty() {
-        use tokio::sync::broadcast::error::RecvError;
         use tokio::time::{timeout, Duration};
-
-        async fn await_substring(
-            rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>,
-            needle: &[u8],
-        ) -> Vec<u8> {
-            let mut combined: Vec<u8> = Vec::new();
-            loop {
-                match rx.recv().await {
-                    Ok(b) => {
-                        combined.extend_from_slice(&b);
-                        if combined.windows(needle.len()).any(|w| w == needle) {
-                            return combined;
-                        }
-                    }
-                    Err(RecvError::Closed) => return combined,
-                    Err(RecvError::Lagged(_)) => {}
-                }
-            }
-        }
 
         let m = PtyManager::new();
         let resp = spawn_inner(m.clone(), args("/bin/sh")).expect("spawn sh");

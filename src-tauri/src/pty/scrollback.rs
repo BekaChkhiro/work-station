@@ -10,7 +10,12 @@
 //! (~4KB at the reader's default flush size). With a 4MB default cap
 //! that's a ~0.1% overshoot — fine for personal-use scope.
 
-#![allow(dead_code)] // T2.10 (pty_get_scrollback) consumes the read API.
+// Several inspectors (`cap_bytes`, `frame_count`, `is_empty`,
+// `with_capacity`) are only exercised from tests today; future tasks
+// (T3.4 user-configurable cap, telemetry) will pull them into prod
+// paths. Allowing dead_code here keeps the read API discoverable
+// without per-fn churn each phase.
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 
@@ -86,6 +91,37 @@ impl Scrollback {
     /// Iterate frames oldest → newest. Cheap — `Bytes` is refcounted.
     pub fn iter(&self) -> impl Iterator<Item = &Bytes> {
         self.chunks.iter()
+    }
+
+    /// Copy the byte range `[offset, offset + limit)` into a fresh `Vec`.
+    ///
+    /// Offsets are into the *current* ring snapshot (oldest retained
+    /// byte = 0). Out-of-range offsets and zero limits return an empty
+    /// vec; the upper bound clamps to `total_bytes`, so callers can
+    /// pass a generous `limit` (e.g. `usize::MAX`) to mean "until end".
+    pub fn slice(&self, offset: usize, limit: usize) -> Vec<u8> {
+        if limit == 0 || offset >= self.total_bytes {
+            return Vec::new();
+        }
+        let end = offset.saturating_add(limit).min(self.total_bytes);
+        let mut out = Vec::with_capacity(end - offset);
+        let mut cursor: usize = 0;
+        for frame in &self.chunks {
+            let frame_start = cursor;
+            let frame_end = frame_start + frame.len();
+            cursor = frame_end;
+
+            if frame_end <= offset {
+                continue;
+            }
+            if frame_start >= end {
+                break;
+            }
+            let lo = offset.saturating_sub(frame_start);
+            let hi = (end - frame_start).min(frame.len());
+            out.extend_from_slice(&frame[lo..hi]);
+        }
+        out
     }
 }
 
@@ -192,5 +228,97 @@ mod tests {
     fn default_uses_4mib_cap() {
         let sb = Scrollback::new();
         assert_eq!(sb.cap_bytes(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn slice_empty_is_empty() {
+        let sb = Scrollback::with_capacity(1024);
+        assert!(sb.slice(0, 16).is_empty());
+        assert!(sb.slice(0, 0).is_empty());
+        assert!(sb.slice(99, 16).is_empty());
+    }
+
+    #[test]
+    fn slice_zero_limit_is_empty() {
+        let mut sb = Scrollback::with_capacity(1024);
+        sb.push(frame(b"hello"));
+        assert!(sb.slice(0, 0).is_empty());
+        assert!(sb.slice(2, 0).is_empty());
+    }
+
+    #[test]
+    fn slice_full_range_returns_concatenated_bytes() {
+        let mut sb = Scrollback::with_capacity(1024);
+        sb.push(frame(b"abc"));
+        sb.push(frame(b"defg"));
+        sb.push(frame(b"hi"));
+        assert_eq!(sb.slice(0, usize::MAX), b"abcdefghi".to_vec());
+    }
+
+    #[test]
+    fn slice_inside_single_frame() {
+        let mut sb = Scrollback::with_capacity(1024);
+        sb.push(frame(b"abcdefghij"));
+        assert_eq!(sb.slice(2, 4), b"cdef".to_vec());
+    }
+
+    #[test]
+    fn slice_spans_frame_boundaries() {
+        let mut sb = Scrollback::with_capacity(1024);
+        sb.push(frame(b"abc")); //   0..3
+        sb.push(frame(b"defg")); //  3..7
+        sb.push(frame(b"hi")); //    7..9
+                               // 1..8 → "bcdefgh"
+        assert_eq!(sb.slice(1, 7), b"bcdefgh".to_vec());
+    }
+
+    #[test]
+    fn slice_clamps_when_limit_exceeds_total() {
+        let mut sb = Scrollback::with_capacity(1024);
+        sb.push(frame(b"abc"));
+        sb.push(frame(b"defg"));
+        // total = 7; ask for 50 — get the remaining 5 from offset 2.
+        assert_eq!(sb.slice(2, 50), b"cdefg".to_vec());
+    }
+
+    #[test]
+    fn slice_offset_at_total_returns_empty() {
+        let mut sb = Scrollback::with_capacity(1024);
+        sb.push(frame(b"abc"));
+        assert!(sb.slice(3, 10).is_empty());
+        assert!(sb.slice(99, 10).is_empty());
+    }
+
+    #[test]
+    fn slice_pagination_round_trip_matches_full() {
+        // Walk the buffer in 5-byte windows and confirm the
+        // concatenation equals slice(0, total).
+        let mut sb = Scrollback::with_capacity(1024);
+        sb.push(frame(b"alpha"));
+        sb.push(frame(b"beta"));
+        sb.push(frame(b"gamma"));
+        sb.push(frame(b"delta"));
+        let total = sb.total_bytes();
+
+        let full = sb.slice(0, total);
+        let mut pieced = Vec::with_capacity(total);
+        let mut offset = 0;
+        while offset < total {
+            let chunk = sb.slice(offset, 5);
+            assert!(!chunk.is_empty(), "non-empty buffer must yield bytes");
+            pieced.extend_from_slice(&chunk);
+            offset += chunk.len();
+        }
+        assert_eq!(pieced, full);
+    }
+
+    #[test]
+    fn slice_after_eviction_reads_retained_tail() {
+        let mut sb = Scrollback::with_capacity(6);
+        sb.push(frame(b"AAA")); // 3 bytes
+        sb.push(frame(b"BBB")); // 6 bytes — at cap
+        sb.push(frame(b"CCC")); // 9 → evict A, total = 6
+        assert_eq!(sb.total_bytes(), 6);
+        assert_eq!(sb.slice(0, usize::MAX), b"BBBCCC".to_vec());
     }
 }

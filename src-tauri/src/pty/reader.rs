@@ -235,6 +235,11 @@ fn flush(
     // Tap the scrollback first — `Bytes::clone` is a refcount bump, no
     // copy. A poisoned mutex shouldn't kill the broadcast path, so we
     // log and keep going; the live stream still reaches subscribers.
+    //
+    // Lock-hold is one push and is bounded; T2.10's `read_scrollback`
+    // can hold this same mutex for a worst-case ~4MiB copy, so flushes
+    // back up briefly while a frontend replay is in flight. Acceptable
+    // for personal-use scope; revisit if reader stalls show up.
     match scrollback.lock() {
         Ok(mut sb) => sb.push(frame.clone()),
         Err(error) => tracing::warn!(
