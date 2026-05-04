@@ -7,8 +7,8 @@
 #![allow(dead_code)] // T2.5 wires this into the Tauri command surface.
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -28,6 +28,8 @@ pub(crate) const KILL_GRACE: Duration = Duration::from_secs(2);
 pub(crate) enum PtyError {
     #[error("cwd does not exist: {0}")]
     CwdMissing(PathBuf),
+    #[error("command not found on PATH: {0}")]
+    CommandNotFound(String),
     #[error("openpty failed: {0}")]
     OpenPty(String),
     #[error("spawn failed: {0}")]
@@ -36,12 +38,16 @@ pub(crate) enum PtyError {
     Writer(String),
     #[error("write to pty failed: {0}")]
     WriteIo(String),
+    #[error("write to closed pty (session {0})")]
+    WriteToClosed(Uuid),
     #[error("resize pty failed: {0}")]
     ResizeIo(String),
     #[error("session not found: {0}")]
     NotFound(Uuid),
     #[error("registry lock poisoned")]
     LockPoisoned,
+    #[error("pty reader pipeline panicked (session {0})")]
+    ReaderPanic(Uuid),
 }
 
 /// Result of `PtyManager::read_scrollback` (T2.10).
@@ -92,6 +98,14 @@ impl PtyManager {
             if !cwd.exists() {
                 return Err(PtyError::CwdMissing(cwd.clone()));
             }
+        }
+
+        // Pre-flight command resolution (T2.15). Catching ENOENT here —
+        // before openpty + spawn — gives the frontend a deterministic
+        // `CommandNotFound` instead of a generic `SpawnFailed` derived
+        // from a platform-specific error string.
+        if !command_resolves(&config.command) {
+            return Err(PtyError::CommandNotFound(config.command.clone()));
         }
 
         let pty_system = native_pty_system();
@@ -205,13 +219,21 @@ impl PtyManager {
         }
         .ok_or(PtyError::NotFound(id))?;
 
+        // T2.15: if the child has already exited the master writer is
+        // pointed at a closed pipe — depending on platform the next
+        // write either succeeds silently or fails with a non-portable
+        // error string. A short `try_wait` pre-flight gives the
+        // frontend a deterministic `WriteToClosed` instead.
+        {
+            let mut child = session.child.lock().map_err(|_| PtyError::LockPoisoned)?;
+            if let Ok(Some(_)) = child.try_wait() {
+                return Err(PtyError::WriteToClosed(id));
+            }
+        }
+
         let mut writer = session.writer.lock().map_err(|_| PtyError::LockPoisoned)?;
-        writer
-            .write_all(data)
-            .map_err(|e| PtyError::WriteIo(e.to_string()))?;
-        writer
-            .flush()
-            .map_err(|e| PtyError::WriteIo(e.to_string()))?;
+        writer.write_all(data).map_err(|e| map_write_error(e, id))?;
+        writer.flush().map_err(|e| map_write_error(e, id))?;
         Ok(())
     }
 
@@ -283,6 +305,75 @@ impl PtyManager {
 
     pub fn count(&self) -> usize {
         self.inner.read().map_or(0, |m| m.len())
+    }
+}
+
+/// Resolve a command in the same way the spawned child eventually will.
+///
+/// Mirrors the typical PATH-walk behaviour of `execvp` / `CreateProcessW`
+/// so we can detect a missing binary up-front and surface
+/// `CommandNotFound` to the frontend instead of waiting for the platform
+/// to fail the spawn with an opaque error string (T2.15).
+fn command_resolves(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let candidate = Path::new(name);
+    let has_separator = name.contains('/') || cfg!(windows) && name.contains('\\');
+    if candidate.is_absolute() || has_separator {
+        return is_executable_file(candidate);
+    }
+
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        let direct = dir.join(name);
+        if is_executable_file(&direct) {
+            return true;
+        }
+        // Windows: PATHEXT lookup. Test the conventional set first so
+        // we don't miss `git` (which lives as `git.exe` on PATH).
+        #[cfg(windows)]
+        {
+            for ext in ["exe", "cmd", "bat", "com"] {
+                let with_ext = direct.with_extension(ext);
+                if is_executable_file(&with_ext) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    // Windows: file existence is enough — execution permission is
+    // governed by ACLs, not a unix-style mode bit, and the spawn API
+    // surfaces ACL failures the same way ENOENT does.
+    path.is_file()
+}
+
+/// Translate an `io::Error` from a write/flush onto the per-session pty
+/// stdin into the typed PTY error. `BrokenPipe` is the kernel's signal
+/// that the child has closed its end (exited or close(0)) — surface it
+/// as `WriteToClosed` so the frontend can show "session ended" instead
+/// of treating it as a generic IO failure.
+fn map_write_error(error: std::io::Error, session_id: Uuid) -> PtyError {
+    match error.kind() {
+        ErrorKind::BrokenPipe => PtyError::WriteToClosed(session_id),
+        _ => PtyError::WriteIo(error.to_string()),
     }
 }
 
@@ -509,6 +600,81 @@ mod xplat_tests {
         // buffer absorbs the write so the call must not block or error.
         m.write(id, b"hello\n").expect("write");
         m.kill(id).expect("kill");
+    }
+
+    /// T2.15: write to a session whose child has already exited must
+    /// return `WriteToClosed` (not generic `WriteIo`) so the frontend
+    /// can render a "session ended" message.
+    #[test]
+    fn write_to_exited_child_returns_write_to_closed() {
+        use std::time::{Duration, Instant};
+
+        // Use an immediately-exiting command so the child is reaped
+        // long before the test calls write().
+        let cfg = SpawnConfig {
+            #[cfg(unix)]
+            command: "/bin/sh".to_string(),
+            #[cfg(unix)]
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+            #[cfg(windows)]
+            command: "cmd.exe".to_string(),
+            #[cfg(windows)]
+            args: vec!["/C".to_string(), "exit /B 0".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let m = PtyManager::new();
+        let id = m.spawn(cfg).expect("spawn");
+
+        // No reader is attached at the manager-level test (spawn_reader
+        // is wired in by the commands layer), so the registry never
+        // auto-removes the session — try_wait observes the exited child
+        // directly.
+        let session = m.get(id).expect("get");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            {
+                let mut child = session.child.lock().expect("child lock");
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "child failed to exit");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(session);
+
+        match m.write(id, b"hello") {
+            Err(PtyError::WriteToClosed(returned)) => assert_eq!(returned, id),
+            other => panic!("expected WriteToClosed, got {other:?}"),
+        }
+
+        m.remove(id).expect("remove");
+    }
+
+    /// T2.15: a relative command name must be resolved against PATH.
+    /// `/bin/sleep` is absolute and exists, so the pre-flight passes.
+    /// Bare `sleep` is on PATH on every test runner we target — but
+    /// sanity check the negative case explicitly.
+    #[test]
+    fn spawn_unknown_relative_command_returns_command_not_found() {
+        let m = PtyManager::new();
+        let cfg = SpawnConfig {
+            command: "definitely-not-on-path-xyz".to_string(),
+            args: vec![],
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        };
+        match m.spawn(cfg) {
+            Err(PtyError::CommandNotFound(name)) => {
+                assert_eq!(name, "definitely-not-on-path-xyz");
+            }
+            other => panic!("expected CommandNotFound, got {other:?}"),
+        }
     }
 
     #[test]

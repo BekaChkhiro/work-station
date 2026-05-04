@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -53,6 +54,10 @@ pub(crate) struct PtySession {
     /// [`scrollback::DEFAULT_SCROLLBACK_BYTES`]; T3.4 will plumb the
     /// user-configured value from `app_settings`.
     pub(crate) scrollback: Arc<Mutex<Scrollback>>,
+    /// Set when the reader thread or coalescer task panics (T2.15). The
+    /// `Arc` is shared with the reader pipeline so a panic in either
+    /// half can flip it without holding the whole session alive.
+    pub(crate) reader_panic: Arc<AtomicBool>,
     pub(crate) created_at: SystemTime,
 }
 
@@ -76,8 +81,15 @@ impl PtySession {
             child: Mutex::new(child),
             output_tx,
             scrollback: Arc::new(Mutex::new(Scrollback::new())),
+            reader_panic: Arc::new(AtomicBool::new(false)),
             created_at: SystemTime::now(),
         }
+    }
+
+    /// `true` once the per-session reader pipeline has reported a panic.
+    /// Surfaced through `pty_subscribe` as `ReaderPanic` (T2.15).
+    pub(crate) fn reader_panicked(&self) -> bool {
+        self.reader_panic.load(Ordering::SeqCst)
     }
 
     /// Best-effort graceful shutdown (T2.8).

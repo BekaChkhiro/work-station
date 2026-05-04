@@ -1,9 +1,14 @@
 //! PTY Tauri commands (T2.5 spawn, T2.6 write, T2.7 resize, T2.8 kill,
-//! T2.10 `get_scrollback`).
+//! T2.10 `get_scrollback`, T2.15 error matrix).
 //!
 //! Validates input from the frontend, forwards to `PtyManager`, and maps
 //! crate errors onto Serialize-able enums so the webview can branch on
 //! `kind` rather than parse free-form strings.
+//!
+//! T2.15 — every error variant carries a flattened `userMessage` +
+//! `recovery` hint sourced from the matrix in `pty/errors.rs`. The
+//! per-variant constructor helpers below encode the mapping in one place
+//! so the wire shape stays consistent across commands.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,7 +19,9 @@ use tauri::State;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::pty::{spawn_reader, PtyError, PtyManager, ScrollbackChunk, SpawnConfig};
+use crate::pty::{
+    spawn_reader, PtyError, PtyManager, Recovery, ScrollbackChunk, SpawnConfig, UserShape,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,29 +44,111 @@ pub struct SpawnResponse {
 }
 
 #[derive(Debug, Error, Serialize)]
-#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SpawnError {
-    #[error("invalid arguments: {0}")]
-    InvalidArgs(String),
-    #[error("cwd does not exist: {0}")]
-    CwdMissing(String),
-    #[error("spawn failed: {0}")]
-    SpawnFailed(String),
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("{message}")]
+    InvalidArgs {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    CwdMissing {
+        path: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    CommandNotFound {
+        command: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    SpawnFailed {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    Internal {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+}
+
+impl SpawnError {
+    fn invalid_args(message: impl Into<String>) -> Self {
+        let m = message.into();
+        Self::InvalidArgs {
+            message: format!("invalid arguments: {m}"),
+            ui: UserShape::new(
+                "Terminal request was rejected. Check the command and dimensions.",
+                Recovery::Dismiss,
+            ),
+        }
+    }
+
+    fn cwd_missing(path: impl Into<String>) -> Self {
+        let p = path.into();
+        Self::CwdMissing {
+            message: format!("cwd does not exist: {p}"),
+            ui: UserShape::new(
+                format!("Working directory '{p}' was not found. Edit the project to point to a valid path."),
+                Recovery::EditProject,
+            ),
+            path: p,
+        }
+    }
+
+    fn command_not_found(command: impl Into<String>) -> Self {
+        let cmd = command.into();
+        Self::CommandNotFound {
+            message: format!("command not found on PATH: {cmd}"),
+            ui: UserShape::new(
+                format!("Couldn't find '{cmd}' on this system. Edit the project to use a command that exists."),
+                Recovery::EditProject,
+            ),
+            command: cmd,
+        }
+    }
+
+    fn spawn_failed(message: impl Into<String>) -> Self {
+        Self::SpawnFailed {
+            message: message.into(),
+            ui: UserShape::new("Couldn't start the terminal. Try again.", Recovery::Retry),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            ui: UserShape::new("An internal error occurred. Try again.", Recovery::Retry),
+        }
+    }
 }
 
 impl From<PtyError> for SpawnError {
     fn from(error: PtyError) -> Self {
         match error {
-            PtyError::CwdMissing(path) => Self::CwdMissing(path.display().to_string()),
+            PtyError::CwdMissing(path) => Self::cwd_missing(path.display().to_string()),
+            PtyError::CommandNotFound(cmd) => Self::command_not_found(cmd),
             PtyError::OpenPty(msg) | PtyError::Spawn(msg) | PtyError::Writer(msg) => {
-                Self::SpawnFailed(msg)
+                Self::spawn_failed(msg)
             }
             PtyError::WriteIo(_)
+            | PtyError::WriteToClosed(_)
             | PtyError::ResizeIo(_)
             | PtyError::NotFound(_)
-            | PtyError::LockPoisoned => Self::Internal(error.to_string()),
+            | PtyError::LockPoisoned
+            | PtyError::ReaderPanic(_) => Self::internal(error.to_string()),
         }
     }
 }
@@ -72,7 +161,7 @@ pub async fn pty_spawn(
     let manager = manager.inner().clone();
     tokio::task::spawn_blocking(move || spawn_inner(manager, args))
         .await
-        .map_err(|e| SpawnError::Internal(format!("blocking task join failed: {e}")))?
+        .map_err(|e| SpawnError::internal(format!("blocking task join failed: {e}")))?
 }
 
 fn spawn_inner(manager: PtyManager, args: SpawnArgs) -> Result<SpawnResponse, SpawnError> {
@@ -90,18 +179,18 @@ fn spawn_inner(manager: PtyManager, args: SpawnArgs) -> Result<SpawnResponse, Sp
     let id = manager.spawn(config)?;
     let session = manager
         .get(id)
-        .ok_or_else(|| SpawnError::Internal("spawned session missing from registry".into()))?;
+        .ok_or_else(|| SpawnError::internal("spawned session missing from registry"))?;
     spawn_reader(manager.clone(), &session);
     Ok(SpawnResponse { session_id: id })
 }
 
 fn validate(args: &SpawnArgs) -> Result<(), SpawnError> {
     if args.command.trim().is_empty() {
-        return Err(SpawnError::InvalidArgs("command must not be empty".into()));
+        return Err(SpawnError::invalid_args("command must not be empty"));
     }
     if args.cols == 0 || args.rows == 0 {
-        return Err(SpawnError::InvalidArgs(
-            "cols and rows must be greater than zero".into(),
+        return Err(SpawnError::invalid_args(
+            "cols and rows must be greater than zero",
         ));
     }
     Ok(())
@@ -128,22 +217,90 @@ pub struct WriteArgs {
 }
 
 #[derive(Debug, Error, Serialize)]
-#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum WriteError {
-    #[error("session not found: {0}")]
-    NotFound(String),
-    #[error("write failed: {0}")]
-    WriteFailed(String),
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("{message}")]
+    NotFound {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    WriteToClosed {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    WriteFailed {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    Internal {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+}
+
+impl WriteError {
+    fn not_found(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::NotFound {
+            message: format!("session not found: {id}"),
+            ui: UserShape::new(
+                "This terminal session is no longer available.",
+                Recovery::Dismiss,
+            ),
+            session_id: id,
+        }
+    }
+
+    fn write_to_closed(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::WriteToClosed {
+            message: format!("write to closed pty (session {id})"),
+            ui: UserShape::new(
+                "The terminal has exited. Open a new session to continue.",
+                Recovery::Dismiss,
+            ),
+            session_id: id,
+        }
+    }
+
+    fn write_failed(message: impl Into<String>) -> Self {
+        Self::WriteFailed {
+            message: message.into(),
+            ui: UserShape::new(
+                "Couldn't send input to the terminal. Try again.",
+                Recovery::Retry,
+            ),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            ui: UserShape::new("An internal error occurred. Try again.", Recovery::Retry),
+        }
+    }
 }
 
 impl From<PtyError> for WriteError {
     fn from(error: PtyError) -> Self {
         match error {
-            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
-            PtyError::WriteIo(msg) => Self::WriteFailed(msg),
-            other => Self::Internal(other.to_string()),
+            PtyError::NotFound(id) => Self::not_found(id),
+            PtyError::WriteToClosed(id) => Self::write_to_closed(id),
+            PtyError::WriteIo(msg) => Self::write_failed(msg),
+            other => Self::internal(other.to_string()),
         }
     }
 }
@@ -153,7 +310,7 @@ pub async fn pty_write(args: WriteArgs, manager: State<'_, PtyManager>) -> Resul
     let manager = manager.inner().clone();
     tokio::task::spawn_blocking(move || write_inner(&manager, args))
         .await
-        .map_err(|e| WriteError::Internal(format!("blocking task join failed: {e}")))?
+        .map_err(|e| WriteError::internal(format!("blocking task join failed: {e}")))?
 }
 
 fn write_inner(manager: &PtyManager, args: WriteArgs) -> Result<(), WriteError> {
@@ -170,24 +327,83 @@ pub struct ResizeArgs {
 }
 
 #[derive(Debug, Error, Serialize)]
-#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ResizeError {
-    #[error("invalid arguments: {0}")]
-    InvalidArgs(String),
-    #[error("session not found: {0}")]
-    NotFound(String),
-    #[error("resize failed: {0}")]
-    ResizeFailed(String),
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("{message}")]
+    InvalidArgs {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    NotFound {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    ResizeFailed {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    Internal {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+}
+
+impl ResizeError {
+    fn invalid_args(message: impl Into<String>) -> Self {
+        Self::InvalidArgs {
+            message: format!("invalid arguments: {}", message.into()),
+            ui: UserShape::new(
+                "Resize request was invalid. Check the dimensions.",
+                Recovery::Dismiss,
+            ),
+        }
+    }
+
+    fn not_found(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::NotFound {
+            message: format!("session not found: {id}"),
+            ui: UserShape::new(
+                "This terminal session is no longer available.",
+                Recovery::Dismiss,
+            ),
+            session_id: id,
+        }
+    }
+
+    fn resize_failed(message: impl Into<String>) -> Self {
+        Self::ResizeFailed {
+            message: message.into(),
+            ui: UserShape::new("Couldn't resize the terminal. Try again.", Recovery::Retry),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            ui: UserShape::new("An internal error occurred. Try again.", Recovery::Retry),
+        }
+    }
 }
 
 impl From<PtyError> for ResizeError {
     fn from(error: PtyError) -> Self {
         match error {
-            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
-            PtyError::ResizeIo(msg) => Self::ResizeFailed(msg),
-            other => Self::Internal(other.to_string()),
+            PtyError::NotFound(id) => Self::not_found(id),
+            PtyError::ResizeIo(msg) => Self::resize_failed(msg),
+            other => Self::internal(other.to_string()),
         }
     }
 }
@@ -200,13 +416,13 @@ pub async fn pty_resize(
     let manager = manager.inner().clone();
     tokio::task::spawn_blocking(move || resize_inner(&manager, args))
         .await
-        .map_err(|e| ResizeError::Internal(format!("blocking task join failed: {e}")))?
+        .map_err(|e| ResizeError::internal(format!("blocking task join failed: {e}")))?
 }
 
 fn resize_inner(manager: &PtyManager, args: ResizeArgs) -> Result<(), ResizeError> {
     if args.cols == 0 || args.rows == 0 {
-        return Err(ResizeError::InvalidArgs(
-            "cols and rows must be greater than zero".into(),
+        return Err(ResizeError::invalid_args(
+            "cols and rows must be greater than zero",
         ));
     }
     manager.resize(args.session_id, args.cols, args.rows)?;
@@ -220,19 +436,50 @@ pub struct KillArgs {
 }
 
 #[derive(Debug, Error, Serialize)]
-#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum KillError {
-    #[error("session not found: {0}")]
-    NotFound(String),
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("{message}")]
+    NotFound {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    Internal {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+}
+
+impl KillError {
+    fn not_found(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::NotFound {
+            message: format!("session not found: {id}"),
+            ui: UserShape::new("Terminal already closed.", Recovery::Dismiss),
+            session_id: id,
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            ui: UserShape::new("An internal error occurred. Try again.", Recovery::Retry),
+        }
+    }
 }
 
 impl From<PtyError> for KillError {
     fn from(error: PtyError) -> Self {
         match error {
-            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
-            other => Self::Internal(other.to_string()),
+            PtyError::NotFound(id) => Self::not_found(id),
+            other => Self::internal(other.to_string()),
         }
     }
 }
@@ -248,7 +495,7 @@ pub async fn pty_kill(args: KillArgs, manager: State<'_, PtyManager>) -> Result<
     let manager = manager.inner().clone();
     tokio::task::spawn_blocking(move || kill_inner(&manager, args))
         .await
-        .map_err(|e| KillError::Internal(format!("blocking task join failed: {e}")))?
+        .map_err(|e| KillError::internal(format!("blocking task join failed: {e}")))?
 }
 
 fn kill_inner(manager: &PtyManager, args: KillArgs) -> Result<(), KillError> {
@@ -299,19 +546,53 @@ impl From<ScrollbackChunk> for GetScrollbackResponse {
 }
 
 #[derive(Debug, Error, Serialize)]
-#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GetScrollbackError {
-    #[error("session not found: {0}")]
-    NotFound(String),
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("{message}")]
+    NotFound {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    Internal {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+}
+
+impl GetScrollbackError {
+    fn not_found(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::NotFound {
+            message: format!("session not found: {id}"),
+            ui: UserShape::new(
+                "This terminal session is no longer available.",
+                Recovery::Dismiss,
+            ),
+            session_id: id,
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            ui: UserShape::new("An internal error occurred. Try again.", Recovery::Retry),
+        }
+    }
 }
 
 impl From<PtyError> for GetScrollbackError {
     fn from(error: PtyError) -> Self {
         match error {
-            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
-            other => Self::Internal(other.to_string()),
+            PtyError::NotFound(id) => Self::not_found(id),
+            other => Self::internal(other.to_string()),
         }
     }
 }
@@ -329,7 +610,7 @@ pub async fn pty_get_scrollback(
     let manager = manager.inner().clone();
     tokio::task::spawn_blocking(move || get_scrollback_inner(&manager, args))
         .await
-        .map_err(|e| GetScrollbackError::Internal(format!("blocking task join failed: {e}")))?
+        .map_err(|e| GetScrollbackError::internal(format!("blocking task join failed: {e}")))?
 }
 
 fn get_scrollback_inner(
@@ -347,19 +628,73 @@ pub struct SubscribeArgs {
 }
 
 #[derive(Debug, Error, Serialize)]
-#[serde(tag = "kind", content = "message", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SubscribeError {
-    #[error("session not found: {0}")]
-    NotFound(String),
-    #[error("internal error: {0}")]
-    Internal(String),
+    #[error("{message}")]
+    NotFound {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    ReaderPanic {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+    #[error("{message}")]
+    Internal {
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
+}
+
+impl SubscribeError {
+    fn not_found(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::NotFound {
+            message: format!("session not found: {id}"),
+            ui: UserShape::new(
+                "This terminal session is no longer available.",
+                Recovery::Dismiss,
+            ),
+            session_id: id,
+        }
+    }
+
+    fn reader_panic(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::ReaderPanic {
+            message: format!("pty reader pipeline panicked (session {id})"),
+            ui: UserShape::new(
+                "The terminal reader stopped unexpectedly. Open a new session to continue.",
+                Recovery::Dismiss,
+            ),
+            session_id: id,
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            ui: UserShape::new("An internal error occurred. Try again.", Recovery::Retry),
+        }
+    }
 }
 
 impl From<PtyError> for SubscribeError {
     fn from(error: PtyError) -> Self {
         match error {
-            PtyError::NotFound(id) => Self::NotFound(id.to_string()),
-            other => Self::Internal(other.to_string()),
+            PtyError::NotFound(id) => Self::not_found(id),
+            PtyError::ReaderPanic(id) => Self::reader_panic(id),
+            other => Self::internal(other.to_string()),
         }
     }
 }
@@ -395,7 +730,12 @@ fn subscribe_inner(
 ) -> Result<(), SubscribeError> {
     let session = manager
         .get(session_id)
-        .ok_or_else(|| SubscribeError::NotFound(session_id.to_string()))?;
+        .ok_or_else(|| SubscribeError::not_found(session_id))?;
+    // T2.15: if the reader pipeline has panicked, refuse to subscribe
+    // rather than hand the frontend a channel that will never deliver.
+    if session.reader_panicked() {
+        return Err(SubscribeError::reader_panic(session_id));
+    }
     let mut rx = session.output_tx.subscribe();
 
     tokio::spawn(async move {
@@ -478,7 +818,7 @@ mod tests {
     fn rejects_empty_command() {
         let m = PtyManager::new();
         let err = spawn_inner(m, args("   ")).expect_err("empty command should fail");
-        assert!(matches!(err, SpawnError::InvalidArgs(_)));
+        assert!(matches!(err, SpawnError::InvalidArgs { .. }));
     }
 
     #[test]
@@ -487,7 +827,7 @@ mod tests {
         let mut a = args("/bin/sleep");
         a.cols = 0;
         let err = spawn_inner(m, a).expect_err("zero cols should fail");
-        assert!(matches!(err, SpawnError::InvalidArgs(_)));
+        assert!(matches!(err, SpawnError::InvalidArgs { .. }));
     }
 
     #[test]
@@ -497,18 +837,38 @@ mod tests {
         a.args = vec!["60".into()];
         a.cwd = Some("/this/path/does/not/exist/ever-xyz".into());
         match spawn_inner(m, a) {
-            Err(SpawnError::CwdMissing(_)) => {}
+            Err(SpawnError::CwdMissing { .. }) => {}
             other => panic!("expected CwdMissing, got {other:?}"),
         }
     }
 
+    /// T2.15: a missing binary on PATH must surface as `CommandNotFound`
+    /// (not the generic `SpawnFailed`) so the UI can offer the
+    /// `editProject` recovery action.
     #[test]
-    fn rejects_unknown_binary() {
+    fn rejects_unknown_binary_as_command_not_found() {
         let m = PtyManager::new();
         let a = args("/this/binary/definitely/does/not/exist-xyz");
         match spawn_inner(m, a) {
-            Err(SpawnError::SpawnFailed(_)) => {}
-            other => panic!("expected SpawnFailed, got {other:?}"),
+            Err(SpawnError::CommandNotFound { command, ui, .. }) => {
+                assert_eq!(command, "/this/binary/definitely/does/not/exist-xyz");
+                assert_eq!(ui.recovery, Recovery::EditProject);
+            }
+            other => panic!("expected CommandNotFound, got {other:?}"),
+        }
+    }
+
+    /// T2.15: a relative command name not on PATH must also resolve to
+    /// `CommandNotFound`, not `SpawnFailed`.
+    #[test]
+    fn rejects_unknown_relative_binary_as_command_not_found() {
+        let m = PtyManager::new();
+        let a = args("definitely-not-on-path-xyz");
+        match spawn_inner(m, a) {
+            Err(SpawnError::CommandNotFound { command, .. }) => {
+                assert_eq!(command, "definitely-not-on-path-xyz");
+            }
+            other => panic!("expected CommandNotFound, got {other:?}"),
         }
     }
 
@@ -566,7 +926,7 @@ mod tests {
             },
         )
         .expect_err("unknown session should fail");
-        assert!(matches!(err, WriteError::NotFound(_)));
+        assert!(matches!(err, WriteError::NotFound { .. }));
     }
 
     #[test]
@@ -675,7 +1035,7 @@ mod tests {
             },
         )
         .expect_err("zero cols should fail");
-        assert!(matches!(err, ResizeError::InvalidArgs(_)));
+        assert!(matches!(err, ResizeError::InvalidArgs { .. }));
     }
 
     #[test]
@@ -690,7 +1050,7 @@ mod tests {
             },
         )
         .expect_err("unknown session should fail");
-        assert!(matches!(err, ResizeError::NotFound(_)));
+        assert!(matches!(err, ResizeError::NotFound { .. }));
     }
 
     #[test]
@@ -703,7 +1063,7 @@ mod tests {
             },
         )
         .expect_err("unknown session should fail");
-        assert!(matches!(err, KillError::NotFound(_)));
+        assert!(matches!(err, KillError::NotFound { .. }));
     }
 
     /// T2.8 acceptance: `pty_kill` ends the child (no zombie) and
@@ -772,7 +1132,7 @@ mod tests {
             },
         )
         .expect_err("unknown session should fail");
-        assert!(matches!(err, GetScrollbackError::NotFound(_)));
+        assert!(matches!(err, GetScrollbackError::NotFound { .. }));
     }
 
     /// T2.10 acceptance: after streaming output through the session, a
@@ -907,7 +1267,7 @@ mod tests {
         })
         .await
         .expect("second kill join");
-        assert!(matches!(err, KillError::NotFound(_)));
+        assert!(matches!(err, KillError::NotFound { .. }));
     }
 
     #[test]
@@ -915,7 +1275,152 @@ mod tests {
         let m = PtyManager::new();
         let ch: Channel<InvokeResponseBody> = Channel::new(|_| Ok(()));
         let err = subscribe_inner(&m, Uuid::new_v4(), ch).expect_err("unknown session should fail");
-        assert!(matches!(err, SubscribeError::NotFound(_)));
+        assert!(matches!(err, SubscribeError::NotFound { .. }));
+    }
+
+    /// T2.15: when the reader pipeline has panicked, subscribe must
+    /// refuse with `ReaderPanic` rather than returning a channel that
+    /// never delivers. The flag is flipped manually here so the test
+    /// exercises the surface deterministically; the real
+    /// `catch_unwind` plumbing in `reader.rs` is what flips it in
+    /// production.
+    #[test]
+    fn subscribe_returns_reader_panic_when_session_flag_set() {
+        use std::sync::atomic::Ordering;
+
+        let m = PtyManager::new();
+        // Bypass `spawn_inner` to avoid wiring up the reader pipeline
+        // (which expects a tokio runtime). The test only cares about
+        // the subscribe surface for a session whose panic bit is set.
+        let cfg = SpawnConfig {
+            command: "/bin/sleep".to_string(),
+            args: vec!["60".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let session_id = m.spawn(cfg).expect("spawn");
+        let session = m.get(session_id).expect("get");
+        session.reader_panic.store(true, Ordering::SeqCst);
+        drop(session);
+
+        let ch: Channel<InvokeResponseBody> = Channel::new(|_| Ok(()));
+        let err =
+            subscribe_inner(&m, session_id, ch).expect_err("subscribe should fail with panic");
+        match err {
+            SubscribeError::ReaderPanic { ui, .. } => {
+                assert_eq!(ui.recovery, Recovery::Dismiss);
+            }
+            other => panic!("expected ReaderPanic, got {other:?}"),
+        }
+
+        m.kill(session_id).expect("kill");
+    }
+
+    /// T2.15: write to a session whose child has already exited returns
+    /// `WriteToClosed` end-to-end through the command surface, so the
+    /// frontend sees the typed kind plus its `dismiss` recovery hint.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_to_exited_session_surfaces_write_to_closed() {
+        use std::time::{Duration, Instant};
+
+        let m = PtyManager::new();
+        // `/bin/sh -c 'exit 0'` fires once and exits — short-lived so
+        // the reader's EOF-cleanup path is the natural endgame; we race
+        // ahead of cleanup by writing immediately, hitting the
+        // `try_wait` short-circuit in `manager.write`.
+        let cfg = SpawnConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let id = m.spawn(cfg).expect("spawn sh");
+
+        // Wait for the child to exit. We don't attach the commands-layer
+        // reader here so the registry stays populated — the test wants
+        // to observe `WriteToClosed`, not a NotFound from auto-cleanup.
+        let session = m.get(id).expect("get");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            {
+                let mut child = session.child.lock().expect("child lock");
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "child failed to exit in time");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(session);
+
+        let m_w = m.clone();
+        let err = tokio::task::spawn_blocking(move || {
+            write_inner(
+                &m_w,
+                WriteArgs {
+                    session_id: id,
+                    data: b"hello\n".to_vec(),
+                },
+            )
+            .expect_err("write should fail")
+        })
+        .await
+        .expect("join");
+        match err {
+            WriteError::WriteToClosed { ui, .. } => {
+                assert_eq!(ui.recovery, Recovery::Dismiss);
+            }
+            other => panic!("expected WriteToClosed, got {other:?}"),
+        }
+
+        m.remove(id).expect("remove");
+    }
+
+    /// T2.15 wire-format: every error variant must serialise its
+    /// matrix entry — `kind`, `message`, `userMessage`, `recovery` —
+    /// alongside any variant-specific context (path, command,
+    /// `session_id`). The frontend reads `kind` to branch and
+    /// `recovery` to pick an action button.
+    #[test]
+    fn error_envelope_includes_user_message_and_recovery() {
+        let cwd = SpawnError::cwd_missing("/tmp/missing-xyz");
+        let json = serde_json::to_value(&cwd).expect("serialize cwd");
+        assert_eq!(json["kind"], "cwdMissing");
+        assert_eq!(json["path"], "/tmp/missing-xyz");
+        assert_eq!(json["recovery"], "editProject");
+        assert!(json["message"].is_string());
+        assert!(json["userMessage"]
+            .as_str()
+            .expect("userMessage")
+            .contains("/tmp/missing-xyz"));
+
+        let cmd = SpawnError::command_not_found("never-installed-bin-xyz");
+        let json = serde_json::to_value(&cmd).expect("serialize cmd");
+        assert_eq!(json["kind"], "commandNotFound");
+        assert_eq!(json["command"], "never-installed-bin-xyz");
+        assert_eq!(json["recovery"], "editProject");
+
+        let spawn_failed = SpawnError::spawn_failed("openpty died");
+        let json = serde_json::to_value(&spawn_failed).expect("serialize spawnFailed");
+        assert_eq!(json["kind"], "spawnFailed");
+        assert_eq!(json["recovery"], "retry");
+
+        let dummy_id = Uuid::new_v4();
+        let closed = WriteError::write_to_closed(dummy_id);
+        let json = serde_json::to_value(&closed).expect("serialize writeToClosed");
+        assert_eq!(json["kind"], "writeToClosed");
+        assert_eq!(json["sessionId"], dummy_id.to_string());
+        assert_eq!(json["recovery"], "dismiss");
+
+        let panic_err = SubscribeError::reader_panic(dummy_id);
+        let json = serde_json::to_value(&panic_err).expect("serialize readerPanic");
+        assert_eq!(json["kind"], "readerPanic");
+        assert_eq!(json["sessionId"], dummy_id.to_string());
+        assert_eq!(json["recovery"], "dismiss");
     }
 
     /// T2.11 acceptance: bytes broadcast by the reader reach the
