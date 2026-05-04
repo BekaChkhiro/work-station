@@ -44,6 +44,19 @@ pub(crate) enum PtyError {
     LockPoisoned,
 }
 
+/// Result of `PtyManager::read_scrollback` (T2.10).
+///
+/// `total_bytes` reflects the scrollback size at the moment the slice
+/// was taken; the frontend uses it to detect eviction across paginated
+/// reads. `next_offset` is `offset + data.len()` clamped to total —
+/// pass it back as `offset` for the next page.
+#[derive(Debug, Clone)]
+pub(crate) struct ScrollbackChunk {
+    pub data: Vec<u8>,
+    pub total_bytes: usize,
+    pub next_offset: usize,
+}
+
 /// Inputs for `PtyManager::spawn`. T2.5 fills these from frontend args.
 #[derive(Debug, Clone)]
 pub(crate) struct SpawnConfig {
@@ -228,6 +241,39 @@ impl PtyManager {
         Ok(())
     }
 
+    /// Copy a byte range out of the session's scrollback (T2.10).
+    ///
+    /// Offsets are into the *current* ring snapshot — oldest retained
+    /// byte is `0`. The slice is taken under the scrollback mutex so a
+    /// single call is internally consistent; callers that want a stable
+    /// view across pagination should size `limit` to the full
+    /// `total_bytes` from the response and read in one shot.
+    pub fn read_scrollback(
+        &self,
+        id: Uuid,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ScrollbackChunk, PtyError> {
+        let session = {
+            let map = self.inner.read().map_err(|_| PtyError::LockPoisoned)?;
+            map.get(&id).cloned()
+        }
+        .ok_or(PtyError::NotFound(id))?;
+
+        let sb = session
+            .scrollback
+            .lock()
+            .map_err(|_| PtyError::LockPoisoned)?;
+        let total_bytes = sb.total_bytes();
+        let data = sb.slice(offset, limit);
+        let next_offset = offset.saturating_add(data.len()).min(total_bytes);
+        Ok(ScrollbackChunk {
+            data,
+            total_bytes,
+            next_offset,
+        })
+    }
+
     pub fn list(&self) -> Vec<Uuid> {
         self.inner
             .read()
@@ -333,6 +379,46 @@ mod tests {
             other => panic!("expected CwdMissing, got {other:?}"),
         }
         assert_eq!(m.count(), 0);
+    }
+
+    #[test]
+    fn read_scrollback_unknown_returns_not_found() {
+        let m = PtyManager::new();
+        match m.read_scrollback(Uuid::new_v4(), 0, 16) {
+            Err(PtyError::NotFound(_)) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_scrollback_reflects_session_buffer() {
+        // Inject frames directly into the session's scrollback (the
+        // reader-driven path is covered by the reader tests) so this
+        // exercises the manager's lock + slice plumbing in isolation.
+        let m = PtyManager::new();
+        let id = m.spawn(sleep_config()).expect("spawn");
+        let session = m.get(id).expect("get");
+
+        {
+            let mut sb = session.scrollback.lock().expect("scrollback lock");
+            sb.push(bytes::Bytes::from_static(b"abc"));
+            sb.push(bytes::Bytes::from_static(b"defg"));
+        }
+
+        let chunk = m.read_scrollback(id, 0, usize::MAX).expect("read");
+        assert_eq!(chunk.total_bytes, 7);
+        assert_eq!(chunk.data, b"abcdefg".to_vec());
+        assert_eq!(chunk.next_offset, 7);
+
+        let middle = m.read_scrollback(id, 2, 4).expect("read mid");
+        assert_eq!(middle.data, b"cdef".to_vec());
+        assert_eq!(middle.next_offset, 6);
+
+        let past_end = m.read_scrollback(id, 99, 4).expect("read past end");
+        assert!(past_end.data.is_empty());
+        assert_eq!(past_end.next_offset, 7);
+
+        m.kill(id).expect("kill");
     }
 
     #[test]
