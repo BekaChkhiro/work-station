@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -61,6 +62,25 @@ pub(crate) struct ScrollbackChunk {
     pub data: Vec<u8>,
     pub total_bytes: usize,
     pub next_offset: usize,
+}
+
+/// Snapshot of per-session backpressure counters (T2.16).
+///
+/// Read once under the scrollback mutex (for the eviction counters)
+/// plus relaxed-atomic loads (for the broadcast counters), so the
+/// snapshot is internally consistent for the eviction pair but the
+/// broadcast values may be a few µs newer than the eviction values.
+/// That's fine for a debug panel — exactness across cores doesn't help
+/// the user spot "frontend is falling behind."
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BackpressureSnapshot {
+    pub broadcast_lag_events: u64,
+    pub broadcast_dropped_frames: u64,
+    pub subscribers_disconnected_on_lag: u64,
+    pub scrollback_evicted_frames: u64,
+    pub scrollback_evicted_bytes: u64,
+    pub scrollback_total_bytes: usize,
+    pub scrollback_cap_bytes: usize,
 }
 
 /// Inputs for `PtyManager::spawn`. T2.5 fills these from frontend args.
@@ -296,6 +316,57 @@ impl PtyManager {
         })
     }
 
+    /// Read the per-session backpressure counters (T2.16).
+    ///
+    /// Reads scrollback eviction counts under the scrollback mutex, and
+    /// broadcast lag counters via relaxed atomics — so a snapshot in
+    /// flight while the reader is pushing frames may show eviction
+    /// counts a hair behind the live total, but never inconsistent.
+    pub fn get_backpressure_stats(&self, id: Uuid) -> Result<BackpressureSnapshot, PtyError> {
+        let session = {
+            let map = self.inner.read().map_err(|_| PtyError::LockPoisoned)?;
+            map.get(&id).cloned()
+        }
+        .ok_or(PtyError::NotFound(id))?;
+
+        let (
+            scrollback_evicted_frames,
+            scrollback_evicted_bytes,
+            scrollback_total_bytes,
+            scrollback_cap_bytes,
+        ) = {
+            let sb = session
+                .scrollback
+                .lock()
+                .map_err(|_| PtyError::LockPoisoned)?;
+            (
+                sb.evicted_frames(),
+                sb.evicted_bytes(),
+                sb.total_bytes(),
+                sb.cap_bytes(),
+            )
+        };
+
+        Ok(BackpressureSnapshot {
+            broadcast_lag_events: session
+                .backpressure
+                .broadcast_lag_events
+                .load(Ordering::Relaxed),
+            broadcast_dropped_frames: session
+                .backpressure
+                .broadcast_dropped_frames
+                .load(Ordering::Relaxed),
+            subscribers_disconnected_on_lag: session
+                .backpressure
+                .subscribers_disconnected_on_lag
+                .load(Ordering::Relaxed),
+            scrollback_evicted_frames,
+            scrollback_evicted_bytes,
+            scrollback_total_bytes,
+            scrollback_cap_bytes,
+        })
+    }
+
     pub fn list(&self) -> Vec<Uuid> {
         self.inner
             .read()
@@ -510,6 +581,72 @@ mod tests {
         assert_eq!(past_end.next_offset, 7);
 
         m.kill(id).expect("kill");
+    }
+
+    /// T2.16: `get_backpressure_stats` must surface scrollback eviction
+    /// counters — so a 1GB-cat-style burst into a tight scrollback shows
+    /// up as observable drops without OOM.
+    #[test]
+    fn backpressure_stats_reflect_scrollback_evictions() {
+        let m = PtyManager::new();
+        let id = m.spawn(sleep_config()).expect("spawn");
+        let session = m.get(id).expect("get");
+
+        // Constrain the scrollback to a tight cap so synthetic frames
+        // immediately overflow and trigger eviction without needing to
+        // run a real 1GB cat.
+        {
+            let mut sb = session.scrollback.lock().expect("scrollback lock");
+            *sb = super::super::scrollback::Scrollback::with_capacity(8);
+            sb.push(bytes::Bytes::from_static(b"AAAA"));
+            sb.push(bytes::Bytes::from_static(b"BBBB"));
+            // Both fit at cap (total 8); next push will evict.
+            sb.push(bytes::Bytes::from_static(b"CCCC"));
+        }
+        drop(session);
+
+        let stats = m.get_backpressure_stats(id).expect("stats");
+        assert_eq!(stats.scrollback_cap_bytes, 8);
+        assert_eq!(stats.scrollback_total_bytes, 8);
+        assert_eq!(stats.scrollback_evicted_frames, 1);
+        assert_eq!(stats.scrollback_evicted_bytes, 4);
+        // Broadcast counters untouched by direct scrollback push.
+        assert_eq!(stats.broadcast_lag_events, 0);
+        assert_eq!(stats.broadcast_dropped_frames, 0);
+
+        m.kill(id).expect("kill");
+    }
+
+    /// T2.16: broadcast lag counter is bumped through the session's
+    /// `BackpressureStats::record_lag`, and the manager surfaces the
+    /// running tally byte-identically.
+    #[test]
+    fn backpressure_stats_reflect_broadcast_lag() {
+        let m = PtyManager::new();
+        let id = m.spawn(sleep_config()).expect("spawn");
+        let session = m.get(id).expect("get");
+
+        // Simulate three subscriber-side lag events with varying gaps.
+        session.backpressure.record_lag(7);
+        session.backpressure.record_lag(13);
+        session.backpressure.record_lag(20);
+        drop(session);
+
+        let stats = m.get_backpressure_stats(id).expect("stats");
+        assert_eq!(stats.broadcast_lag_events, 3);
+        assert_eq!(stats.broadcast_dropped_frames, 40);
+
+        m.kill(id).expect("kill");
+    }
+
+    #[test]
+    fn backpressure_stats_unknown_returns_not_found() {
+        let m = PtyManager::new();
+        let unknown = Uuid::new_v4();
+        match m.get_backpressure_stats(unknown) {
+            Err(PtyError::NotFound(id)) => assert_eq!(id, unknown),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
     }
 
     #[test]
