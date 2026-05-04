@@ -24,6 +24,7 @@ pub fn run() {
             commands::pty::pty_kill,
             commands::pty::pty_get_scrollback,
             commands::pty::pty_subscribe,
+            commands::pty::pty_get_backpressure_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

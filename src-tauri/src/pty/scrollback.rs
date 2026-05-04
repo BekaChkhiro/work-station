@@ -34,6 +34,11 @@ pub(crate) struct Scrollback {
     chunks: VecDeque<Bytes>,
     total_bytes: usize,
     cap_bytes: usize,
+    /// T2.16 — running tally of how many frames were dropped to honour
+    /// the cap. Surfaced through the backpressure stats command so the
+    /// debug panel can show "X frames evicted under load."
+    evicted_frames: u64,
+    evicted_bytes: u64,
 }
 
 impl Scrollback {
@@ -46,6 +51,8 @@ impl Scrollback {
             chunks: VecDeque::new(),
             total_bytes: 0,
             cap_bytes,
+            evicted_frames: 0,
+            evicted_bytes: 0,
         }
     }
 
@@ -69,7 +76,20 @@ impl Scrollback {
                 break;
             };
             self.total_bytes -= oldest.len();
+            self.evicted_frames += 1;
+            self.evicted_bytes += oldest.len() as u64;
         }
+    }
+
+    /// Number of frames dropped to keep `total_bytes` ≤ `cap_bytes`. Counts
+    /// over the lifetime of this `Scrollback`; never resets.
+    pub fn evicted_frames(&self) -> u64 {
+        self.evicted_frames
+    }
+
+    /// Total bytes dropped via eviction. See `evicted_frames`.
+    pub fn evicted_bytes(&self) -> u64 {
+        self.evicted_bytes
     }
 
     pub fn total_bytes(&self) -> usize {
@@ -320,5 +340,52 @@ mod tests {
         sb.push(frame(b"CCC")); // 9 → evict A, total = 6
         assert_eq!(sb.total_bytes(), 6);
         assert_eq!(sb.slice(0, usize::MAX), b"BBBCCC".to_vec());
+    }
+
+    /// T2.16: eviction counters must track every dropped frame so the
+    /// debug panel can show "X frames evicted under load."
+    #[test]
+    fn eviction_counters_track_dropped_frames_and_bytes() {
+        let mut sb = Scrollback::with_capacity(6);
+        assert_eq!(sb.evicted_frames(), 0);
+        assert_eq!(sb.evicted_bytes(), 0);
+
+        sb.push(frame(b"AAA")); // total 3, no eviction
+        sb.push(frame(b"BBB")); // total 6, no eviction
+        assert_eq!(sb.evicted_frames(), 0);
+        assert_eq!(sb.evicted_bytes(), 0);
+
+        sb.push(frame(b"CCC")); // total 9 → evict AAA → total 6
+        assert_eq!(sb.evicted_frames(), 1);
+        assert_eq!(sb.evicted_bytes(), 3);
+
+        // One large push evicts every prior frame.
+        sb.push(frame(b"ZZZZZZ")); // 6 bytes — must evict BBB and CCC
+        assert_eq!(sb.evicted_frames(), 3, "AAA + BBB + CCC must be counted");
+        assert_eq!(sb.evicted_bytes(), 9);
+    }
+
+    /// T2.16: when a single frame is itself larger than cap, it evicts
+    /// itself — and that self-eviction must show up in the counters so
+    /// the UI can surface "frame too big" rather than silently lose it.
+    #[test]
+    fn eviction_counters_include_oversized_self_eviction() {
+        let mut sb = Scrollback::with_capacity(4);
+        sb.push(frame(b"123456789")); // 9 bytes, cap 4 → frame evicts itself
+        assert!(sb.is_empty());
+        assert_eq!(sb.evicted_frames(), 1);
+        assert_eq!(sb.evicted_bytes(), 9);
+    }
+
+    /// T2.16: pushes that fit must not bump eviction counters even if
+    /// `total_bytes` hits the cap exactly.
+    #[test]
+    fn eviction_counters_stable_at_cap() {
+        let mut sb = Scrollback::with_capacity(8);
+        sb.push(frame(b"AAAA"));
+        sb.push(frame(b"BBBB"));
+        assert_eq!(sb.total_bytes(), 8);
+        assert_eq!(sb.evicted_frames(), 0);
+        assert_eq!(sb.evicted_bytes(), 0);
     }
 }

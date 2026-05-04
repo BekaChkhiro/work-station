@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -21,6 +21,51 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::scrollback::Scrollback;
+
+/// Backpressure counters for a single PTY session (T2.16).
+///
+/// All four are bumped on the hot read/broadcast path, so they're stored
+/// as relaxed atomics — exactness across cores doesn't matter for a
+/// human-facing debug panel, only that the values are monotonic and
+/// observable without a lock.
+///
+/// `broadcast_lag_events`   — how many times any subscriber observed a
+///                            `Lagged(_)` from the per-session broadcast.
+///                            Each event represents one or more frames
+///                            silently overwritten by the channel.
+/// `broadcast_dropped_frames` — sum of `n` from those `Lagged(n)`
+///                            reports; tells you "how many frames were
+///                            collectively lost to slow consumers."
+/// `subscribers_disconnected_on_lag` — set when a subscriber forwarder
+///                            tears itself down because the IPC channel
+///                            stopped accepting bytes. Distinguishes
+///                            transient lag from a stuck UI.
+///
+/// Scrollback eviction counters live on `Scrollback` itself so the
+/// counter and the bytes-counted invariant move under the same lock;
+/// the snapshot in `manager.rs` reads both in one shot.
+#[derive(Debug, Default)]
+pub(crate) struct BackpressureStats {
+    pub(crate) broadcast_lag_events: AtomicU64,
+    pub(crate) broadcast_dropped_frames: AtomicU64,
+    pub(crate) subscribers_disconnected_on_lag: AtomicU64,
+}
+
+impl BackpressureStats {
+    /// One observed `Lagged(n)` from a broadcast subscriber. `n` is the
+    /// number of frames the broadcast channel silently overwrote between
+    /// our last `recv` and now.
+    pub(crate) fn record_lag(&self, dropped: u64) {
+        self.broadcast_lag_events.fetch_add(1, Ordering::Relaxed);
+        self.broadcast_dropped_frames
+            .fetch_add(dropped, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_subscriber_disconnect_on_lag(&self) {
+        self.subscribers_disconnected_on_lag
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Default capacity for the per-session output broadcast channel.
 ///
@@ -58,6 +103,9 @@ pub(crate) struct PtySession {
     /// `Arc` is shared with the reader pipeline so a panic in either
     /// half can flip it without holding the whole session alive.
     pub(crate) reader_panic: Arc<AtomicBool>,
+    /// Backpressure counters (T2.16). `Arc` so subscribers can clone-and-
+    /// tap without holding the session past their own lifetime.
+    pub(crate) backpressure: Arc<BackpressureStats>,
     pub(crate) created_at: SystemTime,
 }
 
@@ -82,6 +130,7 @@ impl PtySession {
             output_tx,
             scrollback: Arc::new(Mutex::new(Scrollback::new())),
             reader_panic: Arc::new(AtomicBool::new(false)),
+            backpressure: Arc::new(BackpressureStats::default()),
             created_at: SystemTime::now(),
         }
     }
