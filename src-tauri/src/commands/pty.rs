@@ -77,6 +77,17 @@ pub enum SpawnError {
         #[serde(flatten)]
         ui: UserShape,
     },
+    /// T2.15: surfaces a `PtyError::ReaderPanic` raised while attaching
+    /// the per-session reader pipeline. Mirrors the variant on
+    /// `SubscribeError` so the frontend gets the same kind+recovery
+    /// shape regardless of which command surface raised it.
+    #[error("{message}")]
+    ReaderPanic {
+        session_id: String,
+        message: String,
+        #[serde(flatten)]
+        ui: UserShape,
+    },
     #[error("{message}")]
     Internal {
         message: String,
@@ -128,6 +139,18 @@ impl SpawnError {
         }
     }
 
+    fn reader_panic(session_id: Uuid) -> Self {
+        let id = session_id.to_string();
+        Self::ReaderPanic {
+            message: format!("pty reader pipeline panicked (session {id})"),
+            ui: UserShape::new(
+                "The terminal reader stopped unexpectedly. Open a new session to continue.",
+                Recovery::Dismiss,
+            ),
+            session_id: id,
+        }
+    }
+
     fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
@@ -144,12 +167,17 @@ impl From<PtyError> for SpawnError {
             PtyError::OpenPty(msg) | PtyError::Spawn(msg) | PtyError::Writer(msg) => {
                 Self::spawn_failed(msg)
             }
+            PtyError::ReaderPanic(id) => Self::reader_panic(id),
+            // The remaining variants describe post-spawn surfaces
+            // (`pty_write` / `pty_resize` / registry races). Reaching
+            // them through a spawn call means the manager raised them
+            // out of band — surface as `internal` so the wire shape
+            // stays honest about the unexpected provenance.
             PtyError::WriteIo(_)
             | PtyError::WriteToClosed(_)
             | PtyError::ResizeIo(_)
             | PtyError::NotFound(_)
-            | PtyError::LockPoisoned
-            | PtyError::ReaderPanic(_) => Self::internal(error.to_string()),
+            | PtyError::LockPoisoned => Self::internal(error.to_string()),
         }
     }
 }
@@ -752,6 +780,7 @@ fn subscribe_inner(
                         .send(InvokeResponseBody::Raw(frame.to_vec()))
                         .is_err()
                     {
+                        backpressure.record_subscriber_disconnect_on_lag();
                         tracing::debug!(
                             session_id = %session_id,
                             "pty_subscribe: channel closed; ending forwarder",
@@ -1535,6 +1564,16 @@ mod tests {
         assert_eq!(json["kind"], "spawnFailed");
         assert_eq!(json["recovery"], "retry");
 
+        // T2.15: spawn surface mirrors subscribe — `ReaderPanic` keeps
+        // its own kind + dismiss recovery rather than collapsing to
+        // `internal`, so the frontend can offer the same recovery hint
+        // regardless of which command raised it.
+        let spawn_panic = SpawnError::reader_panic(Uuid::new_v4());
+        let json = serde_json::to_value(&spawn_panic).expect("serialize spawn readerPanic");
+        assert_eq!(json["kind"], "readerPanic");
+        assert_eq!(json["recovery"], "dismiss");
+        assert!(json["sessionId"].is_string());
+
         let dummy_id = Uuid::new_v4();
         let closed = WriteError::write_to_closed(dummy_id);
         let json = serde_json::to_value(&closed).expect("serialize writeToClosed");
@@ -1960,5 +1999,69 @@ mod tests {
         );
 
         let _ = m.kill(session_id);
+    }
+
+    /// T2.16 acceptance for the disconnect counter: when the IPC
+    /// channel closes mid-stream the forwarder must bump
+    /// `subscribers_disconnected_on_lag` so the debug panel can
+    /// distinguish "subscriber went away" from "subscriber merely lagged".
+    /// Drives `/bin/cat`, subscribes with a `Channel` whose handler
+    /// returns `Err(_)` to force `on_data.send` to fail on the next
+    /// frame, then asserts the counter increments.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pty_subscribe_records_disconnect_when_channel_send_fails() {
+        use tokio::time::{sleep, timeout, Duration};
+
+        let m = PtyManager::new();
+        let resp = spawn_inner(m.clone(), args("/bin/cat")).expect("spawn cat");
+        let session_id = resp.session_id;
+        let stats_handle = Arc::clone(&m.get(session_id).expect("get session").backpressure);
+
+        // Channel handler that always errors — every send the forwarder
+        // attempts will look like "the JS side hung up", which is the
+        // exact condition the disconnect counter exists to capture.
+        let ch: Channel<InvokeResponseBody> = Channel::new(|_body| {
+            // Surface the disconnect via `std::io::Error` so we don't
+            // pull in `anyhow` purely for tests; tauri::Error has a
+            // `From<std::io::Error>` impl.
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "simulated subscriber disconnect",
+            )
+            .into())
+        });
+        subscribe_inner(&m, session_id, ch).expect("subscribe");
+
+        // Drive the pty so the reader produces at least one frame the
+        // forwarder will try (and fail) to send.
+        let m_w = m.clone();
+        tokio::task::spawn_blocking(move || {
+            write_inner(
+                &m_w,
+                WriteArgs {
+                    session_id,
+                    data: b"hello\n".to_vec(),
+                },
+            )
+            .expect("write");
+        })
+        .await
+        .expect("write join");
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let n = stats_handle
+                    .subscribers_disconnected_on_lag
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if n >= 1 {
+                    return n;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("disconnect counter never incremented");
+
+        m.kill(session_id).expect("kill cat");
     }
 }

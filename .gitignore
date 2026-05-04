@@ -30,6 +30,7 @@ logs/
 .vscode/*
 !.vscode/extensions.json
 .idea/
+.claude/
 
 # Local env
 .env
