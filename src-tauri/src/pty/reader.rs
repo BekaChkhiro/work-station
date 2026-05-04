@@ -18,6 +18,8 @@
 #![allow(dead_code)] // call site lands in T2.5 (pty_spawn).
 
 use std::io::Read;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,6 +68,10 @@ pub(crate) fn spawn_reader(manager: PtyManager, session: &PtySession) {
     // last frame. The session's own clone goes away on drop, leaving
     // the coalescer's clone as the last reference until it exits.
     let scrollback = Arc::clone(&session.scrollback);
+    // Shared with both halves of the pipeline so a panic in either flips
+    // the bit (T2.15). Subscribers see it via `pty_subscribe` returning
+    // `ReaderPanic`.
+    let panic_flag = Arc::clone(&session.reader_panic);
 
     let reader = {
         let Ok(guard) = session.master.lock() else {
@@ -92,14 +98,43 @@ pub(crate) fn spawn_reader(manager: PtyManager, session: &PtySession) {
 
     let (raw_tx, raw_rx) = mpsc::channel::<Bytes>(RAW_CHANNEL_CAPACITY);
 
+    let panic_flag_thread = Arc::clone(&panic_flag);
     std::thread::Builder::new()
         .name(format!("pty-read-{session_id}"))
-        .spawn(move || run_blocking_reader(session_id, pid, reader, raw_tx))
+        .spawn(move || {
+            // `catch_unwind` so a panic in the blocking reader flips the
+            // session's `reader_panic` flag rather than aborting the
+            // process. The mpsc sender is dropped either way, which lets
+            // the coalescer's EOF path run normally.
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                run_blocking_reader(session_id, pid, reader, raw_tx);
+            }));
+            if result.is_err() {
+                tracing::error!(
+                    session_id = %session_id,
+                    pid,
+                    "pty reader thread panicked",
+                );
+                panic_flag_thread.store(true, Ordering::SeqCst);
+            }
+        })
         .expect("spawn pty reader thread");
 
-    tokio::spawn(run_coalescer(
+    let coalescer_handle = tokio::spawn(run_coalescer(
         session_id, pid, raw_rx, output_tx, scrollback, manager,
     ));
+    let panic_flag_coalescer = Arc::clone(&panic_flag);
+    tokio::spawn(async move {
+        if let Err(error) = coalescer_handle.await {
+            if error.is_panic() {
+                tracing::error!(
+                    session_id = %session_id,
+                    "pty coalescer task panicked",
+                );
+                panic_flag_coalescer.store(true, Ordering::SeqCst);
+            }
+        }
+    });
 }
 
 fn run_blocking_reader(
