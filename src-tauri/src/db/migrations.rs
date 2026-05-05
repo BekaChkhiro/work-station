@@ -8,15 +8,20 @@
 //! the in-flight transaction back so the DB never lands in a half-applied
 //! state.
 //!
-//! T3.10 will add a pre-flight auto-backup that this runner restores from
-//! when migration failure leaves the file beyond per-transaction recovery
-//! (e.g. corruption mid-`VACUUM`).
+//! T3.10 wires a pre-flight backup of the database file: when there are
+//! pending migrations and a `backups_dir` is supplied, [`run`] snapshots
+//! the current DB via `VACUUM INTO` before applying any new versions, so a
+//! catastrophic failure beyond per-transaction recovery (e.g. corruption
+//! mid-`VACUUM`) can be manually restored from `db-vN-TS.sqlite`.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Executor, Row};
+
+use super::backup;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -56,6 +61,8 @@ pub enum MigrationError {
     },
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("pre-migration backup failed: {0}")]
+    Backup(#[source] backup::BackupError),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -65,12 +72,37 @@ pub struct RunReport {
 }
 
 /// Apply every pending migration from `list` against `pool`.
-pub async fn run(pool: &SqlitePool, list: &[Migration]) -> Result<RunReport, MigrationError> {
+///
+/// When `backups_dir` is `Some` and at least one migration in `list` is
+/// pending, the database is snapshotted into that directory via
+/// [`backup::snapshot`] before any migration runs. Tests pass `None` to
+/// skip the backup step against in-memory pools.
+pub async fn run(
+    pool: &SqlitePool,
+    list: &[Migration],
+    backups_dir: Option<&Path>,
+) -> Result<RunReport, MigrationError> {
     validate_order(list)?;
     ensure_schema_version_table(pool).await?;
     seed_from_legacy_if_empty(pool, list).await?;
 
     let already_applied = applied_versions(pool).await?;
+    let has_pending = list.iter().any(|m| !already_applied.contains(&m.version));
+
+    if has_pending {
+        if let Some(dir) = backups_dir {
+            let current = already_applied.iter().copied().max().unwrap_or(0);
+            match backup::snapshot(pool, dir, current).await {
+                Ok(path) => tracing::info!(
+                    target: "db",
+                    ?path,
+                    schema_version = current,
+                    "pre-migration backup written",
+                ),
+                Err(error) => return Err(MigrationError::Backup(error)),
+            }
+        }
+    }
 
     let mut report = RunReport::default();
     for migration in list {
@@ -217,7 +249,7 @@ mod tests {
     async fn applies_pending_and_is_idempotent() {
         let pool = fresh_pool().await;
 
-        let first = run(&pool, MIGRATIONS).await.expect("first run");
+        let first = run(&pool, MIGRATIONS, None).await.expect("first run");
         assert_eq!(first.applied, vec![1, 2, 3]);
         assert!(first.skipped.is_empty());
 
@@ -235,7 +267,7 @@ mod tests {
             assert_eq!(count, 1, "{table} should exist");
         }
 
-        let second = run(&pool, MIGRATIONS).await.expect("second run");
+        let second = run(&pool, MIGRATIONS, None).await.expect("second run");
         assert!(second.applied.is_empty(), "no migrations should re-apply");
         assert_eq!(second.skipped, vec![1, 2, 3]);
     }
@@ -256,7 +288,9 @@ mod tests {
         ];
 
         let pool = fresh_pool().await;
-        let err = run(&pool, plan).await.expect_err("broken plan should fail");
+        let err = run(&pool, plan, None)
+            .await
+            .expect_err("broken plan should fail");
         match err {
             MigrationError::Apply { version, .. } => assert_eq!(version, 3),
             other => panic!("expected Apply error, got {other:?}"),
@@ -311,13 +345,63 @@ mod tests {
         .await
         .expect("seed legacy row");
 
-        let report = run(&pool, MIGRATIONS).await.expect("run with legacy seed");
+        let report = run(&pool, MIGRATIONS, None)
+            .await
+            .expect("run with legacy seed");
         // v1 should be skipped (seeded), v2/v3 newly applied.
         assert_eq!(report.skipped, vec![1]);
         assert_eq!(report.applied, vec![2, 3]);
 
         let versions = applied_versions(&pool).await.expect("read schema_version");
         assert_eq!(versions.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    /// T3.10 acceptance: when there are pending migrations and a backups
+    /// directory is supplied, the runner writes a single
+    /// `db-vN-TS.sqlite` snapshot into it before applying anything.
+    /// Uses a file-backed DB because `VACUUM INTO` on sqlx in-memory pools
+    /// reports success but does not materialise the destination file.
+    #[tokio::test]
+    async fn writes_backup_before_applying_pending_migrations() {
+        let mut workdir = std::env::temp_dir();
+        workdir.push(format!("work-station-t310-runner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workdir).expect("create workdir");
+        let db_path = workdir.join("source.db");
+        let backups = workdir.join("backups");
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
+            .await
+            .expect("open file-backed sqlite");
+
+        let report = run(&pool, MIGRATIONS, Some(&backups))
+            .await
+            .expect("run with backups");
+        assert_eq!(report.applied, vec![1, 2, 3]);
+
+        let entries: Vec<_> = std::fs::read_dir(&backups)
+            .expect("backups dir created")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "one pre-migration backup expected");
+        let name = entries[0].file_name().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("db-v0-") && name.ends_with(".sqlite"),
+            "fresh DB should snapshot at v0; got {name}",
+        );
+
+        // Re-running with no pending work must NOT add another backup.
+        let again = run(&pool, MIGRATIONS, Some(&backups))
+            .await
+            .expect("idempotent re-run");
+        assert!(again.applied.is_empty());
+        let count = std::fs::read_dir(&backups)
+            .expect("read backups dir")
+            .count();
+        assert_eq!(count, 1, "no-op run must not write a new backup");
+
+        let _ = std::fs::remove_dir_all(&workdir);
     }
 
     #[tokio::test]
@@ -331,7 +415,7 @@ mod tests {
                 sql: "SELECT 1;",
             },
         ];
-        let err = run(&pool, plan).await.expect_err("gap should fail");
+        let err = run(&pool, plan, None).await.expect_err("gap should fail");
         assert!(matches!(err, MigrationError::BadOrder(_)));
     }
 }
