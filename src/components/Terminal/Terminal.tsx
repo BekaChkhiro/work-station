@@ -5,7 +5,13 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { logger } from "../../utils/logger";
-import { ptyResize, ptySubscribe, ptyWrite, type PtySubscription } from "../../ipc/pty";
+import {
+  ptyGetScrollback,
+  ptyResize,
+  ptySubscribe,
+  ptyWrite,
+  type PtySubscription,
+} from "../../ipc/pty";
 
 export interface TerminalProps {
   sessionId: string;
@@ -143,28 +149,46 @@ export function Terminal(props: TerminalProps) {
     const t = term;
     decoder = new TextDecoder("utf-8", { fatal: false });
     const token = ++subscriptionToken;
-    void ptySubscribe(sessionId, (chunk) => {
-      // Effect-driven re-subscription can race with an in-flight invoke
-      // resolving — guard with a token so a stale handler can't leak a
-      // chunk into the new session.
+    void replayThenSubscribe(t, sessionId, token).catch((error: unknown) => {
+      logger.warn("pty replay/subscribe failed", {
+        scope: "terminal",
+        sessionId,
+        error,
+      });
+    });
+  };
+
+  // T4.7: Replay scrollback before attaching the live subscription so prior
+  // output is restored on mount / tab switch. Live subscription only delivers
+  // frames pushed AFTER subscribe attaches, so subscribing *after* the
+  // snapshot avoids double-rendering the historical bytes — at the cost of
+  // a tiny gap window if the PTY is producing during the round-trip. For
+  // tab-switch use cases the PTY is typically idle, making the gap a
+  // non-issue in practice.
+  //
+  // The subscription token is the sequence-number guard called out in the
+  // task spec: it short-circuits both the snapshot write and the subscribe
+  // attach when a session-id swap arrives mid-replay, so a stale snapshot
+  // can't leak into the new session's terminal.
+  const replayThenSubscribe = async (t: Xterm, sessionId: string, token: number): Promise<void> => {
+    const snapshot = await ptyGetScrollback(sessionId);
+    if (token !== subscriptionToken || !decoder) return;
+    if (snapshot.data.byteLength > 0) {
+      const text = decoder.decode(snapshot.data, { stream: true });
+      if (text.length > 0) t.write(text);
+    }
+
+    const sub = await ptySubscribe(sessionId, (chunk) => {
       if (token !== subscriptionToken || !decoder) return;
       const text = decoder.decode(chunk, { stream: true });
       if (text.length > 0) t.write(text);
-    })
-      .then((sub) => {
-        if (token !== subscriptionToken) {
-          sub.unsubscribe();
-          return;
-        }
-        subscription = sub;
-      })
-      .catch((error: unknown) => {
-        logger.warn("pty_subscribe failed", {
-          scope: "terminal",
-          sessionId,
-          error,
-        });
-      });
+    });
+
+    if (token !== subscriptionToken) {
+      sub.unsubscribe();
+      return;
+    }
+    subscription = sub;
   };
 
   const stopSubscription = (): void => {
