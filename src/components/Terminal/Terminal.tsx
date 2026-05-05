@@ -84,6 +84,18 @@ export function Terminal(props: TerminalProps) {
   // Synced from `props.sessionId` inside the createEffect below so input
   // listeners can read the live id without re-attaching when it changes.
   let currentSessionId = "";
+  // T4.12: pause render when hidden. We treat the terminal as "visible"
+  // when the document is visible AND the host element intersects the
+  // viewport. While hidden we drop the live subscription so xterm receives
+  // no writes (no GPU draws); the backend PTY keeps filling its scrollback
+  // ring so nothing is lost. On resume we reset the xterm view and replay
+  // from the start of scrollback — same path used when the session id
+  // changes — to recover whatever streamed during the hidden window.
+  let isDocVisible = typeof document === "undefined" ? true : !document.hidden;
+  let isHostIntersecting = true;
+  let isPaused = false;
+  let intersectionObserver: IntersectionObserver | null = null;
+  let docVisibilityHandler: (() => void) | null = null;
 
   const setRendererAttr = (mode: TerminalRenderer) => {
     if (hostEl) hostEl.dataset.renderer = mode;
@@ -209,6 +221,31 @@ export function Terminal(props: TerminalProps) {
       // session's stream is independent.
       decoder.decode();
       decoder = null;
+    }
+  };
+
+  const restartSubscription = (sessionId: string): void => {
+    stopSubscription();
+    term?.reset();
+    // Force the next applyFit to re-send dimensions since reset() may
+    // affect the rendered grid; mirrors the session-id swap branch.
+    lastCols = 0;
+    lastRows = 0;
+    startSubscription(sessionId);
+    applyFit();
+  };
+
+  const evaluateVisibility = (): void => {
+    if (props.autoSubscribe === false) return;
+    const visible = isDocVisible && isHostIntersecting;
+    if (!visible && !isPaused) {
+      isPaused = true;
+      stopSubscription();
+      return;
+    }
+    if (visible && isPaused) {
+      isPaused = false;
+      if (currentSessionId) restartSubscription(currentSessionId);
     }
   };
 
@@ -403,7 +440,14 @@ export function Terminal(props: TerminalProps) {
       return handleCopyPasteKey(event);
     });
 
-    startSubscription(props.sessionId);
+    if (isDocVisible) {
+      startSubscription(props.sessionId);
+    } else {
+      // Mounted while the document is hidden — defer subscribe until the
+      // first visibility-change so we don't burn cycles on a tab the user
+      // can't see.
+      isPaused = true;
+    }
     startInputForwarding(term);
 
     // Initial fit synchronously so the first frame matches the host size,
@@ -413,6 +457,26 @@ export function Terminal(props: TerminalProps) {
     applyFit();
     resizeObserver = new ResizeObserver(() => scheduleFit());
     resizeObserver.observe(hostEl);
+
+    if (props.autoSubscribe !== false) {
+      const onDocVisibility = () => {
+        isDocVisible = !document.hidden;
+        evaluateVisibility();
+      };
+      docVisibilityHandler = onDocVisibility;
+      document.addEventListener("visibilitychange", onDocVisibility);
+
+      if (typeof IntersectionObserver !== "undefined") {
+        const onIntersect = (entries: IntersectionObserverEntry[]): void => {
+          for (const entry of entries) {
+            isHostIntersecting = entry.isIntersecting;
+          }
+          evaluateVisibility();
+        };
+        intersectionObserver = new IntersectionObserver(onIntersect);
+        intersectionObserver.observe(hostEl);
+      }
+    }
   });
 
   createEffect((prev: string | undefined) => {
@@ -427,7 +491,9 @@ export function Terminal(props: TerminalProps) {
       // cached cols/rows to suppress the corrective pty_resize.
       lastCols = 0;
       lastRows = 0;
-      startSubscription(id);
+      // If we're paused (T4.12), don't reattach — evaluateVisibility will
+      // resubscribe to the new session id on the next visibility change.
+      if (!isPaused) startSubscription(id);
       applyFit();
     }
     return id;
@@ -478,6 +544,12 @@ export function Terminal(props: TerminalProps) {
   onCleanup(() => {
     stopInputForwarding();
     stopSubscription();
+    if (docVisibilityHandler) {
+      document.removeEventListener("visibilitychange", docVisibilityHandler);
+      docVisibilityHandler = null;
+    }
+    intersectionObserver?.disconnect();
+    intersectionObserver = null;
     if (resizeFrame !== 0) {
       cancelAnimationFrame(resizeFrame);
       resizeFrame = 0;
