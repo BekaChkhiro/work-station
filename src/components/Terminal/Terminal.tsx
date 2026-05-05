@@ -4,6 +4,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { logger } from "../../utils/logger";
+import { ptySubscribe, type PtySubscription } from "../../ipc/pty";
 
 export interface TerminalProps {
   sessionId: string;
@@ -12,6 +13,9 @@ export interface TerminalProps {
   lineHeight?: number;
   cursorBlink?: boolean;
   theme?: ITheme;
+  /** When false, the terminal does not subscribe to backend PTY output —
+   *  used by stress / mount-cycle harnesses that pass synthetic ids. */
+  autoSubscribe?: boolean;
 }
 
 export type TerminalRenderer = "webgl" | "dom";
@@ -39,6 +43,13 @@ export function Terminal(props: TerminalProps) {
   let unicodeAddon: Unicode11Addon | null = null;
   let webglAddon: WebglAddon | null = null;
   let webglRecoveryAttempted = false;
+  // T4.4: streaming UTF-8 decoder. `fatal: false` keeps malformed bytes from
+  // throwing (the shell stays usable), and `stream: true` on each `decode`
+  // call buffers any bytes belonging to a codepoint that was split across
+  // PTY frames so the next frame completes it instead of rendering "�".
+  let decoder: TextDecoder | null = null;
+  let subscription: PtySubscription | null = null;
+  let subscriptionToken = 0;
 
   const setRendererAttr = (mode: TerminalRenderer) => {
     if (hostEl) hostEl.dataset.renderer = mode;
@@ -106,6 +117,49 @@ export function Terminal(props: TerminalProps) {
     }
   };
 
+  const startSubscription = (sessionId: string): void => {
+    if (props.autoSubscribe === false) return;
+    if (!term) return;
+    const t = term;
+    decoder = new TextDecoder("utf-8", { fatal: false });
+    const token = ++subscriptionToken;
+    void ptySubscribe(sessionId, (chunk) => {
+      // Effect-driven re-subscription can race with an in-flight invoke
+      // resolving — guard with a token so a stale handler can't leak a
+      // chunk into the new session.
+      if (token !== subscriptionToken || !decoder) return;
+      const text = decoder.decode(chunk, { stream: true });
+      if (text.length > 0) t.write(text);
+    })
+      .then((sub) => {
+        if (token !== subscriptionToken) {
+          sub.unsubscribe();
+          return;
+        }
+        subscription = sub;
+      })
+      .catch((error: unknown) => {
+        logger.warn("pty_subscribe failed", {
+          scope: "terminal",
+          sessionId,
+          error,
+        });
+      });
+  };
+
+  const stopSubscription = (): void => {
+    subscriptionToken += 1;
+    subscription?.unsubscribe();
+    subscription = null;
+    if (decoder) {
+      // Flush any buffered partial codepoint so the next session starts
+      // with a clean decoder. The trailing bytes are discarded — the new
+      // session's stream is independent.
+      decoder.decode();
+      decoder = null;
+    }
+  };
+
   onMount(() => {
     const theme = props.theme ?? themeFromTokens(hostEl);
     const fontFamily = props.fontFamily ?? fontFromTokens(hostEl);
@@ -130,11 +184,19 @@ export function Terminal(props: TerminalProps) {
 
     // WebGL addon must be loaded after term.open() — it requires the DOM.
     enableWebgl(term);
+
+    startSubscription(props.sessionId);
   });
 
-  createEffect(() => {
+  createEffect((prev: string | undefined) => {
     const id = props.sessionId;
     if (term && hostEl) hostEl.dataset.sessionId = id;
+    if (prev !== undefined && prev !== id) {
+      stopSubscription();
+      term?.reset();
+      startSubscription(id);
+    }
+    return id;
   });
 
   createEffect(() => {
@@ -163,6 +225,7 @@ export function Terminal(props: TerminalProps) {
   });
 
   onCleanup(() => {
+    stopSubscription();
     webglAddon?.dispose();
     unicodeAddon?.dispose();
     term?.dispose();

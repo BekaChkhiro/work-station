@@ -76,7 +76,7 @@ export function TerminalStressHarness() {
       </div>
       <div class="min-h-0 overflow-hidden rounded-md border border-border-default">
         <Show when={mounted()}>
-          <Terminal sessionId={`stress-${cycle()}`} />
+          <Terminal sessionId={`stress-${cycle()}`} autoSubscribe={false} />
         </Show>
       </div>
     </div>
