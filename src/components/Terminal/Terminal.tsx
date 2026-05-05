@@ -1,10 +1,10 @@
 import { createEffect, onCleanup, onMount } from "solid-js";
-import { Terminal as Xterm, type ITheme } from "@xterm/xterm";
+import { Terminal as Xterm, type IDisposable, type ITheme } from "@xterm/xterm";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { logger } from "../../utils/logger";
-import { ptySubscribe, type PtySubscription } from "../../ipc/pty";
+import { ptySubscribe, ptyWrite, type PtySubscription } from "../../ipc/pty";
 
 export interface TerminalProps {
   sessionId: string;
@@ -50,6 +50,17 @@ export function Terminal(props: TerminalProps) {
   let decoder: TextDecoder | null = null;
   let subscription: PtySubscription | null = null;
   let subscriptionToken = 0;
+  // T4.5: xterm input listeners forward keystrokes (and rare binary mouse
+  // reports) to the PTY's stdin. The disposables are released on unmount;
+  // session-id swaps are handled by reading `currentSessionId` inside the
+  // listeners rather than re-attaching, so a key event in flight when the
+  // id changes lands on the new session — matching the stop/start
+  // semantics of the output subscription above.
+  const encoder = new TextEncoder();
+  let inputDisposables: IDisposable[] = [];
+  // Synced from `props.sessionId` inside the createEffect below so input
+  // listeners can read the live id without re-attaching when it changes.
+  let currentSessionId = "";
 
   const setRendererAttr = (mode: TerminalRenderer) => {
     if (hostEl) hostEl.dataset.renderer = mode;
@@ -160,6 +171,39 @@ export function Terminal(props: TerminalProps) {
     }
   };
 
+  const sendInput = (bytes: Uint8Array): void => {
+    if (bytes.byteLength === 0) return;
+    const targetId = currentSessionId;
+    void ptyWrite(targetId, bytes).catch((error: unknown) => {
+      logger.warn("pty_write failed", {
+        scope: "terminal",
+        sessionId: targetId,
+        error,
+      });
+    });
+  };
+
+  // xterm `onBinary` delivers a JS string where each char's low byte is one
+  // raw byte of input (e.g. mouse reports that aren't valid UTF-8). We map
+  // it back to bytes 1:1 — TextEncoder would re-encode bytes >= 0x80 as
+  // multibyte UTF-8 and corrupt the report.
+  const binaryStringToBytes = (data: string): Uint8Array => {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
+    return bytes;
+  };
+
+  const startInputForwarding = (t: Xterm): void => {
+    if (props.autoSubscribe === false) return;
+    inputDisposables.push(t.onData((data) => sendInput(encoder.encode(data))));
+    inputDisposables.push(t.onBinary((data) => sendInput(binaryStringToBytes(data))));
+  };
+
+  const stopInputForwarding = (): void => {
+    for (const d of inputDisposables) d.dispose();
+    inputDisposables = [];
+  };
+
   onMount(() => {
     const theme = props.theme ?? themeFromTokens(hostEl);
     const fontFamily = props.fontFamily ?? fontFromTokens(hostEl);
@@ -186,10 +230,12 @@ export function Terminal(props: TerminalProps) {
     enableWebgl(term);
 
     startSubscription(props.sessionId);
+    startInputForwarding(term);
   });
 
   createEffect((prev: string | undefined) => {
     const id = props.sessionId;
+    currentSessionId = id;
     if (term && hostEl) hostEl.dataset.sessionId = id;
     if (prev !== undefined && prev !== id) {
       stopSubscription();
@@ -225,6 +271,7 @@ export function Terminal(props: TerminalProps) {
   });
 
   onCleanup(() => {
+    stopInputForwarding();
     stopSubscription();
     webglAddon?.dispose();
     unicodeAddon?.dispose();

@@ -33,6 +33,28 @@ export async function ptySpawn(args: PtySpawnArgs): Promise<PtySpawnResponse> {
   return invoke<PtySpawnResponse>("pty_spawn", { args });
 }
 
+export interface PtyWriteArgs {
+  sessionId: string;
+  data: Uint8Array;
+}
+
+/**
+ * Send raw bytes to a PTY's stdin. Tauri's JSON transport carries the bytes
+ * as a number array, which Rust deserializes into `Vec<u8>` for
+ * `pty_write`'s `WriteArgs::data` field.
+ *
+ * No-op when the Tauri runtime is unavailable (vite preview, isolated
+ * harnesses) so the Terminal component's input handlers can be wired up
+ * unconditionally.
+ */
+export async function ptyWrite(sessionId: string, data: Uint8Array): Promise<void> {
+  if (!isTauriRuntime()) return;
+  if (data.byteLength === 0) return;
+  await invoke("pty_write", {
+    args: { sessionId, data: Array.from(data) },
+  });
+}
+
 export type PtyChunkHandler = (chunk: Uint8Array) => void;
 
 export interface PtySubscription {
