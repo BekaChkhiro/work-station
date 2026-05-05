@@ -16,7 +16,7 @@
 //     return multi-line context yet — keeps the result list compact and
 //     avoids paying for substring slicing on huge buffers until needed.
 
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { sessionList } from "../../stores/sessions";
 
 export interface CrossSessionSearchProps {
@@ -177,9 +177,21 @@ export function CrossSessionSearch(props: CrossSessionSearchProps) {
     }
   };
 
-  onMount(() => {
-    inputEl.focus();
-    inputEl.select();
+  // The input only mounts inside `<Show when={props.open}>`, so its ref is
+  // populated lazily on first open. Focus + select run from an effect that
+  // tracks `open` rather than `onMount`, which would fire before the input
+  // exists.
+  createEffect(() => {
+    if (!props.open) return;
+    inputEl?.focus();
+    inputEl?.select();
+  });
+
+  // Document-level Escape handler is fine to register once: it cheaply
+  // no-ops while the modal is closed because `props.onClose` is the only
+  // thing it triggers and the parent ignores spurious closes.
+  createEffect(() => {
+    if (!props.open) return;
     const onDocKey = (e: KeyboardEvent) => {
       // Closing on Escape from outside the input (e.g. focus on a result row).
       if (e.key === "Escape") {
