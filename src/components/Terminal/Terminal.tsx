@@ -1,10 +1,12 @@
-import { createEffect, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { Terminal as Xterm, type IDisposable, type ITheme } from "@xterm/xterm";
 import { resolvedTheme } from "../../stores/theme";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import { TerminalSearch } from "./TerminalSearch";
 import { logger } from "../../utils/logger";
 import {
   ptyGetScrollback,
@@ -51,6 +53,8 @@ export function Terminal(props: TerminalProps) {
   let unicodeAddon: Unicode11Addon | null = null;
   let webglAddon: WebglAddon | null = null;
   let fitAddon: FitAddon | null = null;
+  let searchAddon: SearchAddon | null = null;
+  const [searchOpen, setSearchOpen] = createSignal(false);
   let resizeObserver: ResizeObserver | null = null;
   // T4.6: rAF-coalesced resize. ResizeObserver can fire many times within
   // a single frame during drags; we collapse them to one fit() per frame
@@ -246,6 +250,27 @@ export function Terminal(props: TerminalProps) {
   // sequences (ESC[200~ … ESC[201~) when the app has enabled DECSET 2004 —
   // shells and editors like fish / nvim depend on those markers to detect
   // pasted input.
+  // T4.10: Cmd/Ctrl+F opens the search overlay. Handled before copy/paste so
+  // the keystroke is consumed regardless of selection state and never reaches
+  // the shell as ^F. F3 / Shift+F3 navigation is wired inside the overlay
+  // input — when the overlay is open it owns focus, so xterm's key handler
+  // never sees those keys.
+  const handleSearchHotkey = (event: KeyboardEvent): boolean => {
+    if (event.type !== "keydown") return true;
+    const mod = event.metaKey || event.ctrlKey;
+    if (!mod || event.altKey) return true;
+    if (event.key.toLowerCase() !== "f") return true;
+    event.preventDefault();
+    setSearchOpen(true);
+    return false;
+  };
+
+  const closeSearch = (): void => {
+    setSearchOpen(false);
+    searchAddon?.clearDecorations();
+    term?.focus();
+  };
+
   const handleCopyPasteKey = (event: KeyboardEvent): boolean => {
     if (event.type !== "keydown") return true;
     const mod = event.metaKey || event.ctrlKey;
@@ -341,13 +366,19 @@ export function Terminal(props: TerminalProps) {
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
 
+    searchAddon = new SearchAddon();
+    term.loadAddon(searchAddon);
+
     term.open(hostEl);
     hostEl.dataset.sessionId = props.sessionId;
 
     // WebGL addon must be loaded after term.open() — it requires the DOM.
     enableWebgl(term);
 
-    term.attachCustomKeyEventHandler(handleCopyPasteKey);
+    term.attachCustomKeyEventHandler((event) => {
+      if (!handleSearchHotkey(event)) return false;
+      return handleCopyPasteKey(event);
+    });
 
     startSubscription(props.sessionId);
     startInputForwarding(term);
@@ -432,6 +463,8 @@ export function Terminal(props: TerminalProps) {
     resizeObserver = null;
     fitAddon?.dispose();
     fitAddon = null;
+    searchAddon?.dispose();
+    searchAddon = null;
     webglAddon?.dispose();
     unicodeAddon?.dispose();
     term?.dispose();
@@ -444,11 +477,16 @@ export function Terminal(props: TerminalProps) {
   });
 
   return (
-    <div
-      ref={hostEl}
-      class="ws-terminal h-full w-full bg-terminal text-fg-terminal font-mono"
-      data-session-id={props.sessionId}
-    />
+    <div class="ws-terminal-frame relative h-full w-full">
+      <div
+        ref={hostEl}
+        class="ws-terminal h-full w-full bg-terminal text-fg-terminal font-mono"
+        data-session-id={props.sessionId}
+      />
+      <Show when={searchOpen() ? searchAddon : null}>
+        {(addon) => <TerminalSearch addon={addon()} onClose={closeSearch} />}
+      </Show>
+    </div>
   );
 }
 
