@@ -181,3 +181,153 @@ button {
   background: var(--accent-soft);
   color: var(--accent);
 }
+
+/* T4.13 — Cross-session search modal. Centered card on a dim backdrop. */
+.ws-xsearch__backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-canvas) 70%, transparent);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  z-index: 200;
+  animation: wsXSearchFade 140ms var(--ease);
+}
+@keyframes wsXSearchFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.ws-xsearch {
+  width: min(720px, calc(100vw - 32px));
+  max-height: 70vh;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: wsXSearchPop 160ms var(--ease);
+}
+@keyframes wsXSearchPop {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ws-xsearch__head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ws-xsearch__input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: none;
+  height: 28px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.ws-xsearch__input::placeholder {
+  color: var(--text-tertiary);
+}
+.ws-xsearch__count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  padding: 0 6px;
+  min-width: 90px;
+  text-align: right;
+}
+.ws-xsearch__btn {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  cursor: default;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ws-xsearch__btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-xsearch__btn.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.ws-xsearch__list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.ws-xsearch__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: default;
+  white-space: nowrap;
+}
+.ws-xsearch__row.is-active {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.ws-xsearch__title {
+  color: var(--accent);
+  font-weight: 600;
+  flex-shrink: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-xsearch__line {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.ws-xsearch__snippet {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+}
+.ws-xsearch__row.is-active .ws-xsearch__snippet {
+  color: var(--text-primary);
+}
+.ws-xsearch__hit {
+  background: var(--accent);
+  color: var(--bg-canvas);
+  padding: 0 1px;
+  border-radius: 2px;
+}
+.ws-xsearch__empty {
+  padding: 24px 16px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
+}

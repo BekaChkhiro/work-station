@@ -10,6 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { TerminalSearch } from "./TerminalSearch";
 import { logger } from "../../utils/logger";
+import { registerSession } from "../../stores/sessions";
 import {
   ptyGetScrollback,
   ptyResize,
@@ -28,6 +29,10 @@ export interface TerminalProps {
   /** When false, the terminal does not subscribe to backend PTY output —
    *  used by stress / mount-cycle harnesses that pass synthetic ids. */
   autoSubscribe?: boolean;
+  /** Human-friendly title surfaced in cross-session search results (T4.13). */
+  title?: string;
+  /** Project this session belongs to — used to scope cross-session search. */
+  projectId?: string;
 }
 
 export type TerminalRenderer = "webgl" | "dom";
@@ -96,6 +101,9 @@ export function Terminal(props: TerminalProps) {
   let isPaused = false;
   let intersectionObserver: IntersectionObserver | null = null;
   let docVisibilityHandler: (() => void) | null = null;
+  // T4.13: handle returned from sessions registry — must be invoked on
+  // cleanup so the cross-session search doesn't query a dead xterm.
+  let unregisterSession: (() => void) | null = null;
 
   const setRendererAttr = (mode: TerminalRenderer) => {
     if (hostEl) hostEl.dataset.renderer = mode;
@@ -300,6 +308,11 @@ export function Terminal(props: TerminalProps) {
     const mod = event.metaKey || event.ctrlKey;
     if (!mod || event.altKey) return true;
     if (event.key.toLowerCase() !== "f") return true;
+    // Cmd/Ctrl+Shift+F is the cross-session search hotkey (T4.13). Don't open
+    // the in-pane overlay or send `^F` to the shell — return false so xterm
+    // skips it, while letting the event bubble to the document-level handler
+    // that owns the cross-session modal.
+    if (event.shiftKey) return false;
     event.preventDefault();
     setSearchOpen(true);
     return false;
@@ -477,6 +490,80 @@ export function Terminal(props: TerminalProps) {
         intersectionObserver.observe(hostEl);
       }
     }
+
+    // T4.13: register with the cross-session search registry. We read
+    // `term.buffer.active` line-by-line so what we expose matches what is
+    // visually rendered (post-decode, post-ANSI). focusLine scrolls the
+    // matched row into view and highlights the entire row so the user can
+    // tell exactly which line was hit when several matches share a line.
+    unregisterSession = registerSession({
+      id: props.sessionId,
+      title: props.title,
+      projectId: props.projectId,
+      getScrollback: () => {
+        const t = term;
+        if (!t) return [];
+        const buf = t.buffer.active;
+        const out: string[] = [];
+        for (let i = 0; i < buf.length; i++) {
+          const line = buf.getLine(i);
+          out.push(line ? line.translateToString(true) : "");
+        }
+        return out;
+      },
+      focusLine: (line: number) => {
+        const t = term;
+        if (!t) return;
+        const buf = t.buffer.active;
+        const target = Math.max(0, Math.min(line, buf.length - 1));
+        const offset = target - buf.viewportY;
+        if (offset !== 0) t.scrollLines(offset);
+        // Select the full row so the match site is unmistakable. We pick
+        // an end column past `term.cols` so the selection extends across
+        // any trailing whitespace. xterm clamps internally.
+        t.select(0, target, t.cols);
+        t.focus();
+      },
+    });
+  });
+
+  // T4.13: keep the session registration in sync when title / projectId /
+  // sessionId change while the terminal stays mounted. The first run is a
+  // no-op because `unregisterSession` isn't set until onMount. Subsequent
+  // runs replace the registry entry in place so cross-session search sees
+  // up-to-date metadata. Tracking happens via property reads on `props`.
+  createEffect(() => {
+    const id = props.sessionId;
+    const title = props.title;
+    const projectId = props.projectId;
+    if (!unregisterSession) return;
+    unregisterSession();
+    unregisterSession = registerSession({
+      id,
+      title,
+      projectId,
+      getScrollback: () => {
+        const t = term;
+        if (!t) return [];
+        const buf = t.buffer.active;
+        const out: string[] = [];
+        for (let i = 0; i < buf.length; i++) {
+          const line = buf.getLine(i);
+          out.push(line ? line.translateToString(true) : "");
+        }
+        return out;
+      },
+      focusLine: (line: number) => {
+        const t = term;
+        if (!t) return;
+        const buf = t.buffer.active;
+        const target = Math.max(0, Math.min(line, buf.length - 1));
+        const offset = target - buf.viewportY;
+        if (offset !== 0) t.scrollLines(offset);
+        t.select(0, target, t.cols);
+        t.focus();
+      },
+    });
   });
 
   createEffect((prev: string | undefined) => {
@@ -542,6 +629,8 @@ export function Terminal(props: TerminalProps) {
   });
 
   onCleanup(() => {
+    unregisterSession?.();
+    unregisterSession = null;
     stopInputForwarding();
     stopSubscription();
     if (docVisibilityHandler) {
