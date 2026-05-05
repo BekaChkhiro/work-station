@@ -1,4 +1,6 @@
 //! T3.6: project CRUD queries.
+//! T3.8: validation rules — name 1–80 chars after trim, unique
+//! case-insensitive; path exists, is a directory, is readable.
 //!
 //! Pure async functions over `&SqlitePool` so tests can hit a fresh in-memory
 //! pool without a Tauri `AppHandle`. The Tauri command layer in
@@ -6,8 +8,7 @@
 //! Serializable error shape the UI consumes.
 //!
 //! Hard delete by design — soft delete is explicitly deferred to v0.2 in
-//! `PROJECT_PLAN.md` T3.6. Stricter validation rules (length, uniqueness,
-//! path existence) land in T3.8.
+//! `PROJECT_PLAN.md` T3.6.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -56,14 +57,81 @@ pub struct ProjectUpdate {
 pub enum ProjectError {
     #[error("project name must not be empty")]
     EmptyName,
+    #[error("project name must be at most {NAME_MAX_CHARS} characters (was {0})")]
+    NameTooLong(usize),
+    #[error("project name already exists: {0}")]
+    NameAlreadyExists(String),
     #[error("project path must not be empty")]
     EmptyPath,
+    #[error("project path does not exist")]
+    PathDoesNotExist,
+    #[error("project path is not a directory")]
+    PathNotDirectory,
+    #[error("project path is not readable")]
+    PathNotReadable,
     #[error("project not found: {0}")]
     NotFound(String),
     #[error("env serialization: {0}")]
     EnvSerialize(#[from] serde_json::Error),
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
+}
+
+/// Max name length per `PROJECT_PLAN.md` T3.8. Counted in Unicode scalar
+/// values so byte-fat characters (emoji, CJK) don't get a smaller budget
+/// than the user expects from the UI character count.
+pub const NAME_MAX_CHARS: usize = 80;
+
+fn validate_name_length(name: &str) -> Result<(), ProjectError> {
+    if name.is_empty() {
+        return Err(ProjectError::EmptyName);
+    }
+    let chars = name.chars().count();
+    if chars > NAME_MAX_CHARS {
+        return Err(ProjectError::NameTooLong(chars));
+    }
+    Ok(())
+}
+
+/// Case-insensitive name uniqueness check using `SQLite`'s NOCASE collation.
+/// Pass `exclude_id` on update so a project can keep its own name (or change
+/// only its case). NOCASE is ASCII-only — adequate for personal-use names
+/// per AGENTS.md §3 ("personal-use single-developer app").
+async fn ensure_unique_name(
+    pool: &SqlitePool,
+    name: &str,
+    exclude_id: Option<&str>,
+) -> Result<(), ProjectError> {
+    let exclude = exclude_id.unwrap_or("");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM projects WHERE name = ? COLLATE NOCASE AND id != ?",
+    )
+    .bind(name)
+    .bind(exclude)
+    .fetch_one(pool)
+    .await?;
+    if count > 0 {
+        return Err(ProjectError::NameAlreadyExists(name.to_string()));
+    }
+    Ok(())
+}
+
+/// Probe the filesystem: path must exist, be a directory, and be readable.
+/// Readability is checked by attempting to open a directory iterator — same
+/// approach picker.rs takes for symlink-loop detection.
+async fn validate_path_fs(path: &str) -> Result<(), ProjectError> {
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let p = std::path::Path::new(&path);
+        let meta = std::fs::metadata(p).map_err(|_| ProjectError::PathDoesNotExist)?;
+        if !meta.is_dir() {
+            return Err(ProjectError::PathNotDirectory);
+        }
+        std::fs::read_dir(p).map_err(|_| ProjectError::PathNotReadable)?;
+        Ok(())
+    })
+    .await
+    .expect("validate_path_fs blocking task panicked")
 }
 
 /// Return all projects, ordered by `position` then `created_at` for stability
@@ -85,12 +153,12 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, ProjectError> {
 pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, ProjectError> {
     let name = input.name.trim().to_string();
     let path = input.path.trim().to_string();
-    if name.is_empty() {
-        return Err(ProjectError::EmptyName);
-    }
+    validate_name_length(&name)?;
     if path.is_empty() {
         return Err(ProjectError::EmptyPath);
     }
+    validate_path_fs(&path).await?;
+    ensure_unique_name(pool, &name, None).await?;
 
     let env_json = serde_json::to_string(&input.env)?;
     let id = Uuid::new_v4().to_string();
@@ -141,12 +209,12 @@ pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, Pro
 pub async fn update(pool: &SqlitePool, input: ProjectUpdate) -> Result<Project, ProjectError> {
     let name = input.name.trim().to_string();
     let path = input.path.trim().to_string();
-    if name.is_empty() {
-        return Err(ProjectError::EmptyName);
-    }
+    validate_name_length(&name)?;
     if path.is_empty() {
         return Err(ProjectError::EmptyPath);
     }
+    validate_path_fs(&path).await?;
+    ensure_unique_name(pool, &name, Some(&input.id)).await?;
 
     let env_json = serde_json::to_string(&input.env)?;
 
@@ -246,6 +314,15 @@ mod tests {
         pool
     }
 
+    /// Each test gets a fresh real directory under the OS temp root — T3.8
+    /// requires the path to exist, be a directory, and be readable.
+    fn make_dir() -> String {
+        let id = Uuid::new_v4();
+        let p = std::env::temp_dir().join(format!("ws-test-{id}"));
+        std::fs::create_dir_all(&p).expect("create test dir");
+        p.to_string_lossy().into_owned()
+    }
+
     fn sample(name: &str, path: &str) -> NewProject {
         NewProject {
             name: name.to_string(),
@@ -260,13 +337,12 @@ mod tests {
     #[tokio::test]
     async fn create_assigns_uuid_position_and_round_trips() {
         let pool = migrated_pool().await;
-        let project = create(&pool, sample("alpha", "/tmp/alpha"))
-            .await
-            .expect("create");
+        let dir = make_dir();
+        let project = create(&pool, sample("alpha", &dir)).await.expect("create");
 
         assert!(Uuid::parse_str(&project.id).is_ok(), "id should be a uuid");
         assert_eq!(project.name, "alpha");
-        assert_eq!(project.path, "/tmp/alpha");
+        assert_eq!(project.path, dir);
         assert_eq!(project.position, 0);
         assert_eq!(project.env.get("FOO"), Some(&"bar".to_string()));
 
@@ -278,9 +354,9 @@ mod tests {
     #[tokio::test]
     async fn create_assigns_increasing_position() {
         let pool = migrated_pool().await;
-        let a = create(&pool, sample("a", "/tmp/a")).await.expect("a");
-        let b = create(&pool, sample("b", "/tmp/b")).await.expect("b");
-        let c = create(&pool, sample("c", "/tmp/c")).await.expect("c");
+        let a = create(&pool, sample("a", &make_dir())).await.expect("a");
+        let b = create(&pool, sample("b", &make_dir())).await.expect("b");
+        let c = create(&pool, sample("c", &make_dir())).await.expect("c");
         assert_eq!(a.position, 0);
         assert_eq!(b.position, 1);
         assert_eq!(c.position, 2);
@@ -289,12 +365,14 @@ mod tests {
     #[tokio::test]
     async fn create_trims_and_rejects_empty_name_or_path() {
         let pool = migrated_pool().await;
+        let dir = make_dir();
+        let padded = format!("  {dir}  ");
 
         let trimmed = create(
             &pool,
             NewProject {
                 name: "  spaced  ".to_string(),
-                path: "  /tmp/sp  ".to_string(),
+                path: padded,
                 color: None,
                 icon: None,
                 default_cli: None,
@@ -304,25 +382,86 @@ mod tests {
         .await
         .expect("create trimmed");
         assert_eq!(trimmed.name, "spaced");
-        assert_eq!(trimmed.path, "/tmp/sp");
+        assert_eq!(trimmed.path, dir);
 
-        let empty_name = create(&pool, sample("   ", "/tmp/x")).await;
+        let empty_name = create(&pool, sample("   ", &make_dir())).await;
         assert!(matches!(empty_name, Err(ProjectError::EmptyName)));
         let empty_path = create(&pool, sample("ok", "")).await;
         assert!(matches!(empty_path, Err(ProjectError::EmptyPath)));
     }
 
     #[tokio::test]
+    async fn create_rejects_name_over_80_chars() {
+        let pool = migrated_pool().await;
+        let dir = make_dir();
+        let long = "x".repeat(NAME_MAX_CHARS + 1);
+
+        let err = create(&pool, sample(&long, &dir))
+            .await
+            .expect_err("too long");
+        assert!(matches!(err, ProjectError::NameTooLong(n) if n == NAME_MAX_CHARS + 1));
+
+        // Boundary: exactly NAME_MAX_CHARS is allowed.
+        let exact = "y".repeat(NAME_MAX_CHARS);
+        create(&pool, sample(&exact, &make_dir()))
+            .await
+            .expect("max-length name accepted");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_name_case_insensitive() {
+        let pool = migrated_pool().await;
+        create(&pool, sample("Foo", &make_dir()))
+            .await
+            .expect("first");
+
+        let err = create(&pool, sample("foo", &make_dir()))
+            .await
+            .expect_err("dup");
+        assert!(matches!(err, ProjectError::NameAlreadyExists(ref n) if n == "foo"));
+
+        // Trim is applied before uniqueness — "  FOO  " also collides.
+        let err2 = create(&pool, sample("  FOO  ", &make_dir()))
+            .await
+            .expect_err("dup trimmed");
+        assert!(matches!(err2, ProjectError::NameAlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_missing_or_non_directory_path() {
+        let pool = migrated_pool().await;
+
+        let missing = create(
+            &pool,
+            sample("a", "/definitely/not/a/real/path/ws-test-missing"),
+        )
+        .await
+        .expect_err("missing");
+        assert!(matches!(missing, ProjectError::PathDoesNotExist));
+
+        // A regular file is not a directory.
+        let dir = make_dir();
+        let file_path = std::path::Path::new(&dir).join("file.txt");
+        std::fs::write(&file_path, b"hi").expect("write file");
+        let not_dir = create(&pool, sample("b", &file_path.to_string_lossy()))
+            .await
+            .expect_err("not a dir");
+        assert!(matches!(not_dir, ProjectError::PathNotDirectory));
+    }
+
+    #[tokio::test]
     async fn update_changes_fields_and_returns_fresh_row() {
         let pool = migrated_pool().await;
-        let created = create(&pool, sample("orig", "/tmp/orig")).await.expect("c");
+        let orig_dir = make_dir();
+        let renamed_dir = make_dir();
+        let created = create(&pool, sample("orig", &orig_dir)).await.expect("c");
 
         let updated = update(
             &pool,
             ProjectUpdate {
                 id: created.id.clone(),
                 name: "renamed".to_string(),
-                path: "/tmp/renamed".to_string(),
+                path: renamed_dir.clone(),
                 color: None,
                 icon: Some("flame".to_string()),
                 default_cli: None,
@@ -334,13 +473,56 @@ mod tests {
 
         assert_eq!(updated.id, created.id);
         assert_eq!(updated.name, "renamed");
-        assert_eq!(updated.path, "/tmp/renamed");
+        assert_eq!(updated.path, renamed_dir);
         assert_eq!(updated.color, None);
         assert_eq!(updated.icon.as_deref(), Some("flame"));
         assert_eq!(updated.env.get("BAZ"), Some(&"qux".to_string()));
         assert!(!updated.env.contains_key("FOO"));
         assert_eq!(updated.position, created.position);
         assert_eq!(updated.created_at, created.created_at);
+    }
+
+    #[tokio::test]
+    async fn update_keeps_own_name_but_rejects_other_duplicate() {
+        let pool = migrated_pool().await;
+        let a = create(&pool, sample("Alpha", &make_dir()))
+            .await
+            .expect("a");
+        let b = create(&pool, sample("Beta", &make_dir())).await.expect("b");
+
+        // Re-saving with the same name (and case-only changes) is fine.
+        let same = update(
+            &pool,
+            ProjectUpdate {
+                id: a.id.clone(),
+                name: "alpha".to_string(),
+                path: a.path.clone(),
+                color: a.color.clone(),
+                icon: a.icon.clone(),
+                default_cli: a.default_cli.clone(),
+                env: a.env.clone(),
+            },
+        )
+        .await
+        .expect("same-name update");
+        assert_eq!(same.name, "alpha");
+
+        // But b can't take a's name.
+        let err = update(
+            &pool,
+            ProjectUpdate {
+                id: b.id,
+                name: "ALPHA".to_string(),
+                path: b.path,
+                color: None,
+                icon: None,
+                default_cli: None,
+                env: HashMap::new(),
+            },
+        )
+        .await
+        .expect_err("collision");
+        assert!(matches!(err, ProjectError::NameAlreadyExists(_)));
     }
 
     #[tokio::test]
@@ -351,7 +533,7 @@ mod tests {
             ProjectUpdate {
                 id: "ghost".to_string(),
                 name: "x".to_string(),
-                path: "/tmp/x".to_string(),
+                path: make_dir(),
                 color: None,
                 icon: None,
                 default_cli: None,
@@ -366,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_row_and_cascades_sessions() {
         let pool = migrated_pool().await;
-        let created = create(&pool, sample("p", "/tmp/p")).await.expect("c");
+        let created = create(&pool, sample("p", &make_dir())).await.expect("c");
 
         sqlx::query(
             "INSERT INTO sessions (id, project_id, title, layout_json, created_at)
@@ -404,7 +586,7 @@ mod tests {
     async fn create_is_sql_injection_safe() {
         let pool = migrated_pool().await;
         let nasty = "'); DROP TABLE projects; --";
-        let project = create(&pool, sample(nasty, "/tmp/x")).await.expect("c");
+        let project = create(&pool, sample(nasty, &make_dir())).await.expect("c");
         assert_eq!(project.name, nasty);
 
         // Table still exists and the row round-trips.

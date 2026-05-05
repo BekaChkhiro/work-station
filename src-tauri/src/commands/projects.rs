@@ -120,7 +120,19 @@ impl From<ProjectError> for ProjectCommandError {
     fn from(error: ProjectError) -> Self {
         match error {
             ProjectError::EmptyName => Self::invalid_args("Project name must not be empty."),
+            ProjectError::NameTooLong(n) => Self::invalid_args(format!(
+                "Project name must be at most {max} characters (was {n}).",
+                max = projects::NAME_MAX_CHARS,
+            )),
+            ProjectError::NameAlreadyExists(name) => {
+                Self::invalid_args(format!("A project named \"{name}\" already exists."))
+            }
             ProjectError::EmptyPath => Self::invalid_args("Project path must not be empty."),
+            ProjectError::PathDoesNotExist => Self::invalid_args("Project path does not exist."),
+            ProjectError::PathNotDirectory => {
+                Self::invalid_args("Project path must be a directory.")
+            }
+            ProjectError::PathNotReadable => Self::invalid_args("Project path is not readable."),
             ProjectError::NotFound(id) => Self::not_found(id),
             ProjectError::EnvSerialize(e) => {
                 Self::invalid_args(format!("Project environment is not serializable: {e}"))
