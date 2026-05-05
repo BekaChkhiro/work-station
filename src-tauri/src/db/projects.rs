@@ -2,6 +2,13 @@
 //! T3.8: validation rules — name 1–80 chars after trim, unique
 //! case-insensitive; path exists, is a directory, is readable.
 //!
+//! Path canonicalization: stored paths are always the canonical absolute form
+//! (resolved symlinks, no `..`, no `.`). The picker (T3.7) already returns a
+//! canonical path, but `project_create`/`project_update` may receive
+//! hand-typed paths from the UI; we canonicalize at the validation step so
+//! `/Users/x/foo` and `/Users/x/sub/../foo` cannot both end up as separate
+//! rows that point at the same directory.
+//!
 //! Pure async functions over `&SqlitePool` so tests can hit a fresh in-memory
 //! pool without a Tauri `AppHandle`. The Tauri command layer in
 //! `commands/projects.rs` wraps these and maps `ProjectError` onto the
@@ -116,19 +123,23 @@ async fn ensure_unique_name(
     Ok(())
 }
 
-/// Probe the filesystem: path must exist, be a directory, and be readable.
-/// Readability is checked by attempting to open a directory iterator — same
-/// approach picker.rs takes for symlink-loop detection.
-async fn validate_path_fs(path: &str) -> Result<(), ProjectError> {
+/// Probe the filesystem and canonicalize. The path must exist, be a directory,
+/// and be readable; the returned `String` is the canonical absolute form
+/// (`canonicalize` resolves symlinks and removes `..`/`.` segments, and on
+/// macOS/Linux returns `ELOOP` on symlink cycles which surfaces here as
+/// `PathDoesNotExist`). Readability is verified by opening a directory
+/// iterator — same approach `commands/picker.rs` takes.
+async fn validate_path_fs(path: &str) -> Result<String, ProjectError> {
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
         let p = std::path::Path::new(&path);
-        let meta = std::fs::metadata(p).map_err(|_| ProjectError::PathDoesNotExist)?;
+        let canonical = std::fs::canonicalize(p).map_err(|_| ProjectError::PathDoesNotExist)?;
+        let meta = std::fs::metadata(&canonical).map_err(|_| ProjectError::PathDoesNotExist)?;
         if !meta.is_dir() {
             return Err(ProjectError::PathNotDirectory);
         }
-        std::fs::read_dir(p).map_err(|_| ProjectError::PathNotReadable)?;
-        Ok(())
+        std::fs::read_dir(&canonical).map_err(|_| ProjectError::PathNotReadable)?;
+        Ok(canonical.to_string_lossy().into_owned())
     })
     .await
     .expect("validate_path_fs blocking task panicked")
@@ -152,12 +163,12 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, ProjectError> {
 /// current Unix epoch in seconds.
 pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, ProjectError> {
     let name = input.name.trim().to_string();
-    let path = input.path.trim().to_string();
+    let path_input = input.path.trim().to_string();
     validate_name_length(&name)?;
-    if path.is_empty() {
+    if path_input.is_empty() {
         return Err(ProjectError::EmptyPath);
     }
-    validate_path_fs(&path).await?;
+    let path = validate_path_fs(&path_input).await?;
     ensure_unique_name(pool, &name, None).await?;
 
     let env_json = serde_json::to_string(&input.env)?;
@@ -208,12 +219,12 @@ pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, Pro
 /// command planned for the sidebar drag work).
 pub async fn update(pool: &SqlitePool, input: ProjectUpdate) -> Result<Project, ProjectError> {
     let name = input.name.trim().to_string();
-    let path = input.path.trim().to_string();
+    let path_input = input.path.trim().to_string();
     validate_name_length(&name)?;
-    if path.is_empty() {
+    if path_input.is_empty() {
         return Err(ProjectError::EmptyPath);
     }
-    validate_path_fs(&path).await?;
+    let path = validate_path_fs(&path_input).await?;
     ensure_unique_name(pool, &name, Some(&input.id)).await?;
 
     let env_json = serde_json::to_string(&input.env)?;
@@ -316,11 +327,17 @@ mod tests {
 
     /// Each test gets a fresh real directory under the OS temp root — T3.8
     /// requires the path to exist, be a directory, and be readable.
+    /// Returned in canonical form (matches what `validate_path_fs` stores)
+    /// so equality assertions don't tip over symlink-heavy temp roots like
+    /// macOS's `/var/folders → /private/var/folders`.
     fn make_dir() -> String {
         let id = Uuid::new_v4();
         let p = std::env::temp_dir().join(format!("ws-test-{id}"));
         std::fs::create_dir_all(&p).expect("create test dir");
-        p.to_string_lossy().into_owned()
+        std::fs::canonicalize(&p)
+            .expect("canonicalize test dir")
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn sample(name: &str, path: &str) -> NewProject {
@@ -593,6 +610,47 @@ mod tests {
         let listed = list(&pool).await.expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, nasty);
+    }
+
+    /// Path canonicalization: a hand-typed path with `..` segments must be
+    /// stored in resolved form so two semantically-identical paths cannot
+    /// land as separate rows pointing at the same directory.
+    #[tokio::test]
+    async fn create_canonicalizes_path_with_dot_dot_segments() {
+        let pool = migrated_pool().await;
+        let dir = make_dir(); // already canonical
+        let parent = std::path::Path::new(&dir)
+            .parent()
+            .expect("temp dir has a parent");
+        let leaf = std::path::Path::new(&dir)
+            .file_name()
+            .expect("temp dir has a name");
+
+        // Build an indirect form: <parent>/<leaf>/./../<leaf>
+        // canonicalize collapses this back to <dir>.
+        let indirect = parent.join(leaf).join(".").join("..").join(leaf);
+        let project = create(&pool, sample("indirect", &indirect.to_string_lossy()))
+            .await
+            .expect("create with indirect path");
+        assert_eq!(project.path, dir, "stored path must be canonical");
+    }
+
+    /// Path canonicalization defends against "different strings, same
+    /// directory" rows: a canonical path and an indirect form pointing at
+    /// the same directory must not coexist as distinct projects with
+    /// different `path` values.
+    #[tokio::test]
+    async fn create_then_indirect_path_resolves_to_same_stored_path() {
+        let pool = migrated_pool().await;
+        let dir = make_dir();
+        let a = create(&pool, sample("a", &dir)).await.expect("a");
+
+        let indirect = format!("{dir}/.");
+        let b = create(&pool, sample("b", &indirect)).await.expect("b");
+        assert_eq!(
+            a.path, b.path,
+            "both rows resolve to the same canonical path"
+        );
     }
 
     #[tokio::test]

@@ -18,18 +18,33 @@ use tauri_plugin_sql::{DbInstances, DbPool};
 
 pub const DB_URL: &str = "sqlite:work-station.db";
 
-/// Connection-level pragmas applied at boot before migrations run (T3.9).
+/// Pragmas applied at boot before migrations run (T3.9).
 ///
-/// `journal_mode = WAL` is database-level and persists in the file header,
-/// so newly-acquired pool connections inherit it. `synchronous`,
-/// `foreign_keys`, and `busy_timeout` are per-connection, but sqlx's
-/// `SqliteConnectOptions` defaults match these values, so every connection
-/// the pool opens carries them. We re-issue them explicitly so the boot
-/// path is auditable and the FK / busy-timeout invariants don't silently
-/// regress if the upstream defaults ever change.
+/// `journal_mode = WAL` is database-level — sqlite writes the mode into the
+/// file header, so newly-acquired pool connections inherit it.
+///
+/// `foreign_keys` and `busy_timeout` are per-connection, but sqlx 0.8's
+/// `SqliteConnectOptions` defaults are `foreign_keys: true` and
+/// `busy_timeout: Duration::from_secs(5)`, so every fresh connection sqlx
+/// opens already carries them. We still re-issue them on the boot
+/// connection so the boot path is auditable and a future regression in
+/// upstream defaults would surface here as a test failure rather than a
+/// silent FK-disabled run.
+///
+/// `synchronous = NORMAL` is intentionally NOT in this list. It is per-
+/// connection and sqlx's default is `FULL`, which means every non-boot
+/// connection in the pool runs at `FULL`. Re-issuing `NORMAL` here would
+/// only affect the single connection the pragma happens to run on, so
+/// claiming pool-wide `NORMAL` would be misleading. `FULL` is more durable
+/// than `NORMAL` (extra fsync per commit), which for this personal-use
+/// single-writer workload is an acceptable trade.
+///
+/// Owning the pool ourselves and registering an `after_connect` hook is
+/// the only way to guarantee `synchronous = NORMAL` pool-wide; that
+/// requires bypassing `tauri-plugin-sql`'s preload and is tracked for
+/// v0.2 if commit latency ever becomes a measured problem.
 const PRAGMAS: &[&str] = &[
     "PRAGMA journal_mode = WAL;",
-    "PRAGMA synchronous = NORMAL;",
     "PRAGMA foreign_keys = ON;",
     "PRAGMA busy_timeout = 5000;",
 ];
@@ -373,8 +388,8 @@ mod tests {
     }
 
     /// T3.9 acceptance: applying the pragmas produces the expected runtime
-    /// state — WAL journaling, NORMAL synchronous, FK enforcement, and a
-    /// 5s busy timeout.
+    /// state on the boot connection — WAL journaling, FK enforcement, and
+    /// a 5s busy timeout.
     #[tokio::test]
     async fn pragmas_set_expected_runtime_state() {
         let temp = TempDb::new("state");
@@ -393,13 +408,6 @@ mod tests {
             .get(0);
         assert_eq!(mode.to_lowercase(), "wal");
 
-        let sync: i64 = sqlx::query("PRAGMA synchronous;")
-            .fetch_one(&pool)
-            .await
-            .expect("query synchronous")
-            .get(0);
-        assert_eq!(sync, 1, "synchronous=NORMAL is encoded as 1");
-
         let fk: i64 = sqlx::query("PRAGMA foreign_keys;")
             .fetch_one(&pool)
             .await
@@ -413,6 +421,67 @@ mod tests {
             .expect("query busy_timeout")
             .get(0);
         assert_eq!(busy, 5000);
+    }
+
+    /// T3.9 regression guard: the pool-wide guarantees we DO claim — WAL
+    /// journaling, FK enforcement, and the 5s busy timeout — must hold on
+    /// every connection sqlx hands out, not just the boot connection. WAL
+    /// is database-level (file header); FK and `busy_timeout` are per-
+    /// connection but sqlx 0.8's defaults match. If a future sqlx upgrade
+    /// changes those defaults, this test fails loudly.
+    #[tokio::test]
+    async fn pragmas_apply_to_every_pool_connection() {
+        let temp = TempDb::new("multi-conn");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect(&temp.url())
+            .await
+            .expect("open file-backed sqlite");
+        super::apply_pragmas(&pool).await.expect("apply pragmas");
+
+        // Hold four connections concurrently so each tokio task gets a
+        // distinct one — otherwise sqlx may keep handing out the boot
+        // connection and the test would assert nothing about the rest.
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                let mut conn = pool.acquire().await.expect("acquire");
+                let mode: String = sqlx::query("PRAGMA journal_mode;")
+                    .fetch_one(&mut *conn)
+                    .await
+                    .expect("query journal_mode")
+                    .get(0);
+                let fk: i64 = sqlx::query("PRAGMA foreign_keys;")
+                    .fetch_one(&mut *conn)
+                    .await
+                    .expect("query foreign_keys")
+                    .get(0);
+                let busy: i64 = sqlx::query("PRAGMA busy_timeout;")
+                    .fetch_one(&mut *conn)
+                    .await
+                    .expect("query busy_timeout")
+                    .get(0);
+                // Block the connection long enough that the next acquire
+                // is forced to open a fresh one rather than re-using this.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                (mode, fk, busy)
+            }));
+        }
+
+        for handle in handles {
+            let (mode, fk, busy) = handle.await.expect("task joined");
+            assert_eq!(
+                mode.to_lowercase(),
+                "wal",
+                "WAL must apply on every connection"
+            );
+            assert_eq!(fk, 1, "foreign_keys default must be ON on every connection");
+            assert_eq!(
+                busy, 5000,
+                "busy_timeout default must be 5000ms on every connection"
+            );
+        }
     }
 
     /// T3.9 acceptance: WAL files are created on disk after a write, and
