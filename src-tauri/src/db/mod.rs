@@ -1,14 +1,26 @@
 //! `SQLite` persistence: connection, migrations, queries.
 //!
-//! T3.1 ships only the boot-time hello-world query that proves
-//! `tauri-plugin-sql` opened the preloaded pool. Schema, migrations, and
-//! domain queries land in T3.2+.
+//! T3.1 wires the preloaded pool. T3.2 adds the `projects` table migration.
+//! Domain queries (project CRUD commands) land in T3.6.
 
 use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
-use tauri_plugin_sql::{DbInstances, DbPool};
+use tauri_plugin_sql::{DbInstances, DbPool, Migration, MigrationKind};
 
 pub const DB_URL: &str = "sqlite:work-station.db";
+
+/// Schema migrations applied by `tauri-plugin-sql` on plugin init.
+///
+/// T3.5 will replace this with a backup-aware runner; the SQL files
+/// themselves remain the source of truth.
+pub fn migrations() -> Vec<Migration> {
+    vec![Migration {
+        version: 1,
+        description: "create projects table",
+        sql: include_str!("../../migrations/0001_projects.sql"),
+        kind: MigrationKind::Up,
+    }]
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -34,4 +46,61 @@ pub async fn hello<R: Runtime>(app: &AppHandle<R>) -> Result<i64, DbError> {
     };
     let row = sqlx::query("SELECT 1 AS one").fetch_one(pool).await?;
     Ok(row.try_get::<i64, _>("one")?)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{Executor, Row};
+
+    /// T3.2 acceptance: applying the migration creates the table and an
+    /// insert/select round-trips with no data loss.
+    #[tokio::test]
+    async fn projects_migration_round_trips() {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite");
+
+        let migration = include_str!("../../migrations/0001_projects.sql");
+        pool.execute(migration).await.expect("apply migration");
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, color, icon, default_cli, env_json, position, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("p1")
+        .bind("Demo")
+        .bind("/tmp/demo")
+        .bind("#fa0")
+        .bind("rocket")
+        .bind("zsh")
+        .bind(r#"{"FOO":"bar"}"#)
+        .bind(0_i64)
+        .bind(1_700_000_000_i64)
+        .execute(&pool)
+        .await
+        .expect("insert project");
+
+        let row =
+            sqlx::query("SELECT id, name, path, env_json, position FROM projects WHERE id = ?")
+                .bind("p1")
+                .fetch_one(&pool)
+                .await
+                .expect("select project");
+
+        assert_eq!(row.get::<String, _>("id"), "p1");
+        assert_eq!(row.get::<String, _>("name"), "Demo");
+        assert_eq!(row.get::<String, _>("path"), "/tmp/demo");
+        assert_eq!(row.get::<String, _>("env_json"), r#"{"FOO":"bar"}"#);
+        assert_eq!(row.get::<i64, _>("position"), 0);
+
+        let index = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_projects_position'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("query index");
+        assert!(index.is_some(), "position index should be created");
+    }
 }

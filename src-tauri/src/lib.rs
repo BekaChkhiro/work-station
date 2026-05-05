@@ -15,7 +15,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // T3.1: SQLite (preloaded via tauri.conf.json plugins.sql.preload) + key-value store.
-        .plugin(tauri_plugin_sql::Builder::default().build())
+        // T3.2: register schema migrations against the same DB URL.
+        .plugin(
+            tauri_plugin_sql::Builder::default()
+                .add_migrations(db::DB_URL, db::migrations())
+                .build(),
+        )
         .plugin(tauri_plugin_store::Builder::default().build())
         // PTY registry (T2.3) — app-scoped so sessions survive webview reloads.
         .manage(pty::PtyManager::new())
