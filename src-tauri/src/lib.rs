@@ -27,6 +27,13 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                // T3.9: WAL + foreign_keys + busy_timeout before any schema
+                // work so the very first migration writes land in WAL mode
+                // and can survive a crash with the FK invariants intact.
+                if let Err(error) = db::apply_pragmas_app(&handle).await {
+                    tracing::error!(target: "db", %error, "sqlite pragma setup failed");
+                    return;
+                }
                 match db::run_migrations(&handle).await {
                     Ok(report) => {
                         tracing::info!(
