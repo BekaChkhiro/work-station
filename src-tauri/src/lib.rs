@@ -59,6 +59,10 @@ pub fn run() {
             commands::pty::pty_get_scrollback,
             commands::pty::pty_subscribe,
             commands::pty::pty_get_backpressure_stats,
+            commands::projects::project_list,
+            commands::projects::project_create,
+            commands::projects::project_update,
+            commands::projects::project_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
