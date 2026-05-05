@@ -61,6 +61,16 @@ export async function ptyWrite(sessionId: string, data: Uint8Array): Promise<voi
   });
 }
 
+/**
+ * Best-effort graceful shutdown of a PTY session: SIGTERM (or close-stdin
+ * on Windows), wait briefly, then SIGKILL if still alive. Safe to call
+ * outside the Tauri runtime — it short-circuits.
+ */
+export async function ptyKill(sessionId: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("pty_kill", { args: { sessionId } });
+}
+
 export interface PtyResizeArgs {
   sessionId: string;
   cols: number;

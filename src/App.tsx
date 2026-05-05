@@ -1,17 +1,18 @@
 import { Match, Switch, createSignal, onCleanup, onMount } from "solid-js";
 import { AppErrorBoundary, PanelErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorThrower } from "./components/ErrorBoundary/ErrorThrower.dev";
+import TerminalLiveHarness from "./components/Terminal/Terminal.live.dev";
 import TerminalStressHarness from "./components/Terminal/Terminal.stress.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import "./styles/globals.css";
 
-type DebugMode = "errorboundary" | "terminal-stress" | null;
+type DebugMode = "errorboundary" | "terminal-stress" | "terminal" | null;
 
 const debugMode = (): DebugMode => {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
   const v = new URLSearchParams(window.location.search).get("wsdebug");
-  return v === "errorboundary" || v === "terminal-stress" ? v : null;
+  return v === "errorboundary" || v === "terminal-stress" || v === "terminal" ? v : null;
 };
 
 export default function App() {
@@ -43,6 +44,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "terminal-stress"}>
             <TerminalStressHarness />
+          </Match>
+          <Match when={debugMode() === "terminal"}>
+            <TerminalLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>
