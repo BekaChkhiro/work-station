@@ -75,6 +75,43 @@ export async function ptyResize(sessionId: string, cols: number, rows: number): 
   });
 }
 
+export interface PtyScrollbackSnapshot {
+  /** Snapshot bytes [0, totalBytes) at read time. Empty when the session has
+   *  produced no output yet, or when called outside the Tauri runtime. */
+  data: Uint8Array;
+  /** Size of the scrollback at read time — the full snapshot length. */
+  totalBytes: number;
+}
+
+interface RawScrollbackResponse {
+  data: number[];
+  totalBytes: number;
+  nextOffset: number;
+}
+
+/**
+ * Read the full scrollback snapshot for `sessionId`. Used at mount / tab
+ * switch to replay prior session output before attaching a live subscription
+ * (T4.7). Returns an empty snapshot in non-Tauri contexts so callers don't
+ * have to branch.
+ *
+ * The single-shot full read avoids the pagination's "racing the live writer"
+ * caveat documented on `pty_get_scrollback` — for stable replay we want one
+ * consistent view, not a tail of a mutating buffer.
+ */
+export async function ptyGetScrollback(sessionId: string): Promise<PtyScrollbackSnapshot> {
+  if (!isTauriRuntime()) {
+    return { data: new Uint8Array(), totalBytes: 0 };
+  }
+  const raw = await invoke<RawScrollbackResponse>("pty_get_scrollback", {
+    args: { sessionId, offsetBytes: 0, limitBytes: Number.MAX_SAFE_INTEGER },
+  });
+  return {
+    data: Uint8Array.from(raw.data),
+    totalBytes: raw.totalBytes,
+  };
+}
+
 export type PtyChunkHandler = (chunk: Uint8Array) => void;
 
 export interface PtySubscription {
