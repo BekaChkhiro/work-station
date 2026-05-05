@@ -34,6 +34,13 @@ pub struct SpawnArgs {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// T4.14 — commands written to the freshly-spawned shell's stdin (one
+    /// per line, in order). Treated like user input, so each command is
+    /// terminated with `\n` and the shell's normal parser/aliases apply.
+    /// Empty/whitespace-only entries are skipped so callers can keep
+    /// pass-through arrays without filtering.
+    #[serde(default)]
+    pub startup_commands: Vec<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -196,6 +203,7 @@ pub async fn pty_spawn(
 fn spawn_inner(manager: PtyManager, args: SpawnArgs) -> Result<SpawnResponse, SpawnError> {
     validate(&args)?;
 
+    let startup_commands = args.startup_commands;
     let config = SpawnConfig {
         command: args.command,
         args: args.args,
@@ -210,6 +218,29 @@ fn spawn_inner(manager: PtyManager, args: SpawnArgs) -> Result<SpawnResponse, Sp
         .get(id)
         .ok_or_else(|| SpawnError::internal("spawned session missing from registry"))?;
     spawn_reader(manager.clone(), &session);
+
+    // T4.14 — fire startup commands after the reader is broadcasting so
+    // their output is captured in scrollback. Failures are logged and
+    // swallowed: a busted user-supplied command shouldn't tear down the
+    // whole session.
+    for line in startup_commands {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+        let mut payload = Vec::with_capacity(trimmed.len() + 1);
+        payload.extend_from_slice(trimmed.as_bytes());
+        payload.push(b'\n');
+        if let Err(error) = manager.write(id, &payload) {
+            tracing::warn!(
+                session_id = %id,
+                %error,
+                "pty spawn: startup command write failed",
+            );
+            break;
+        }
+    }
+
     Ok(SpawnResponse { session_id: id })
 }
 
@@ -964,6 +995,7 @@ mod tests {
             args: vec![],
             cwd: None,
             env: HashMap::new(),
+            startup_commands: Vec::new(),
             cols: 80,
             rows: 24,
         }
@@ -1038,6 +1070,56 @@ mod tests {
             "session must be registered"
         );
         m.kill(resp.session_id).expect("kill");
+    }
+
+    /// T4.14 — startup commands hand-fed to the freshly-spawned shell hit
+    /// the broadcast channel as if the user had typed them. `/bin/cat`
+    /// echoes its stdin, so each line plus its trailing newline must be
+    /// observable on a subscriber. Empty / whitespace-only entries are
+    /// dropped server-side and must not produce blank echoes that would
+    /// drift the assertion.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn startup_commands_run_after_spawn() {
+        use tokio::time::{timeout, Duration};
+
+        let m = PtyManager::new();
+        let mut a = args("/bin/cat");
+        a.startup_commands = vec![
+            "first-line".to_string(),
+            "   ".to_string(), // skipped
+            "second-line".to_string(),
+        ];
+        let resp = spawn_inner(m.clone(), a).expect("spawn cat with startup commands");
+        let session_id = resp.session_id;
+        let mut rx = m
+            .get(session_id)
+            .expect("get session")
+            .output_tx
+            .subscribe();
+
+        let received = timeout(
+            Duration::from_secs(3),
+            await_substring(&mut rx, b"second-line"),
+        )
+        .await
+        .expect("startup commands round-trip timed out");
+        assert!(
+            received
+                .windows(b"first-line".len())
+                .any(|w| w == b"first-line"),
+            "first startup command missing in {:?}",
+            String::from_utf8_lossy(&received),
+        );
+        assert!(
+            received
+                .windows(b"second-line".len())
+                .any(|w| w == b"second-line"),
+            "second startup command missing in {:?}",
+            String::from_utf8_lossy(&received),
+        );
+
+        m.kill(session_id).expect("kill cat");
     }
 
     #[test]
@@ -1789,6 +1871,7 @@ mod tests {
                 args: vec!["1".into(), "200000".into()],
                 cwd: None,
                 env: HashMap::new(),
+                startup_commands: Vec::new(),
                 cols: 80,
                 rows: 24,
             },
@@ -1915,6 +1998,7 @@ mod tests {
                 args: vec!["1".into(), "100000".into()],
                 cwd: None,
                 env: HashMap::new(),
+                startup_commands: Vec::new(),
                 cols: 80,
                 rows: 24,
             },

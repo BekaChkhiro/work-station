@@ -21,6 +21,12 @@ export interface PtySpawnArgs {
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  /**
+   * T4.14 — commands written to the freshly-spawned shell after subscribers
+   * are attached. Each entry is treated like user input (terminating `\n`
+   * appended on the Rust side); empty/whitespace lines are skipped.
+   */
+  startupCommands?: string[];
   cols: number;
   rows: number;
 }

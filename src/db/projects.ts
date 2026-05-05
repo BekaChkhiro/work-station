@@ -11,6 +11,9 @@ import { z } from "zod";
 export const ProjectEnvSchema = z.record(z.string(), z.string());
 export type ProjectEnv = z.infer<typeof ProjectEnvSchema>;
 
+export const ProjectStartupCommandsSchema = z.array(z.string());
+export type ProjectStartupCommands = z.infer<typeof ProjectStartupCommandsSchema>;
+
 export const ProjectSchema = z.object({
   id: z.string().min(1),
   name: z.string(),
@@ -31,6 +34,7 @@ export const ProjectSchema = z.object({
     .optional()
     .transform((v) => v ?? null),
   env: ProjectEnvSchema,
+  startupCommands: ProjectStartupCommandsSchema,
   position: z.number().int(),
   createdAt: z.number().int(),
 });
@@ -45,6 +49,7 @@ export interface CreateProjectInput {
   icon?: string | null;
   defaultCli?: string | null;
   env?: ProjectEnv;
+  startupCommands?: ProjectStartupCommands;
 }
 
 export interface UpdateProjectInput {
@@ -55,6 +60,7 @@ export interface UpdateProjectInput {
   icon?: string | null;
   defaultCli?: string | null;
   env?: ProjectEnv;
+  startupCommands?: ProjectStartupCommands;
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -77,7 +83,8 @@ export async function deleteProject(id: string): Promise<void> {
 }
 
 // Normalize undefined → null so the Rust side sees a consistent shape.
-// `env` defaults to {} so the backend never has to special-case missing.
+// `env` and `startupCommands` default to empty so the backend never has to
+// special-case missing.
 function toArgs<T extends CreateProjectInput | UpdateProjectInput>(input: T): T {
   return {
     ...input,
@@ -85,5 +92,6 @@ function toArgs<T extends CreateProjectInput | UpdateProjectInput>(input: T): T 
     icon: input.icon ?? null,
     defaultCli: input.defaultCli ?? null,
     env: input.env ?? {},
+    startupCommands: input.startupCommands ?? [],
   };
 }

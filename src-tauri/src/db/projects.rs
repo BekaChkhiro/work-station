@@ -35,6 +35,7 @@ pub struct Project {
     pub icon: Option<String>,
     pub default_cli: Option<String>,
     pub env: HashMap<String, String>,
+    pub startup_commands: Vec<String>,
     pub position: i64,
     pub created_at: i64,
 }
@@ -47,6 +48,7 @@ pub struct NewProject {
     pub icon: Option<String>,
     pub default_cli: Option<String>,
     pub env: HashMap<String, String>,
+    pub startup_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,7 @@ pub struct ProjectUpdate {
     pub icon: Option<String>,
     pub default_cli: Option<String>,
     pub env: HashMap<String, String>,
+    pub startup_commands: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,7 +152,7 @@ async fn validate_path_fs(path: &str) -> Result<String, ProjectError> {
 /// when two rows share the same position.
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, ProjectError> {
     let rows = sqlx::query(
-        "SELECT id, name, path, color, icon, default_cli, env_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands_json, position, created_at
          FROM projects
          ORDER BY position ASC, created_at ASC",
     )
@@ -172,6 +175,7 @@ pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, Pro
     ensure_unique_name(pool, &name, None).await?;
 
     let env_json = serde_json::to_string(&input.env)?;
+    let startup_commands_json = serde_json::to_string(&input.startup_commands)?;
     let id = Uuid::new_v4().to_string();
     let created_at = epoch_seconds();
 
@@ -184,8 +188,8 @@ pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, Pro
     let position = max_position.map_or(0, |p| p + 1);
 
     sqlx::query(
-        "INSERT INTO projects (id, name, path, color, icon, default_cli, env_json, position, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO projects (id, name, path, color, icon, default_cli, env_json, startup_commands_json, position, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&name)
@@ -194,6 +198,7 @@ pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, Pro
     .bind(input.icon.as_deref())
     .bind(input.default_cli.as_deref())
     .bind(&env_json)
+    .bind(&startup_commands_json)
     .bind(position)
     .bind(created_at)
     .execute(&mut *tx)
@@ -209,6 +214,7 @@ pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, Pro
         icon: input.icon,
         default_cli: input.default_cli,
         env: input.env,
+        startup_commands: input.startup_commands,
         position,
         created_at,
     })
@@ -228,10 +234,11 @@ pub async fn update(pool: &SqlitePool, input: ProjectUpdate) -> Result<Project, 
     ensure_unique_name(pool, &name, Some(&input.id)).await?;
 
     let env_json = serde_json::to_string(&input.env)?;
+    let startup_commands_json = serde_json::to_string(&input.startup_commands)?;
 
     let result = sqlx::query(
         "UPDATE projects
-         SET name = ?, path = ?, color = ?, icon = ?, default_cli = ?, env_json = ?
+         SET name = ?, path = ?, color = ?, icon = ?, default_cli = ?, env_json = ?, startup_commands_json = ?
          WHERE id = ?",
     )
     .bind(&name)
@@ -240,6 +247,7 @@ pub async fn update(pool: &SqlitePool, input: ProjectUpdate) -> Result<Project, 
     .bind(input.icon.as_deref())
     .bind(input.default_cli.as_deref())
     .bind(&env_json)
+    .bind(&startup_commands_json)
     .bind(&input.id)
     .execute(pool)
     .await?;
@@ -266,7 +274,7 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), ProjectError> {
 
 async fn fetch_one(pool: &SqlitePool, id: &str) -> Result<Project, ProjectError> {
     let row = sqlx::query(
-        "SELECT id, name, path, color, icon, default_cli, env_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands_json, position, created_at
          FROM projects WHERE id = ?",
     )
     .bind(id)
@@ -281,6 +289,9 @@ fn row_to_project(row: SqliteRow) -> Result<Project, ProjectError> {
     // Corrupt env_json shouldn't crash the list command. Mirror the layout_json
     // tolerance from T3.3: parse failure → empty map.
     let env: HashMap<String, String> = serde_json::from_str(&env_json).unwrap_or_default();
+    let startup_commands_json: String = row.try_get("startup_commands_json")?;
+    let startup_commands: Vec<String> =
+        serde_json::from_str(&startup_commands_json).unwrap_or_default();
     Ok(Project {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -289,6 +300,7 @@ fn row_to_project(row: SqliteRow) -> Result<Project, ProjectError> {
         icon: row.try_get("icon")?,
         default_cli: row.try_get("default_cli")?,
         env,
+        startup_commands,
         position: row.try_get("position")?,
         created_at: row.try_get("created_at")?,
     })
@@ -322,6 +334,11 @@ mod tests {
         pool.execute(include_str!("../../migrations/0002_sessions.sql"))
             .await
             .expect("apply 0002");
+        pool.execute(include_str!(
+            "../../migrations/0004_project_startup_commands.sql"
+        ))
+        .await
+        .expect("apply 0004");
         pool
     }
 
@@ -348,6 +365,7 @@ mod tests {
             icon: Some("rocket".to_string()),
             default_cli: Some("zsh".to_string()),
             env: HashMap::from([("FOO".to_string(), "bar".to_string())]),
+            startup_commands: Vec::new(),
         }
     }
 
@@ -394,6 +412,7 @@ mod tests {
                 icon: None,
                 default_cli: None,
                 env: HashMap::new(),
+                startup_commands: Vec::new(),
             },
         )
         .await
@@ -483,6 +502,7 @@ mod tests {
                 icon: Some("flame".to_string()),
                 default_cli: None,
                 env: HashMap::from([("BAZ".to_string(), "qux".to_string())]),
+                startup_commands: vec!["echo hi".to_string()],
             },
         )
         .await
@@ -495,6 +515,7 @@ mod tests {
         assert_eq!(updated.icon.as_deref(), Some("flame"));
         assert_eq!(updated.env.get("BAZ"), Some(&"qux".to_string()));
         assert!(!updated.env.contains_key("FOO"));
+        assert_eq!(updated.startup_commands, vec!["echo hi".to_string()]);
         assert_eq!(updated.position, created.position);
         assert_eq!(updated.created_at, created.created_at);
     }
@@ -518,6 +539,7 @@ mod tests {
                 icon: a.icon.clone(),
                 default_cli: a.default_cli.clone(),
                 env: a.env.clone(),
+                startup_commands: a.startup_commands.clone(),
             },
         )
         .await
@@ -535,6 +557,7 @@ mod tests {
                 icon: None,
                 default_cli: None,
                 env: HashMap::new(),
+                startup_commands: Vec::new(),
             },
         )
         .await
@@ -555,6 +578,7 @@ mod tests {
                 icon: None,
                 default_cli: None,
                 env: HashMap::new(),
+                startup_commands: Vec::new(),
             },
         )
         .await

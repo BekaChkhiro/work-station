@@ -32,6 +32,8 @@ pub struct CreateProjectArgs {
     pub default_cli: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub startup_commands: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +50,8 @@ pub struct UpdateProjectArgs {
     pub default_cli: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub startup_commands: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +173,7 @@ pub async fn project_create<R: Runtime>(
         icon: args.icon,
         default_cli: args.default_cli,
         env: args.env,
+        startup_commands: args.startup_commands,
     };
     Ok(projects::create(&pool, input).await?)
 }
@@ -187,6 +192,7 @@ pub async fn project_update<R: Runtime>(
         icon: args.icon,
         default_cli: args.default_cli,
         env: args.env,
+        startup_commands: args.startup_commands,
     };
     Ok(projects::update(&pool, input).await?)
 }
