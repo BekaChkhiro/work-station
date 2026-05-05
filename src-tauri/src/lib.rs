@@ -20,6 +20,8 @@ pub fn run() {
         // failure. The plugin's built-in migration step is intentionally not used.
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_store::Builder::default().build())
+        // T3.7: native folder picker for project paths.
+        .plugin(tauri_plugin_dialog::init())
         // PTY registry (T2.3) — app-scoped so sessions survive webview reloads.
         .manage(pty::PtyManager::new())
         .setup(|app| {
@@ -63,6 +65,7 @@ pub fn run() {
             commands::projects::project_create,
             commands::projects::project_update,
             commands::projects::project_delete,
+            commands::picker::pick_project_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
