@@ -1,8 +1,8 @@
 //! `SQLite` persistence: connection, migrations, queries.
 //!
 //! T3.1 wires the preloaded pool. T3.2 adds the `projects` table migration.
-//! T3.3 adds the `sessions` table. Domain queries (project CRUD commands)
-//! land in T3.6.
+//! T3.3 adds the `sessions` table. T3.4 adds the `app_settings` key/value
+//! table. Domain queries (project CRUD commands) land in T3.6.
 
 use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
@@ -26,6 +26,12 @@ pub fn migrations() -> Vec<Migration> {
             version: 2,
             description: "create sessions table",
             sql: include_str!("../../migrations/0002_sessions.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 3,
+            description: "create app_settings table",
+            sql: include_str!("../../migrations/0003_app_settings.sql"),
             kind: MigrationKind::Up,
         },
     ]
@@ -214,5 +220,61 @@ mod tests {
             .expect("count sessions")
             .get("n");
         assert_eq!(remaining, 0, "sessions should cascade-delete with project");
+    }
+
+    /// T3.4 acceptance: applying the migration creates the `app_settings`
+    /// key/value table; insert/select round-trips, the PRIMARY KEY rejects
+    /// duplicates, and `INSERT ... ON CONFLICT(key) DO UPDATE` upserts cleanly
+    /// (the upsert path is what the frontend wrapper relies on).
+    #[tokio::test]
+    async fn app_settings_migration_round_trips() {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite");
+
+        pool.execute(include_str!("../../migrations/0003_app_settings.sql"))
+            .await
+            .expect("apply 0003");
+
+        sqlx::query("INSERT INTO app_settings (key, value) VALUES (?, ?)")
+            .bind("theme")
+            .bind(r#""dark""#)
+            .execute(&pool)
+            .await
+            .expect("insert setting");
+
+        let row = sqlx::query("SELECT value FROM app_settings WHERE key = ?")
+            .bind("theme")
+            .fetch_one(&pool)
+            .await
+            .expect("select setting");
+        assert_eq!(row.get::<String, _>("value"), r#""dark""#);
+
+        // Upsert: same key replaces the value.
+        sqlx::query(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind("theme")
+        .bind(r#""light""#)
+        .execute(&pool)
+        .await
+        .expect("upsert setting");
+
+        let row = sqlx::query("SELECT value FROM app_settings WHERE key = ?")
+            .bind("theme")
+            .fetch_one(&pool)
+            .await
+            .expect("select setting after upsert");
+        assert_eq!(row.get::<String, _>("value"), r#""light""#);
+
+        // PK rejects a naive duplicate insert (no ON CONFLICT clause).
+        let dup = sqlx::query("INSERT INTO app_settings (key, value) VALUES (?, ?)")
+            .bind("theme")
+            .bind(r#""system""#)
+            .execute(&pool)
+            .await;
+        assert!(dup.is_err(), "duplicate key should be rejected");
     }
 }
