@@ -28,6 +28,15 @@ export function TerminalLiveHarness() {
   onMount(() => {
     let killOnUnmount: string | null = null;
 
+    if (typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)) {
+      setState({
+        kind: "failed",
+        message:
+          "Open this page inside the Tauri window (the one `pnpm tauri dev` launches). PTY commands aren't available in a plain browser tab.",
+      });
+      return;
+    }
+
     void (async () => {
       try {
         const resp = await ptySpawn({
