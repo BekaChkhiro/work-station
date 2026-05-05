@@ -15,18 +15,30 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // T3.1: SQLite (preloaded via tauri.conf.json plugins.sql.preload) + key-value store.
-        // T3.2: register schema migrations against the same DB URL.
-        .plugin(
-            tauri_plugin_sql::Builder::default()
-                .add_migrations(db::DB_URL, db::migrations())
-                .build(),
-        )
+        // T3.5: migrations are applied by our own runner (db::run_migrations) so we
+        // can wrap each one in a transaction and, in T3.10, restore from backup on
+        // failure. The plugin's built-in migration step is intentionally not used.
+        .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_store::Builder::default().build())
         // PTY registry (T2.3) — app-scoped so sessions survive webview reloads.
         .manage(pty::PtyManager::new())
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                match db::run_migrations(&handle).await {
+                    Ok(report) => {
+                        tracing::info!(
+                            target: "db",
+                            applied = ?report.applied,
+                            skipped = ?report.skipped,
+                            "schema migrations complete"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "db", %error, "schema migrations failed");
+                        return;
+                    }
+                }
                 match db::hello(&handle).await {
                     Ok(value) => {
                         tracing::info!(target: "db", select_one = value, "sqlite preloaded");

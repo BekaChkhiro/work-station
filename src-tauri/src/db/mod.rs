@@ -2,40 +2,16 @@
 //!
 //! T3.1 wires the preloaded pool. T3.2 adds the `projects` table migration.
 //! T3.3 adds the `sessions` table. T3.4 adds the `app_settings` key/value
-//! table. Domain queries (project CRUD commands) land in T3.6.
+//! table. T3.5 owns the migration runner — see [`migrations`]. Domain
+//! queries (project CRUD commands) land in T3.6.
+
+pub mod migrations;
 
 use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
-use tauri_plugin_sql::{DbInstances, DbPool, Migration, MigrationKind};
+use tauri_plugin_sql::{DbInstances, DbPool};
 
 pub const DB_URL: &str = "sqlite:work-station.db";
-
-/// Schema migrations applied by `tauri-plugin-sql` on plugin init.
-///
-/// T3.5 will replace this with a backup-aware runner; the SQL files
-/// themselves remain the source of truth.
-pub fn migrations() -> Vec<Migration> {
-    vec![
-        Migration {
-            version: 1,
-            description: "create projects table",
-            sql: include_str!("../../migrations/0001_projects.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 2,
-            description: "create sessions table",
-            sql: include_str!("../../migrations/0002_sessions.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 3,
-            description: "create app_settings table",
-            sql: include_str!("../../migrations/0003_app_settings.sql"),
-            kind: MigrationKind::Up,
-        },
-    ]
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -43,6 +19,26 @@ pub enum DbError {
     PoolMissing,
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("migration: {0}")]
+    Migration(#[from] migrations::MigrationError),
+}
+
+/// Apply pending schema migrations against the preloaded pool.
+///
+/// T3.5 acceptance: adding a new migration applies on next launch; a failure
+/// rolls back cleanly via per-migration transactions.
+pub async fn run_migrations<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<migrations::RunReport, DbError> {
+    let instances = app.state::<DbInstances>();
+    let map = instances.0.read().await;
+    let pool = map.get(DB_URL).ok_or(DbError::PoolMissing)?;
+    #[allow(irrefutable_let_patterns)]
+    let DbPool::Sqlite(pool) = pool
+    else {
+        unreachable!("only the sqlite feature is enabled");
+    };
+    Ok(migrations::run(pool, migrations::MIGRATIONS).await?)
 }
 
 /// Hello-world `SELECT 1` against the preloaded pool — boot-time smoke check
