@@ -1,10 +1,11 @@
 import { createEffect, onCleanup, onMount } from "solid-js";
 import { Terminal as Xterm, type IDisposable, type ITheme } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { logger } from "../../utils/logger";
-import { ptySubscribe, ptyWrite, type PtySubscription } from "../../ipc/pty";
+import { ptyResize, ptySubscribe, ptyWrite, type PtySubscription } from "../../ipc/pty";
 
 export interface TerminalProps {
   sessionId: string;
@@ -42,6 +43,14 @@ export function Terminal(props: TerminalProps) {
   let term: Xterm | null = null;
   let unicodeAddon: Unicode11Addon | null = null;
   let webglAddon: WebglAddon | null = null;
+  let fitAddon: FitAddon | null = null;
+  let resizeObserver: ResizeObserver | null = null;
+  // T4.6: rAF-coalesced resize. ResizeObserver can fire many times within
+  // a single frame during drags; we collapse them to one fit() per frame
+  // and skip redundant pty_resize invokes by tracking the last cols/rows.
+  let resizeFrame = 0;
+  let lastCols = 0;
+  let lastRows = 0;
   let webglRecoveryAttempted = false;
   // T4.4: streaming UTF-8 decoder. `fatal: false` keeps malformed bytes from
   // throwing (the shell stays usable), and `stream: true` on each `decode`
@@ -204,6 +213,43 @@ export function Terminal(props: TerminalProps) {
     inputDisposables = [];
   };
 
+  // T4.6: Compute the cell grid that fits the host element and forward it
+  // to xterm + the backend PTY. Skips when dimensions haven't actually
+  // changed so a flurry of ResizeObserver callbacks (drag handles, layout
+  // settling) collapses to at most one pty_resize per real change.
+  const applyFit = (): void => {
+    if (!term || !fitAddon || !hostEl) return;
+    if (hostEl.clientWidth === 0 || hostEl.clientHeight === 0) return;
+    const dims = fitAddon.proposeDimensions();
+    if (!dims) return;
+    const { cols, rows } = dims;
+    if (cols <= 0 || rows <= 0) return;
+    if (cols === lastCols && rows === lastRows) return;
+    fitAddon.fit();
+    lastCols = cols;
+    lastRows = rows;
+    if (props.autoSubscribe === false) return;
+    const targetId = currentSessionId;
+    if (!targetId) return;
+    void ptyResize(targetId, cols, rows).catch((error: unknown) => {
+      logger.warn("pty_resize failed", {
+        scope: "terminal",
+        sessionId: targetId,
+        cols,
+        rows,
+        error,
+      });
+    });
+  };
+
+  const scheduleFit = (): void => {
+    if (resizeFrame !== 0) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      applyFit();
+    });
+  };
+
   onMount(() => {
     const theme = props.theme ?? themeFromTokens(hostEl);
     const fontFamily = props.fontFamily ?? fontFromTokens(hostEl);
@@ -223,6 +269,9 @@ export function Terminal(props: TerminalProps) {
     term.loadAddon(unicodeAddon);
     term.unicode.activeVersion = "11";
 
+    fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+
     term.open(hostEl);
     hostEl.dataset.sessionId = props.sessionId;
 
@@ -231,6 +280,14 @@ export function Terminal(props: TerminalProps) {
 
     startSubscription(props.sessionId);
     startInputForwarding(term);
+
+    // Initial fit synchronously so the first frame matches the host size,
+    // then watch for any subsequent dimension changes via ResizeObserver.
+    // Hosts mounted into a hidden tab may have zero size on mount — the
+    // observer will still fire once they become visible.
+    applyFit();
+    resizeObserver = new ResizeObserver(() => scheduleFit());
+    resizeObserver.observe(hostEl);
   });
 
   createEffect((prev: string | undefined) => {
@@ -240,7 +297,13 @@ export function Terminal(props: TerminalProps) {
     if (prev !== undefined && prev !== id) {
       stopSubscription();
       term?.reset();
+      // Force the next applyFit to re-send dimensions — the new PTY may
+      // have been spawned at a different size, and we don't want our
+      // cached cols/rows to suppress the corrective pty_resize.
+      lastCols = 0;
+      lastRows = 0;
       startSubscription(id);
+      applyFit();
     }
     return id;
   });
@@ -252,17 +315,26 @@ export function Terminal(props: TerminalProps) {
 
   createEffect(() => {
     const family = props.fontFamily;
-    if (term && family) term.options.fontFamily = family;
+    if (term && family) {
+      term.options.fontFamily = family;
+      scheduleFit();
+    }
   });
 
   createEffect(() => {
     const size = props.fontSize;
-    if (term && size) term.options.fontSize = size;
+    if (term && size) {
+      term.options.fontSize = size;
+      scheduleFit();
+    }
   });
 
   createEffect(() => {
     const lh = props.lineHeight;
-    if (term && lh) term.options.lineHeight = lh;
+    if (term && lh) {
+      term.options.lineHeight = lh;
+      scheduleFit();
+    }
   });
 
   createEffect(() => {
@@ -273,12 +345,22 @@ export function Terminal(props: TerminalProps) {
   onCleanup(() => {
     stopInputForwarding();
     stopSubscription();
+    if (resizeFrame !== 0) {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = 0;
+    }
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    fitAddon?.dispose();
+    fitAddon = null;
     webglAddon?.dispose();
     unicodeAddon?.dispose();
     term?.dispose();
     webglAddon = null;
     unicodeAddon = null;
     term = null;
+    lastCols = 0;
+    lastRows = 0;
     webglRecoveryAttempted = false;
   });
 

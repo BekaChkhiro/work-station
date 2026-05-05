@@ -55,6 +55,26 @@ export async function ptyWrite(sessionId: string, data: Uint8Array): Promise<voi
   });
 }
 
+export interface PtyResizeArgs {
+  sessionId: string;
+  cols: number;
+  rows: number;
+}
+
+/**
+ * Inform the backend that the PTY's window dimensions changed so the child
+ * process receives SIGWINCH and re-renders to the new viewport.
+ *
+ * No-op outside the Tauri runtime so the Terminal component's resize
+ * observer can fire unconditionally in vite preview / stress harnesses.
+ */
+export async function ptyResize(sessionId: string, cols: number, rows: number): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke("pty_resize", {
+    args: { sessionId, cols, rows },
+  });
+}
+
 export type PtyChunkHandler = (chunk: Uint8Array) => void;
 
 export interface PtySubscription {
