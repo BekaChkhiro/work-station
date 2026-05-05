@@ -2,11 +2,13 @@
 //!
 //! T3.1 wires the preloaded pool. T3.2 adds the `projects` table migration.
 //! T3.3 adds the `sessions` table. T3.4 adds the `app_settings` key/value
-//! table. T3.5 owns the migration runner — see [`migrations`]. Domain
-//! queries (project CRUD commands) land in T3.6.
+//! table. T3.5 owns the migration runner — see [`migrations`]. T3.6 lands
+//! the project CRUD queries in [`projects`].
 
 pub mod migrations;
+pub mod projects;
 
+use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_sql::{DbInstances, DbPool};
@@ -41,21 +43,26 @@ pub async fn run_migrations<R: Runtime>(
     Ok(migrations::run(pool, migrations::MIGRATIONS).await?)
 }
 
-/// Hello-world `SELECT 1` against the preloaded pool — boot-time smoke check
-/// that satisfies T3.1's acceptance ("can run a hello-world query from Rust").
-pub async fn hello<R: Runtime>(app: &AppHandle<R>) -> Result<i64, DbError> {
+/// Resolve the preloaded `SqlitePool`. Cloning the pool is cheap (it's
+/// internally Arc-wrapped) so command handlers can take ownership and drop
+/// the `DbInstances` read guard before doing async work.
+pub async fn pool<R: Runtime>(app: &AppHandle<R>) -> Result<SqlitePool, DbError> {
     let instances = app.state::<DbInstances>();
     let map = instances.0.read().await;
     let pool = map.get(DB_URL).ok_or(DbError::PoolMissing)?;
-    // Only the `sqlite` feature is enabled, so the other DbPool variants are
-    // cfg-gated out — the let-else is irrefutable in this build but kept for
-    // forward compatibility if we ever flip on another driver.
     #[allow(irrefutable_let_patterns)]
     let DbPool::Sqlite(pool) = pool
     else {
         unreachable!("only the sqlite feature is enabled");
     };
-    let row = sqlx::query("SELECT 1 AS one").fetch_one(pool).await?;
+    Ok(pool.clone())
+}
+
+/// Hello-world `SELECT 1` against the preloaded pool — boot-time smoke check
+/// that satisfies T3.1's acceptance ("can run a hello-world query from Rust").
+pub async fn hello<R: Runtime>(app: &AppHandle<R>) -> Result<i64, DbError> {
+    let pool = pool(app).await?;
+    let row = sqlx::query("SELECT 1 AS one").fetch_one(&pool).await?;
     Ok(row.try_get::<i64, _>("one")?)
 }
 
