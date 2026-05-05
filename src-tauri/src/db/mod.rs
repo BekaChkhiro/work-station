@@ -4,8 +4,10 @@
 //! T3.3 adds the `sessions` table. T3.4 adds the `app_settings` key/value
 //! table. T3.5 owns the migration runner — see [`migrations`]. T3.6 lands
 //! the project CRUD queries in [`projects`]. T3.9 applies durability /
-//! concurrency pragmas at boot — see [`apply_pragmas`].
+//! concurrency pragmas at boot — see [`apply_pragmas`]. T3.10 snapshots
+//! the database before pending migrations run — see [`backup`].
 
+pub mod backup;
 pub mod migrations;
 pub mod projects;
 
@@ -40,15 +42,25 @@ pub enum DbError {
     Sqlx(#[from] sqlx::Error),
     #[error("migration: {0}")]
     Migration(#[from] migrations::MigrationError),
+    #[error("could not resolve app data dir: {0}")]
+    AppDataDir(String),
 }
 
 /// Apply pending schema migrations against the preloaded pool.
 ///
 /// T3.5 acceptance: adding a new migration applies on next launch; a failure
-/// rolls back cleanly via per-migration transactions.
+/// rolls back cleanly via per-migration transactions. T3.10 takes a
+/// `VACUUM INTO` snapshot into `<app_data>/backups/` before any pending
+/// migration runs.
 pub async fn run_migrations<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<migrations::RunReport, DbError> {
+    let backups_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| DbError::AppDataDir(e.to_string()))?
+        .join("backups");
+
     let instances = app.state::<DbInstances>();
     let map = instances.0.read().await;
     let pool = map.get(DB_URL).ok_or(DbError::PoolMissing)?;
@@ -57,7 +69,7 @@ pub async fn run_migrations<R: Runtime>(
     else {
         unreachable!("only the sqlite feature is enabled");
     };
-    Ok(migrations::run(pool, migrations::MIGRATIONS).await?)
+    Ok(migrations::run(pool, migrations::MIGRATIONS, Some(&backups_dir)).await?)
 }
 
 /// Apply WAL + concurrency pragmas to `pool` (T3.9).
