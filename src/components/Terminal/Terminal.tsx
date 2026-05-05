@@ -1,7 +1,9 @@
 import { createEffect, onCleanup, onMount } from "solid-js";
 import { Terminal as Xterm, type ITheme } from "@xterm/xterm";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import { logger } from "../../utils/logger";
 
 export interface TerminalProps {
   sessionId: string;
@@ -11,6 +13,8 @@ export interface TerminalProps {
   cursorBlink?: boolean;
   theme?: ITheme;
 }
+
+export type TerminalRenderer = "webgl" | "dom";
 
 const DEFAULT_FONT_SIZE = 13;
 const DEFAULT_LINE_HEIGHT = 1.4;
@@ -33,6 +37,74 @@ export function Terminal(props: TerminalProps) {
   let hostEl!: HTMLDivElement;
   let term: Xterm | null = null;
   let unicodeAddon: Unicode11Addon | null = null;
+  let webglAddon: WebglAddon | null = null;
+  let webglRecoveryAttempted = false;
+
+  const setRendererAttr = (mode: TerminalRenderer) => {
+    if (hostEl) hostEl.dataset.renderer = mode;
+  };
+
+  const enableWebgl = (t: Xterm): void => {
+    try {
+      const addon = new WebglAddon();
+      addon.onContextLoss(() => handleContextLoss(t, addon));
+      t.loadAddon(addon);
+      webglAddon = addon;
+      setRendererAttr("webgl");
+    } catch (error) {
+      logger.warn("xterm WebGL renderer unavailable; using DOM renderer", {
+        scope: "terminal",
+        sessionId: props.sessionId,
+        error,
+      });
+      setRendererAttr("dom");
+    }
+  };
+
+  const handleContextLoss = (t: Xterm, lost: WebglAddon): void => {
+    logger.warn("xterm WebGL context lost; falling back to DOM renderer", {
+      scope: "terminal",
+      sessionId: props.sessionId,
+    });
+
+    if (!webglRecoveryAttempted && hostEl) {
+      webglRecoveryAttempted = true;
+      // Capture canvases BEFORE dispose removes them so the restored event
+      // can still trigger our single recovery attempt.
+      const canvases = Array.from(hostEl.querySelectorAll("canvas"));
+      for (const canvas of canvases) {
+        canvas.addEventListener("webglcontextrestored", () => recoverWebgl(t), {
+          once: true,
+        });
+      }
+    }
+
+    lost.dispose();
+    if (webglAddon === lost) webglAddon = null;
+    setRendererAttr("dom");
+  };
+
+  const recoverWebgl = (t: Xterm): void => {
+    if (webglAddon || !term) return;
+    try {
+      // Single recovery — do not resubscribe to onContextLoss. If the new
+      // context also fails, we stay on DOM rather than thrash.
+      const restored = new WebglAddon();
+      t.loadAddon(restored);
+      webglAddon = restored;
+      setRendererAttr("webgl");
+      logger.info("xterm WebGL context restored", {
+        scope: "terminal",
+        sessionId: props.sessionId,
+      });
+    } catch (error) {
+      logger.warn("xterm WebGL recovery failed; remaining on DOM renderer", {
+        scope: "terminal",
+        sessionId: props.sessionId,
+        error,
+      });
+    }
+  };
 
   onMount(() => {
     const theme = props.theme ?? themeFromTokens(hostEl);
@@ -55,6 +127,9 @@ export function Terminal(props: TerminalProps) {
 
     term.open(hostEl);
     hostEl.dataset.sessionId = props.sessionId;
+
+    // WebGL addon must be loaded after term.open() — it requires the DOM.
+    enableWebgl(term);
   });
 
   createEffect(() => {
@@ -88,10 +163,13 @@ export function Terminal(props: TerminalProps) {
   });
 
   onCleanup(() => {
+    webglAddon?.dispose();
     unicodeAddon?.dispose();
     term?.dispose();
+    webglAddon = null;
     unicodeAddon = null;
     term = null;
+    webglRecoveryAttempted = false;
   });
 
   return (
