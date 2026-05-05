@@ -21,6 +21,12 @@ const initialResolved: ResolvedTheme =
 const [mode, setModeSignal] = createSignal<ThemeMode>(initialMode);
 const [resolved, setResolved] = createSignal<ResolvedTheme>(initialResolved);
 
+// Eagerly stamp data-theme before the first render so CSS vars are live
+// from frame 0 — avoids unstyled flash when effects haven't flushed yet.
+if (typeof document !== "undefined") {
+  document.documentElement.dataset.theme = initialResolved;
+}
+
 createEffect(() => {
   const m = mode();
   const r: ResolvedTheme = m === "system" ? (systemPrefersDark() ? "dark" : "light") : m;

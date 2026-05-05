@@ -1,5 +1,6 @@
 import { createEffect, onCleanup, onMount } from "solid-js";
 import { Terminal as Xterm, type IDisposable, type ITheme } from "@xterm/xterm";
+import { resolvedTheme } from "../../stores/theme";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -364,6 +365,14 @@ export function Terminal(props: TerminalProps) {
   createEffect(() => {
     const blink = props.cursorBlink;
     if (term && typeof blink === "boolean") term.options.cursorBlink = blink;
+  });
+
+  // T4.8: Re-read CSS vars whenever the resolved theme changes so xterm picks
+  // up the new palette without a remount. Only applies when the caller hasn't
+  // pinned a theme via props.theme.
+  createEffect(() => {
+    resolvedTheme(); // track
+    if (term && !props.theme) term.options.theme = themeFromTokens(hostEl);
   });
 
   onCleanup(() => {
