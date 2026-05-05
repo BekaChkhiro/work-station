@@ -3,17 +3,34 @@
 //! T3.1 wires the preloaded pool. T3.2 adds the `projects` table migration.
 //! T3.3 adds the `sessions` table. T3.4 adds the `app_settings` key/value
 //! table. T3.5 owns the migration runner — see [`migrations`]. T3.6 lands
-//! the project CRUD queries in [`projects`].
+//! the project CRUD queries in [`projects`]. T3.9 applies durability /
+//! concurrency pragmas at boot — see [`apply_pragmas`].
 
 pub mod migrations;
 pub mod projects;
 
 use sqlx::sqlite::SqlitePool;
-use sqlx::Row;
+use sqlx::{Executor, Row};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_sql::{DbInstances, DbPool};
 
 pub const DB_URL: &str = "sqlite:work-station.db";
+
+/// Connection-level pragmas applied at boot before migrations run (T3.9).
+///
+/// `journal_mode = WAL` is database-level and persists in the file header,
+/// so newly-acquired pool connections inherit it. `synchronous`,
+/// `foreign_keys`, and `busy_timeout` are per-connection, but sqlx's
+/// `SqliteConnectOptions` defaults match these values, so every connection
+/// the pool opens carries them. We re-issue them explicitly so the boot
+/// path is auditable and the FK / busy-timeout invariants don't silently
+/// regress if the upstream defaults ever change.
+const PRAGMAS: &[&str] = &[
+    "PRAGMA journal_mode = WAL;",
+    "PRAGMA synchronous = NORMAL;",
+    "PRAGMA foreign_keys = ON;",
+    "PRAGMA busy_timeout = 5000;",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -43,6 +60,25 @@ pub async fn run_migrations<R: Runtime>(
     Ok(migrations::run(pool, migrations::MIGRATIONS).await?)
 }
 
+/// Apply WAL + concurrency pragmas to `pool` (T3.9).
+///
+/// Run once at boot before migrations so the very first writes use WAL and
+/// FK enforcement. `journal_mode = WAL` persists in the database header, so
+/// every subsequent connection inherits it.
+pub async fn apply_pragmas(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    for pragma in PRAGMAS {
+        pool.execute(*pragma).await?;
+    }
+    Ok(())
+}
+
+/// Boot-time variant of [`apply_pragmas`] resolving the preloaded pool.
+pub async fn apply_pragmas_app<R: Runtime>(app: &AppHandle<R>) -> Result<(), DbError> {
+    let pool = pool(app).await?;
+    apply_pragmas(&pool).await?;
+    Ok(())
+}
+
 /// Resolve the preloaded `SqlitePool`. Cloning the pool is cheap (it's
 /// internally Arc-wrapped) so command handlers can take ownership and drop
 /// the `DbInstances` read guard before doing async work.
@@ -70,6 +106,51 @@ pub async fn hello<R: Runtime>(app: &AppHandle<R>) -> Result<i64, DbError> {
 mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::{Executor, Row};
+    use std::path::PathBuf;
+
+    /// File-backed pool guard that cleans up the .db, .db-wal, and .db-shm
+    /// files when dropped — the WAL test below needs a real on-disk DB
+    /// because `:memory:` `SQLite` does not support WAL.
+    struct TempDb {
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new(label: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "work-station-t39-{label}-{}.db",
+                uuid::Uuid::new_v4()
+            ));
+            Self { path }
+        }
+
+        fn url(&self) -> String {
+            format!("sqlite://{}?mode=rwc", self.path.display())
+        }
+
+        fn sidecar(&self, suffix: &str) -> PathBuf {
+            let mut s = self.path.clone().into_os_string();
+            s.push(suffix);
+            PathBuf::from(s)
+        }
+
+        fn wal(&self) -> PathBuf {
+            self.sidecar("-wal")
+        }
+
+        fn shm(&self) -> PathBuf {
+            self.sidecar("-shm")
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_file(self.wal());
+            let _ = std::fs::remove_file(self.shm());
+        }
+    }
 
     /// T3.2 acceptance: applying the migration creates the table and an
     /// insert/select round-trips with no data loss.
@@ -132,11 +213,9 @@ mod tests {
             .await
             .expect("open in-memory sqlite");
 
-        // FKs are off by default in SQLite; T3.9 will enable them globally,
-        // but the cascade assertion below needs them on for this test.
-        pool.execute("PRAGMA foreign_keys = ON;")
-            .await
-            .expect("enable fk");
+        // T3.9: apply the same pragmas the boot path applies, so this test
+        // matches production behaviour rather than a half-configured pool.
+        super::apply_pragmas(&pool).await.expect("apply pragmas");
         pool.execute(include_str!("../../migrations/0001_projects.sql"))
             .await
             .expect("apply 0001");
@@ -279,5 +358,112 @@ mod tests {
             .execute(&pool)
             .await;
         assert!(dup.is_err(), "duplicate key should be rejected");
+    }
+
+    /// T3.9 acceptance: applying the pragmas produces the expected runtime
+    /// state — WAL journaling, NORMAL synchronous, FK enforcement, and a
+    /// 5s busy timeout.
+    #[tokio::test]
+    async fn pragmas_set_expected_runtime_state() {
+        let temp = TempDb::new("state");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&temp.url())
+            .await
+            .expect("open file-backed sqlite");
+
+        super::apply_pragmas(&pool).await.expect("apply pragmas");
+
+        let mode: String = sqlx::query("PRAGMA journal_mode;")
+            .fetch_one(&pool)
+            .await
+            .expect("query journal_mode")
+            .get(0);
+        assert_eq!(mode.to_lowercase(), "wal");
+
+        let sync: i64 = sqlx::query("PRAGMA synchronous;")
+            .fetch_one(&pool)
+            .await
+            .expect("query synchronous")
+            .get(0);
+        assert_eq!(sync, 1, "synchronous=NORMAL is encoded as 1");
+
+        let fk: i64 = sqlx::query("PRAGMA foreign_keys;")
+            .fetch_one(&pool)
+            .await
+            .expect("query foreign_keys")
+            .get(0);
+        assert_eq!(fk, 1, "foreign keys must be enforced");
+
+        let busy: i64 = sqlx::query("PRAGMA busy_timeout;")
+            .fetch_one(&pool)
+            .await
+            .expect("query busy_timeout")
+            .get(0);
+        assert_eq!(busy, 5000);
+    }
+
+    /// T3.9 acceptance: WAL files are created on disk after a write, and
+    /// concurrent reader + writer connections do not deadlock.
+    #[tokio::test]
+    async fn wal_files_created_and_concurrent_rw_no_deadlock() {
+        let temp = TempDb::new("wal");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect(&temp.url())
+            .await
+            .expect("open file-backed sqlite");
+
+        super::apply_pragmas(&pool).await.expect("apply pragmas");
+        pool.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER NOT NULL);")
+            .await
+            .expect("create table");
+        pool.execute("INSERT INTO t (id, n) VALUES (1, 0);")
+            .await
+            .expect("seed row");
+
+        // Triggering writes ensures the WAL file is materialised.
+        assert!(temp.wal().exists(), "WAL sidecar should be created");
+        assert!(temp.shm().exists(), "SHM sidecar should be created");
+
+        // Concurrent reader + writer: WAL allows readers to proceed while a
+        // writer commits. With busy_timeout=5000ms even contended writes
+        // succeed instead of returning SQLITE_BUSY immediately.
+        let writer = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                for i in 1..=50_i64 {
+                    sqlx::query("UPDATE t SET n = ? WHERE id = 1")
+                        .bind(i)
+                        .execute(&pool)
+                        .await
+                        .expect("write");
+                }
+            })
+        };
+        let reader = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    let _: i64 = sqlx::query("SELECT n FROM t WHERE id = 1")
+                        .fetch_one(&pool)
+                        .await
+                        .expect("read")
+                        .get(0);
+                }
+            })
+        };
+
+        // 10s ceiling — generous on slow CI, but tight enough to fail loudly
+        // if the pool actually deadlocks.
+        let joined = async {
+            let (w, r) = tokio::join!(writer, reader);
+            (w, r)
+        };
+        let (w, r) = tokio::time::timeout(std::time::Duration::from_secs(10), joined)
+            .await
+            .expect("concurrent rw must not deadlock");
+        w.expect("writer joined");
+        r.expect("reader joined");
     }
 }
