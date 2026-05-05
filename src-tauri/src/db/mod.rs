@@ -1,7 +1,8 @@
 //! `SQLite` persistence: connection, migrations, queries.
 //!
 //! T3.1 wires the preloaded pool. T3.2 adds the `projects` table migration.
-//! Domain queries (project CRUD commands) land in T3.6.
+//! T3.3 adds the `sessions` table. Domain queries (project CRUD commands)
+//! land in T3.6.
 
 use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
@@ -14,12 +15,20 @@ pub const DB_URL: &str = "sqlite:work-station.db";
 /// T3.5 will replace this with a backup-aware runner; the SQL files
 /// themselves remain the source of truth.
 pub fn migrations() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        description: "create projects table",
-        sql: include_str!("../../migrations/0001_projects.sql"),
-        kind: MigrationKind::Up,
-    }]
+    vec![
+        Migration {
+            version: 1,
+            description: "create projects table",
+            sql: include_str!("../../migrations/0001_projects.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 2,
+            description: "create sessions table",
+            sql: include_str!("../../migrations/0002_sessions.sql"),
+            kind: MigrationKind::Up,
+        },
+    ]
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -102,5 +111,108 @@ mod tests {
         .await
         .expect("query index");
         assert!(index.is_some(), "position index should be created");
+    }
+
+    /// T3.3 acceptance: applying both migrations creates the sessions table,
+    /// an insert/select round-trips, the project FK is enforced, and
+    /// `ON DELETE CASCADE` removes orphaned sessions.
+    #[tokio::test]
+    async fn sessions_migration_round_trips() {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite");
+
+        // FKs are off by default in SQLite; T3.9 will enable them globally,
+        // but the cascade assertion below needs them on for this test.
+        pool.execute("PRAGMA foreign_keys = ON;")
+            .await
+            .expect("enable fk");
+        pool.execute(include_str!("../../migrations/0001_projects.sql"))
+            .await
+            .expect("apply 0001");
+        pool.execute(include_str!("../../migrations/0002_sessions.sql"))
+            .await
+            .expect("apply 0002");
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, env_json, position, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("p1")
+        .bind("Demo")
+        .bind("/tmp/demo")
+        .bind("{}")
+        .bind(0_i64)
+        .bind(1_700_000_000_i64)
+        .execute(&pool)
+        .await
+        .expect("insert project");
+
+        sqlx::query(
+            "INSERT INTO sessions (id, project_id, title, cli, cwd, layout_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("s1")
+        .bind("p1")
+        .bind("main")
+        .bind("zsh")
+        .bind("/tmp/demo")
+        .bind(r#"{"type":"pane","sessionId":"s1"}"#)
+        .bind(1_700_000_001_i64)
+        .execute(&pool)
+        .await
+        .expect("insert session");
+
+        let row = sqlx::query(
+            "SELECT id, project_id, title, cli, layout_json FROM sessions WHERE id = ?",
+        )
+        .bind("s1")
+        .fetch_one(&pool)
+        .await
+        .expect("select session");
+        assert_eq!(row.get::<String, _>("id"), "s1");
+        assert_eq!(row.get::<String, _>("project_id"), "p1");
+        assert_eq!(row.get::<String, _>("title"), "main");
+        assert_eq!(row.get::<String, _>("cli"), "zsh");
+        assert_eq!(
+            row.get::<String, _>("layout_json"),
+            r#"{"type":"pane","sessionId":"s1"}"#
+        );
+
+        let index = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_project'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("query index");
+        assert!(index.is_some(), "project index should be created");
+
+        // FK rejects a session pointing at a non-existent project.
+        let orphan = sqlx::query(
+            "INSERT INTO sessions (id, project_id, title, layout_json, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("s2")
+        .bind("does-not-exist")
+        .bind("ghost")
+        .bind("{}")
+        .bind(1_700_000_002_i64)
+        .execute(&pool)
+        .await;
+        assert!(orphan.is_err(), "FK violation should be rejected");
+
+        // ON DELETE CASCADE: removing the project removes its sessions.
+        sqlx::query("DELETE FROM projects WHERE id = ?")
+            .bind("p1")
+            .execute(&pool)
+            .await
+            .expect("delete project");
+        let remaining: i64 = sqlx::query("SELECT COUNT(*) AS n FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .expect("count sessions")
+            .get("n");
+        assert_eq!(remaining, 0, "sessions should cascade-delete with project");
     }
 }
