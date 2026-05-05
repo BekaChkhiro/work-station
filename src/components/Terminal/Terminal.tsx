@@ -4,8 +4,10 @@ import { resolvedTheme } from "../../stores/theme";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { TerminalSearch } from "./TerminalSearch";
 import { logger } from "../../utils/logger";
 import {
@@ -54,6 +56,7 @@ export function Terminal(props: TerminalProps) {
   let webglAddon: WebglAddon | null = null;
   let fitAddon: FitAddon | null = null;
   let searchAddon: SearchAddon | null = null;
+  let webLinksAddon: WebLinksAddon | null = null;
   const [searchOpen, setSearchOpen] = createSignal(false);
   let resizeObserver: ResizeObserver | null = null;
   // T4.6: rAF-coalesced resize. ResizeObserver can fire many times within
@@ -271,6 +274,23 @@ export function Terminal(props: TerminalProps) {
     term?.focus();
   };
 
+  // T4.11: Cmd/Ctrl+click follows the link via the OS default browser (the
+  // Tauri opener plugin), instead of `window.open` which would either be
+  // blocked or load the URL inside the embedded webview. The modifier-key
+  // gate matches VS Code / iTerm2 conventions and prevents accidental
+  // navigation from a stray click while the user is selecting text.
+  const handleWebLinkClick = (event: MouseEvent, uri: string): void => {
+    if (!event.metaKey && !event.ctrlKey) return;
+    void openUrl(uri).catch((error: unknown) => {
+      logger.warn("openUrl failed", {
+        scope: "terminal",
+        sessionId: currentSessionId,
+        uri,
+        error,
+      });
+    });
+  };
+
   const handleCopyPasteKey = (event: KeyboardEvent): boolean => {
     if (event.type !== "keydown") return true;
     const mod = event.metaKey || event.ctrlKey;
@@ -369,6 +389,9 @@ export function Terminal(props: TerminalProps) {
     searchAddon = new SearchAddon();
     term.loadAddon(searchAddon);
 
+    webLinksAddon = new WebLinksAddon(handleWebLinkClick);
+    term.loadAddon(webLinksAddon);
+
     term.open(hostEl);
     hostEl.dataset.sessionId = props.sessionId;
 
@@ -465,6 +488,8 @@ export function Terminal(props: TerminalProps) {
     fitAddon = null;
     searchAddon?.dispose();
     searchAddon = null;
+    webLinksAddon?.dispose();
+    webLinksAddon = null;
     webglAddon?.dispose();
     unicodeAddon?.dispose();
     term?.dispose();
