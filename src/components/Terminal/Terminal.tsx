@@ -97,7 +97,14 @@ export function Terminal(props: TerminalProps) {
   // from the start of scrollback — same path used when the session id
   // changes — to recover whatever streamed during the hidden window.
   let isDocVisible = typeof document === "undefined" ? true : !document.hidden;
-  let isHostIntersecting = true;
+  // Start "not intersecting" when an IntersectionObserver will be wired up
+  // — the observer's first callback (synchronously dispatched after
+  // observe() in modern browsers) sets the real value. This avoids a
+  // wasteful subscribe → immediate cancel cycle when the terminal mounts
+  // inside a hidden parent (display:none ancestor, off-screen tab, etc.).
+  // Older browsers without IntersectionObserver fall back to the
+  // optimistic default so the terminal still subscribes at mount.
+  let isHostIntersecting = typeof IntersectionObserver === "undefined";
   let isPaused = false;
   let intersectionObserver: IntersectionObserver | null = null;
   let docVisibilityHandler: (() => void) | null = null;
@@ -239,8 +246,11 @@ export function Terminal(props: TerminalProps) {
     // affect the rendered grid; mirrors the session-id swap branch.
     lastCols = 0;
     lastRows = 0;
-    startSubscription(sessionId);
+    // Resize FIRST so any SIGWINCH-driven shell redraw (clear, prompt
+    // repaint) lands in the upcoming scrollback snapshot rather than a
+    // gap window between snapshot read and live-subscribe attach.
     applyFit();
+    startSubscription(sessionId);
   };
 
   const evaluateVisibility = (): void => {
@@ -453,12 +463,14 @@ export function Terminal(props: TerminalProps) {
       return handleCopyPasteKey(event);
     });
 
-    if (isDocVisible) {
+    if (isDocVisible && isHostIntersecting) {
       startSubscription(props.sessionId);
     } else {
-      // Mounted while the document is hidden — defer subscribe until the
-      // first visibility-change so we don't burn cycles on a tab the user
-      // can't see.
+      // Mounted while hidden — either the document is hidden, or we're
+      // deferring to the IntersectionObserver's first callback to learn
+      // whether the host is actually on-screen. Either way, don't burn
+      // cycles on a session the user can't see; evaluateVisibility will
+      // resume on the next visibility change.
       isPaused = true;
     }
     startInputForwarding(term);

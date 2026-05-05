@@ -716,12 +716,12 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T4.6: Auto-resize via ResizeObserver
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: M
 - **Dependencies**: T4.2, T2.7
 - **Description**:
   - ResizeObserver on container.
-  - `fit.fit()` then `pty_resize` (debounced 50ms).
+  - `fit.fit()` then `pty_resize`, rAF-coalesced (one call per rendered frame) and skipped when the cell grid hasn't actually changed. We chose rAF over a fixed 50ms debounce so resize tracking stays in sync with the browser's render cadence — drags under heavy load coalesce to whatever frame budget allows, and `pty_resize` doesn't fire unless cols/rows actually moved.
 - **Acceptance**: Drag window edge — terminal reflows without flicker; PID receives SIGWINCH.
 
 #### T4.7: Scrollback replay on mount

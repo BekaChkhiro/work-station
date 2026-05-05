@@ -1,4 +1,4 @@
-import { createSignal, createEffect, onCleanup } from "solid-js";
+import { createSignal, createEffect } from "solid-js";
 
 export type ThemeMode = "dark" | "light" | "system";
 export type ResolvedTheme = "dark" | "light";
@@ -39,13 +39,15 @@ createEffect(() => {
   }
 });
 
+// Module-level singleton: one MediaQueryList listener for the app's
+// lifetime. There's no component / reactive root to bind cleanup to here —
+// `onCleanup` at module scope is a no-op in Solid — so we deliberately
+// leave the listener attached. The store outlives any component anyway.
 if (typeof window !== "undefined") {
   const mql = window.matchMedia("(prefers-color-scheme: dark)");
-  const onChange = () => {
+  mql.addEventListener("change", () => {
     if (mode() === "system") setResolved(mql.matches ? "dark" : "light");
-  };
-  mql.addEventListener("change", onChange);
-  onCleanup(() => mql.removeEventListener("change", onChange));
+  });
 }
 
 export const themeMode = mode;

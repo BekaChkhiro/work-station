@@ -136,6 +136,11 @@ export interface PtySubscription {
   unsubscribe: () => void;
 }
 
+// Used to detach a Channel from its original closure on unsubscribe so the
+// terminal becomes GC-eligible without waiting for the backend forwarder to
+// fail. Argument is intentionally accepted but discarded.
+const noopChannelHandler = (): void => undefined;
+
 const toUint8Array = (payload: unknown): Uint8Array | null => {
   if (payload instanceof ArrayBuffer) return new Uint8Array(payload);
   if (payload instanceof Uint8Array) return payload;
@@ -173,10 +178,17 @@ export async function ptySubscribe(
   }
 
   let active = true;
+  // Boxed handler reference so unsubscribe can null it out and let the
+  // user's `onChunk` (and everything it closes over — xterm instance, the
+  // streaming TextDecoder, etc.) become GC-eligible. Without this, the
+  // Channel below keeps a transitive reference to the entire terminal
+  // through `onChunk`, even after `active` is false — the channel itself
+  // stays alive until the Rust forwarder's next send fails.
+  let handler: PtyChunkHandler | null = onChunk;
   const channel = new Channel<unknown>((payload) => {
-    if (!active) return;
+    if (!active || !handler) return;
     const bytes = toUint8Array(payload);
-    if (bytes && bytes.byteLength > 0) onChunk(bytes);
+    if (bytes && bytes.byteLength > 0) handler(bytes);
   });
 
   await invoke("pty_subscribe", {
@@ -187,6 +199,17 @@ export async function ptySubscribe(
   return {
     unsubscribe: () => {
       active = false;
+      handler = null;
+      // Replace the Channel's onmessage with a no-op so the Tauri runtime
+      // doesn't keep our original closure (and therefore the terminal)
+      // alive until the backend forwarder eventually fails to send.
+      try {
+        channel.onmessage = noopChannelHandler;
+      } catch {
+        /* older @tauri-apps/api shapes may not expose the setter — the
+         * `active` / `handler` nulling above already prevents user code
+         * from running, so this is best-effort cleanup only. */
+      }
     },
   };
 }
