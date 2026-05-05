@@ -238,6 +238,50 @@ export function Terminal(props: TerminalProps) {
     inputDisposables = [];
   };
 
+  // T4.9: Copy / paste. Cmd/Ctrl+C copies the current selection to the
+  // clipboard and suppresses the keystroke so xterm doesn't also send ETX
+  // (SIGINT). With no selection we let the event through so Ctrl+C still
+  // interrupts the foreground process. Cmd/Ctrl+V reads the clipboard and
+  // routes through `term.paste(...)`, which emits the bracketed-paste
+  // sequences (ESC[200~ … ESC[201~) when the app has enabled DECSET 2004 —
+  // shells and editors like fish / nvim depend on those markers to detect
+  // pasted input.
+  const handleCopyPasteKey = (event: KeyboardEvent): boolean => {
+    if (event.type !== "keydown") return true;
+    const mod = event.metaKey || event.ctrlKey;
+    if (!mod || event.altKey) return true;
+    const key = event.key.toLowerCase();
+    if (key === "c") {
+      if (!term?.hasSelection()) return true;
+      const text = term.getSelection();
+      if (!text) return true;
+      void navigator.clipboard.writeText(text).catch((error: unknown) => {
+        logger.warn("clipboard copy failed", {
+          scope: "terminal",
+          sessionId: currentSessionId,
+          error,
+        });
+      });
+      return false;
+    }
+    if (key === "v") {
+      void navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text && term) term.paste(text);
+        })
+        .catch((error: unknown) => {
+          logger.warn("clipboard paste failed", {
+            scope: "terminal",
+            sessionId: currentSessionId,
+            error,
+          });
+        });
+      return false;
+    }
+    return true;
+  };
+
   // T4.6: Compute the cell grid that fits the host element and forward it
   // to xterm + the backend PTY. Skips when dimensions haven't actually
   // changed so a flurry of ResizeObserver callbacks (drag handles, layout
@@ -302,6 +346,8 @@ export function Terminal(props: TerminalProps) {
 
     // WebGL addon must be loaded after term.open() — it requires the DOM.
     enableWebgl(term);
+
+    term.attachCustomKeyEventHandler(handleCopyPasteKey);
 
     startSubscription(props.sessionId);
     startInputForwarding(term);
