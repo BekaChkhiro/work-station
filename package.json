@@ -21,6 +21,8 @@
     "@tailwindcss/vite": "^4.2.4",
     "@tauri-apps/api": "2.11.0",
     "@tauri-apps/plugin-opener": "2.5.3",
+    "@tauri-apps/plugin-sql": "2.4.0",
+    "@tauri-apps/plugin-store": "2.4.3",
     "solid-js": "1.9.12",
     "tailwindcss": "^4.2.4"
   },

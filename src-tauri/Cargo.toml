@@ -21,6 +21,12 @@ tauri-build = { version = "=2.6.0", features = [] }
 # Pinned exactly — no auto-bump (T1.2)
 tauri = { version = "=2.11.0", features = [] }
 tauri-plugin-opener = "=2.5.3"
+# T3.1: SQLite + key-value store. sqlx pinned to the version tauri-plugin-sql 2.4.0
+# already pulls in transitively, so we can run SELECT 1 against its preloaded pool
+# without version drift.
+tauri-plugin-sql = { version = "=2.4.0", features = ["sqlite"] }
+tauri-plugin-store = "=2.4.3"
+sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

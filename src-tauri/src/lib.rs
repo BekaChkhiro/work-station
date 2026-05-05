@@ -14,8 +14,25 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // T3.1: SQLite (preloaded via tauri.conf.json plugins.sql.preload) + key-value store.
+        .plugin(tauri_plugin_sql::Builder::default().build())
+        .plugin(tauri_plugin_store::Builder::default().build())
         // PTY registry (T2.3) — app-scoped so sessions survive webview reloads.
         .manage(pty::PtyManager::new())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match db::hello(&handle).await {
+                    Ok(value) => {
+                        tracing::info!(target: "db", select_one = value, "sqlite preloaded");
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "db", %error, "sqlite preload failed");
+                    }
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::log::log_from_frontend,
             commands::pty::pty_spawn,
