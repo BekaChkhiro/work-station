@@ -10,6 +10,7 @@ import PaneLiveHarness from "./components/Pane/Pane.live.dev";
 import SidebarLiveHarness from "./components/Sidebar/Sidebar.live.dev";
 import AppShellLiveHarness from "./components/AppShell/AppShell.live.dev";
 import AddProjectModalLiveHarness from "./components/AddProjectModal/AddProjectModal.live.dev";
+import EditProjectFlowLiveHarness from "./components/EditProjectFlow/EditProjectFlow.live.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { QuickSwitcher } from "./components/QuickSwitcher";
@@ -26,6 +27,7 @@ type DebugMode =
   | "sidebar"
   | "appshell"
   | "addproject"
+  | "editproject"
   | null;
 
 const debugMode = (): DebugMode => {
@@ -40,7 +42,8 @@ const debugMode = (): DebugMode => {
     v === "pane" ||
     v === "sidebar" ||
     v === "appshell" ||
-    v === "addproject"
+    v === "addproject" ||
+    v === "editproject"
     ? v
     : null;
 };
@@ -111,6 +114,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "addproject"}>
             <AddProjectModalLiveHarness />
+          </Match>
+          <Match when={debugMode() === "editproject"}>
+            <EditProjectFlowLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>
