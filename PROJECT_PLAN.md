@@ -843,7 +843,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T5.4: LayoutTree recursive renderer
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: L
 - **Dependencies**: T5.2
 - **Description**:

@@ -120,6 +120,40 @@ export function serializeLayout(layout: Layout): string {
   return JSON.stringify(layout);
 }
 
+// Path encoding used by the renderer (T5.4) to identify a SplitNode by its
+// position in the tree: empty string = root, "L"/"R" chars trace the
+// child-of-child traversal. Stable across ratio changes — the LayoutTree
+// passes the path back so the parent can update the right subtree.
+export type LayoutPath = string;
+
+/** Update the `ratio` on the SplitNode at `path`. Returns the original tree
+ *  unchanged if the path doesn't resolve to a split, so subscribers can
+ *  rely on referential equality to skip work. Untouched siblings keep
+ *  their references — required by T5.4 so a ratio drag doesn't cascade
+ *  remounts through Solid's reactive props. */
+export function updateSplitRatio(node: LayoutNode, path: LayoutPath, ratio: number): LayoutNode {
+  if (path === "") {
+    if (!isSplit(node)) return node;
+    if (node.ratio === ratio) return node;
+    return { ...node, ratio };
+  }
+  if (!isSplit(node)) return node;
+  const head = path[0];
+  const rest = path.slice(1);
+  const [left, right] = node.children;
+  if (head === "L") {
+    const next = updateSplitRatio(left, rest, ratio);
+    if (next === left) return node;
+    return { ...node, children: [next, right] };
+  }
+  if (head === "R") {
+    const next = updateSplitRatio(right, rest, ratio);
+    if (next === right) return node;
+    return { ...node, children: [left, next] };
+  }
+  return node;
+}
+
 /** Parse a `sessions.layout_json` value. Returns `EMPTY_LAYOUT` on any failure. */
 export function parseLayoutJson(raw: string | null | undefined): Layout {
   if (!raw) return EMPTY_LAYOUT;

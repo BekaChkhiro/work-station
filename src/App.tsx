@@ -5,11 +5,19 @@ import TerminalLiveHarness from "./components/Terminal/Terminal.live.dev";
 import TerminalStressHarness from "./components/Terminal/Terminal.stress.dev";
 import SplitPaneLiveHarness from "./components/SplitPane/SplitPane.live.dev";
 import TabStripLiveHarness from "./components/TabStrip/TabStrip.live.dev";
+import LayoutTreeLiveHarness from "./components/LayoutTree/LayoutTree.live.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import "./styles/globals.css";
 
-type DebugMode = "errorboundary" | "terminal-stress" | "terminal" | "splitpane" | "tabstrip" | null;
+type DebugMode =
+  | "errorboundary"
+  | "terminal-stress"
+  | "terminal"
+  | "splitpane"
+  | "tabstrip"
+  | "layouttree"
+  | null;
 
 const debugMode = (): DebugMode => {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
@@ -18,7 +26,8 @@ const debugMode = (): DebugMode => {
     v === "terminal-stress" ||
     v === "terminal" ||
     v === "splitpane" ||
-    v === "tabstrip"
+    v === "tabstrip" ||
+    v === "layouttree"
     ? v
     : null;
 };
@@ -61,6 +70,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "tabstrip"}>
             <TabStripLiveHarness />
+          </Match>
+          <Match when={debugMode() === "layouttree"}>
+            <LayoutTreeLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>
