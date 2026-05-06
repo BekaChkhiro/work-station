@@ -56,6 +56,9 @@ libc = "=0.2.186"
 [dev-dependencies]
 criterion = { version = "=0.5.1", features = ["html_reports"] }
 base64 = "=0.22.1"
+# T7.1 — CLI detection tests build synthetic PATH entries from a tempdir so
+# they don't depend on the host's installed toolchain.
+tempfile = "=3.13.0"
 
 [[bench]]
 name = "ipc_throughput"
