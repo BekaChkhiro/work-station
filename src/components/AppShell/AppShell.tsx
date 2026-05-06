@@ -31,6 +31,7 @@ import {
   updateLayoutRatio,
   getWorkspace,
 } from "../../stores/workspace";
+import { useNumericProjectHotkeys } from "../../hotkeys/numericProjectHotkeys";
 
 export interface AppShellProps {
   /** Render the contents of a single pane leaf for `projectId` / `sessionId`.
@@ -56,6 +57,11 @@ const defaultEmptyWorkspace = (): JSX.Element => (
 );
 
 export function AppShell(props: AppShellProps): JSX.Element {
+  // T6.3: Cmd/Ctrl+1..9 jumps to project N by sidebar position. Suppressed
+  // when focus is inside a terminal pane or text input — see hotkeys/
+  // numericProjectHotkeys.ts.
+  useNumericProjectHotkeys();
+
   return (
     <div class="ws-appshell relative grid h-full w-full grid-cols-[1fr_auto] bg-canvas text-fg">
       <div class="ws-appshell__workspace relative min-h-0">
