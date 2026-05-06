@@ -1212,6 +1212,54 @@ button {
   cursor: not-allowed;
   opacity: 0.5;
 }
+.ws-apm__cli-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.ws-apm__cli {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: default;
+  text-align: left;
+  transition: all 120ms var(--ease);
+}
+.ws-apm__cli:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+.ws-apm__cli[data-selected="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-ring);
+}
+.ws-apm__cli[data-selected="true"] .ws-apm__cli-name {
+  color: var(--accent);
+}
+.ws-apm__cli:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: 1px;
+}
+.ws-apm__cli:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.ws-apm__cli-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.ws-apm__cli-desc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
 .ws-apm__error {
   font-size: 12px;
   color: var(--error);

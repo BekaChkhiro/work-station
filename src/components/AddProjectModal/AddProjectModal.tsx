@@ -33,12 +33,17 @@
 
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
+import { PROJECT_CLI_OPTIONS } from "../../types/cli";
 
 export interface AddProjectFormValue {
   name: string;
   path: string;
   color: string;
   glyph: string;
+  /** CLI id from `PROJECT_CLI_OPTIONS`, or `null` to inherit the global
+   *  default (currently the system shell). Stored in `projects.default_cli`
+   *  by the backend. */
+  defaultCli: string | null;
 }
 
 export type ProjectFormMode = "create" | "edit";
@@ -125,6 +130,8 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
   const [color, setColor] = createSignal<string>(DEFAULT_SWATCH);
   // null = auto-derive from name; string = user-overridden glyph.
   const [glyphOverride, setGlyphOverride] = createSignal<string | null>(null);
+  // null = "use system default shell"; string = a CLI id from PROJECT_CLI_OPTIONS.
+  const [defaultCli, setDefaultCli] = createSignal<string | null>(null);
   const [submitting, setSubmitting] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -142,7 +149,8 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       name().trim() !== init.name.trim() ||
       path().trim() !== init.path.trim() ||
       color() !== init.color ||
-      effectiveGlyph() !== init.glyph
+      effectiveGlyph() !== init.glyph ||
+      defaultCli() !== init.defaultCli
     );
   });
 
@@ -165,11 +173,13 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       setPath(v.path);
       setColor(v.color);
       setGlyphOverride(v.glyph);
+      setDefaultCli(v.defaultCli);
     } else {
       setName("");
       setPath(props.initialPath ?? "");
       setColor(DEFAULT_SWATCH);
       setGlyphOverride(null);
+      setDefaultCli(null);
     }
     setSubmitting(false);
     setError(null);
@@ -212,6 +222,7 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
         path: path().trim(),
         color: color(),
         glyph: effectiveGlyph(),
+        defaultCli: defaultCli(),
       });
       props.onClose();
     } catch (err) {
@@ -355,6 +366,43 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
                         disabled={submitting()}
                       >
                         {g}
+                      </button>
+                    );
+                  }}
+                </For>
+              </div>
+            </div>
+
+            <div class="ws-apm__field">
+              <span class="ws-apm__field-label">Default CLI</span>
+              <div class="ws-apm__cli-grid" role="radiogroup" aria-label="Default CLI">
+                <button
+                  type="button"
+                  class="ws-apm__cli"
+                  data-selected={defaultCli() === null ? "true" : undefined}
+                  role="radio"
+                  aria-checked={defaultCli() === null}
+                  onClick={() => setDefaultCli(null)}
+                  disabled={submitting()}
+                >
+                  <span class="ws-apm__cli-name">System default</span>
+                  <span class="ws-apm__cli-desc">Use the OS shell</span>
+                </button>
+                <For each={PROJECT_CLI_OPTIONS}>
+                  {(cli) => {
+                    const selected = (): boolean => cli.id === defaultCli();
+                    return (
+                      <button
+                        type="button"
+                        class="ws-apm__cli"
+                        data-selected={selected() ? "true" : undefined}
+                        role="radio"
+                        aria-checked={selected()}
+                        onClick={() => setDefaultCli(cli.id)}
+                        disabled={submitting()}
+                      >
+                        <span class="ws-apm__cli-name">{cli.name}</span>
+                        <span class="ws-apm__cli-desc">{cli.description}</span>
                       </button>
                     );
                   }}

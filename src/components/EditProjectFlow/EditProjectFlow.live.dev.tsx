@@ -20,6 +20,7 @@ interface MockRow {
   path: string;
   color: string;
   glyph: string;
+  defaultCli: string | null;
   sessions: number;
 }
 
@@ -30,6 +31,7 @@ const SEED: MockRow[] = [
     path: "/Users/you/code/argon-web",
     color: "var(--swatch-4)",
     glyph: "AR",
+    defaultCli: "claude",
     sessions: 4,
   },
   {
@@ -38,6 +40,7 @@ const SEED: MockRow[] = [
     path: "/Users/you/code/kepler-cli",
     color: "var(--swatch-6)",
     glyph: "KE",
+    defaultCli: null,
     sessions: 0,
   },
   {
@@ -46,6 +49,7 @@ const SEED: MockRow[] = [
     path: "/Users/you/projects/borealis",
     color: "var(--swatch-3)",
     glyph: "BO",
+    defaultCli: "codex",
     sessions: 1,
   },
 ];
@@ -94,7 +98,13 @@ export function EditProjectFlowLiveHarness(): JSX.Element {
   const editInitial = (): AddProjectFormValue | undefined => {
     const t = editTarget();
     if (!t) return undefined;
-    return { name: t.name, path: t.path, color: t.color, glyph: t.glyph };
+    return {
+      name: t.name,
+      path: t.path,
+      color: t.color,
+      glyph: t.glyph,
+      defaultCli: t.defaultCli,
+    };
   };
 
   const onEditSubmit = async (value: AddProjectFormValue): Promise<void> => {
@@ -107,11 +117,20 @@ export function EditProjectFlowLiveHarness(): JSX.Element {
     setRows((list) =>
       list.map((r) =>
         r.id === id
-          ? { ...r, name: value.name, path: value.path, color: value.color, glyph: value.glyph }
+          ? {
+              ...r,
+              name: value.name,
+              path: value.path,
+              color: value.color,
+              glyph: value.glyph,
+              defaultCli: value.defaultCli,
+            }
           : r,
       ),
     );
-    append(`edit(${id}) → ${value.name} · ${value.glyph} · ${value.color}`);
+    append(
+      `edit(${id}) → ${value.name} · ${value.glyph} · ${value.color} · ${value.defaultCli ?? "—"}`,
+    );
   };
 
   const onDeleteConfirm = async (): Promise<void> => {

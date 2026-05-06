@@ -23,6 +23,7 @@ export function ProjectsEmptyStateLiveHarness(): JSX.Element {
       path: value.path,
       color: value.color,
       icon: value.glyph,
+      defaultCli: value.defaultCli,
     });
     setLastCreated(created.name);
   };

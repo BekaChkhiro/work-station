@@ -89,7 +89,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
                 data-project-id={project.id}
                 data-active={isActive() ? "true" : undefined}
                 style={{ display: isActive() ? "flex" : "none" }}
-                aria-hidden={!isActive()}
+                aria-hidden={isActive() ? undefined : "true"}
               >
                 <ProjectWorkspaceView
                   projectId={project.id}
