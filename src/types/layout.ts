@@ -154,6 +154,45 @@ export function updateSplitRatio(node: LayoutNode, path: LayoutPath, ratio: numb
   return node;
 }
 
+/** Locate the path to the pane with `sessionId`, in the same encoding as
+ *  `updateSplitRatio` accepts. Returns `null` if no pane matches. Used by
+ *  split / close actions (T5.6, T5.7) that operate on the "focused pane". */
+export function findPanePath(node: LayoutNode, sessionId: string): LayoutPath | null {
+  if (isPane(node)) return node.sessionId === sessionId ? "" : null;
+  const left = findPanePath(node.children[0], sessionId);
+  if (left !== null) return "L" + left;
+  const right = findPanePath(node.children[1], sessionId);
+  if (right !== null) return "R" + right;
+  return null;
+}
+
+/** T5.6 — replace the pane with `targetSessionId` with a fresh SplitNode
+ *  whose first child is the original pane and whose second child is a new
+ *  pane wrapping `newSessionId`. Direction follows the tmux convention used
+ *  throughout the layout module: `'h'` puts panes side-by-side (vertical
+ *  separator), `'v'` stacks them (horizontal separator).
+ *
+ *  Returns the input tree unchanged (same reference) if `targetSessionId`
+ *  isn't present. Untouched subtrees keep their references so the renderer
+ *  (T5.4) doesn't remount unrelated panes when a sibling splits. */
+export function splitPaneAt(
+  node: LayoutNode,
+  targetSessionId: string,
+  direction: SplitDirection,
+  newSessionId: string,
+): LayoutNode {
+  if (isPane(node)) {
+    if (node.sessionId !== targetSessionId) return node;
+    return splitNode(direction, node, paneNode(newSessionId));
+  }
+  const [left, right] = node.children;
+  const nextLeft = splitPaneAt(left, targetSessionId, direction, newSessionId);
+  if (nextLeft !== left) return { ...node, children: [nextLeft, right] };
+  const nextRight = splitPaneAt(right, targetSessionId, direction, newSessionId);
+  if (nextRight !== right) return { ...node, children: [left, nextRight] };
+  return node;
+}
+
 /** Parse a `sessions.layout_json` value. Returns `EMPTY_LAYOUT` on any failure. */
 export function parseLayoutJson(raw: string | null | undefined): Layout {
   if (!raw) return EMPTY_LAYOUT;

@@ -1,5 +1,5 @@
 // Dev-only harness: LayoutTree wrapping multiple PTY-backed Terminals so
-// the T5.4 acceptance can be exercised manually:
+// the T5.4 + T5.6 acceptance can be exercised manually:
 //
 //   • Drag any split handle. Terminals freeze during drag (T5.2 ghost
 //     line tracks the cursor) and only commit on release.
@@ -10,6 +10,11 @@
 //     pane, a horizontal 2-pane split, or a 3-pane T-split. Switching
 //     the layout SHAPE remounts terminals (structurally different
 //     panes); just changing ratios does not.
+//   • T5.6: ⌘\ (or Ctrl+\) splits the focused pane vertically (new
+//     pane to the right); ⌘⇧\ splits horizontally (new pane below).
+//     Buttons in the toolbar invoke the same actions. The new pane
+//     spawns in the focused pane's tracked cwd — verify the prompt
+//     appears at the same path as the parent pane.
 //
 // Reachable via `?wsdebug=layouttree` in dev builds.
 
@@ -21,9 +26,11 @@ import { ptyKill, ptySpawn } from "../../ipc/pty";
 import {
   paneNode,
   splitNode,
+  splitPaneAt,
   updateSplitRatio,
   type LayoutNode,
   type LayoutPath,
+  type SplitDirection,
 } from "../../types/layout";
 
 type SpawnState =
@@ -44,10 +51,11 @@ const defaultShell = (): string => {
   return isMac ? "/bin/zsh" : "/bin/bash";
 };
 
-const spawnShell = async (label: string): Promise<string> => {
+const spawnShell = async (label: string, cwd?: string): Promise<string> => {
   const resp = await ptySpawn({
     command: defaultShell(),
     args: [],
+    cwd,
     env: {
       NODE_ENV: "development",
       WS_LIVE_HARNESS: "layouttree",
@@ -59,6 +67,14 @@ const spawnShell = async (label: string): Promise<string> => {
   });
   return resp.sessionId;
 };
+
+// T5.6 — per-session cwd tracked at spawn time so child panes inherit the
+// parent pane's working directory. Without an OSC 7 listener (deferred to
+// T7.x) we can't track `cd` mutations inside the shell, so the inherited
+// path is the *spawn-time* cwd of the parent pane. That's enough to
+// satisfy the acceptance: split a fresh pane → new pane prompts at the
+// same $HOME (or whatever was passed in) the parent did.
+const cwdBySessionId = new Map<string, string | undefined>();
 
 // Module-scoped registry: pane sessionId → mount count. Lives outside the
 // component so the counter survives re-renders and only increments when a
@@ -123,6 +139,12 @@ export function LayoutTreeLiveHarness() {
   // tracks click events and the contract bubbles through LayoutTree.
   const [focusedSessionId, setFocusedSessionId] = createSignal<string | null>(null);
 
+  // T5.6 — track sessionIds spawned by split actions so they're killed on
+  // harness unmount alongside the initial three. Initial sessions live in
+  // `killOnUnmount`; split-spawned ones get appended to `splitSessions` and
+  // both lists are drained in onCleanup.
+  const splitSessions: string[] = [];
+
   onMount(() => {
     let killOnUnmount: string[] = [];
 
@@ -138,6 +160,9 @@ export function LayoutTreeLiveHarness() {
     void (async () => {
       try {
         const [a, b, c] = await Promise.all([spawnShell("A"), spawnShell("B"), spawnShell("C")]);
+        cwdBySessionId.set(a, undefined);
+        cwdBySessionId.set(b, undefined);
+        cwdBySessionId.set(c, undefined);
         killOnUnmount = [a, b, c];
         const sessions = { a, b, c };
         setState({ kind: "ready", sessions });
@@ -151,7 +176,9 @@ export function LayoutTreeLiveHarness() {
 
     onCleanup(() => {
       mountCounts.clear();
+      cwdBySessionId.clear();
       for (const id of killOnUnmount) void ptyKill(id);
+      for (const id of splitSessions) void ptyKill(id);
     });
   });
 
@@ -195,10 +222,71 @@ export function LayoutTreeLiveHarness() {
     }
   };
 
+  // T5.6 — split the currently focused pane. Spawns a fresh shell with the
+  // focused pane's tracked cwd so the new prompt lands at the same path,
+  // then rewrites the layout via splitPaneAt and refocuses the new pane.
+  // Returns silently if there's no focus (e.g. pre-mount) or the focused
+  // pane isn't in the current tree (shouldn't happen, but cheap to guard).
+  const splitFocused = async (direction: SplitDirection): Promise<void> => {
+    const parentId = focusedSessionId();
+    const current = tree();
+    if (!parentId || !current) return;
+    const parentCwd = cwdBySessionId.get(parentId);
+    let newId: string;
+    try {
+      // Label by the parent's letter + a "+" suffix so the mount-counter
+      // overlay still resolves to something readable for split panes that
+      // weren't part of the original A/B/C set.
+      const parentLabel =
+        (() => {
+          const s = state();
+          if (s.kind !== "ready") return "?";
+          if (parentId === s.sessions.a) return "A";
+          if (parentId === s.sessions.b) return "B";
+          if (parentId === s.sessions.c) return "C";
+          return "?";
+        })() + "+";
+      newId = await spawnShell(parentLabel, parentCwd);
+    } catch (error) {
+      // Surfacing this in the spawn-state pill would be louder than this
+      // dev harness needs; the console message is enough to diagnose
+      // permission / runtime failures while iterating.
+      console.error("[layouttree harness] split spawn failed", error);
+      return;
+    }
+    cwdBySessionId.set(newId, parentCwd);
+    splitSessions.push(newId);
+    setTree((prev) => {
+      if (!prev) return prev;
+      return splitPaneAt(prev, parentId, direction, newId);
+    });
+    setFocusedSessionId(newId);
+  };
+
+  // ⌘\ (mac) / Ctrl+\ (others) → vertical split (new pane to the right).
+  // ⌘⇧\ / Ctrl+Shift+\ → horizontal split (new pane below). Listening on
+  // the window so the binding works regardless of which pane has focus —
+  // xterm's textarea would otherwise swallow the keystroke before any
+  // pane-level handler ran.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod || e.key !== "\\") return;
+      e.preventDefault();
+      void splitFocused(e.shiftKey ? "v" : "h");
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
   const renderPane = (sessionId: string): JSX.Element => {
     const s = state();
     if (s.kind !== "ready") return null;
-    const label = sessionId === s.sessions.a ? "A" : sessionId === s.sessions.b ? "B" : "C";
+    let label: string;
+    if (sessionId === s.sessions.a) label = "A";
+    else if (sessionId === s.sessions.b) label = "B";
+    else if (sessionId === s.sessions.c) label = "C";
+    else label = `+${sessionId.slice(0, 4)}`;
     return <CountedTerminal sessionId={sessionId} label={label} onMounted={handleMounted} />;
   };
 
@@ -254,6 +342,27 @@ export function LayoutTreeLiveHarness() {
           >
             {autoDragRunning() ? "Dragging…" : "Drag handle 100×"}
           </button>
+          <div class="flex items-center gap-1">
+            <span class="text-fg-tertiary">Split:</span>
+            <button
+              type="button"
+              class="rounded border border-border-default px-2 py-1 hover:bg-bg-hover"
+              onClick={() => void splitFocused("h")}
+              disabled={state().kind !== "ready" || focusedSessionId() === null}
+              title={isMac ? "⌘\\" : "Ctrl+\\"}
+            >
+              vertical
+            </button>
+            <button
+              type="button"
+              class="rounded border border-border-default px-2 py-1 hover:bg-bg-hover"
+              onClick={() => void splitFocused("v")}
+              disabled={state().kind !== "ready" || focusedSessionId() === null}
+              title={isMac ? "⌘⇧\\" : "Ctrl+Shift+\\"}
+            >
+              horizontal
+            </button>
+          </div>
           <div class="ml-auto flex gap-3 font-mono text-fg-secondary">
             <span>
               focus:{" "}
