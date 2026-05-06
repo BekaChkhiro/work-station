@@ -50,6 +50,7 @@ import {
   updateProjectMeta,
 } from "../../stores/workspace";
 import { collectPanes, paneNode } from "../../types/layout";
+import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
 import { isMac, isWindows } from "../../utils/platform";
 
 interface EditTarget {
@@ -106,6 +107,18 @@ export function AppRoot(): JSX.Element {
     list.push(sessionId);
     sessionsByProject[projectId] = list;
   };
+
+  // Pane / project hotkeys: Cmd+\, Cmd+Shift+\, Cmd+W, Cmd+N. Wire to the
+  // shadow map for cwd lookup so split shells inherit the project's folder.
+  usePaneHotkeys({
+    resolveCwd: (id) => projectPaths[id] ?? null,
+    shellCommand: defaultShell,
+    onAddProject: () => {
+      setActionError(null);
+      setAddOpen(true);
+    },
+    onError: (msg) => setActionError(msg),
+  });
 
   const registerProject = (persisted: Project, sessionId: string | null): void => {
     projectPaths[persisted.id] = persisted.path;

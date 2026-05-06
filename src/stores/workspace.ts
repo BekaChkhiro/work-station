@@ -24,8 +24,14 @@
 
 import { batch, createMemo } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import type { LayoutNode } from "../types/layout";
-import { collectPanes, findPane, updateSplitRatio } from "../types/layout";
+import type { LayoutNode, SplitDirection } from "../types/layout";
+import {
+  closePaneAt,
+  collectPanes,
+  findPane,
+  splitPaneAt,
+  updateSplitRatio,
+} from "../types/layout";
 
 export interface ProjectMeta {
   id: string;
@@ -203,6 +209,53 @@ export function updateLayoutRatio(projectId: string, path: string, ratio: number
   const next = updateSplitRatio(ws.layout, path, ratio);
   if (next === ws.layout) return;
   setLayout(projectId, next);
+}
+
+/** Split the pane carrying `targetSessionId` along `direction` and place a
+ *  new pane carrying `newSessionId` next to it. Updates focus to the new
+ *  pane so the spawned shell receives input immediately. No-op if the
+ *  target pane isn't in the layout. The PTY for `newSessionId` must be
+ *  spawned by the caller before this is called — the store does not reach
+ *  into the IPC layer. */
+export function splitPane(
+  projectId: string,
+  targetSessionId: string,
+  direction: SplitDirection,
+  newSessionId: string,
+): void {
+  const ws = state.workspacesByProjectId[projectId];
+  if (!ws || !ws.layout) return;
+  const next = splitPaneAt(ws.layout, targetSessionId, direction, newSessionId);
+  if (next === ws.layout) return;
+  setState(
+    produce((s) => {
+      const w = s.workspacesByProjectId[projectId];
+      if (!w) return;
+      w.layout = next;
+      w.focusedSessionId = newSessionId;
+    }),
+  );
+}
+
+/** Remove the pane carrying `targetSessionId` from `projectId`'s layout.
+ *  Returns the closed sessionId so the caller can kill the matching PTY,
+ *  or `null` when the target was not in the layout. After the close the
+ *  surviving sibling's leftmost pane gets focus; if the closed pane was
+ *  the only one, the layout drops to `null` and focus clears. */
+export function closePane(projectId: string, targetSessionId: string): string | null {
+  const ws = state.workspacesByProjectId[projectId];
+  if (!ws || !ws.layout) return null;
+  if (!findPane(ws.layout, targetSessionId)) return null;
+  const result = closePaneAt(ws.layout, targetSessionId);
+  setState(
+    produce((s) => {
+      const w = s.workspacesByProjectId[projectId];
+      if (!w) return;
+      w.layout = result.tree;
+      w.focusedSessionId = result.nextFocusSessionId;
+    }),
+  );
+  return targetSessionId;
 }
 
 /** Set the focused pane inside `projectId`. The id must reference a pane

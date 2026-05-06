@@ -460,6 +460,14 @@ export function Terminal(props: TerminalProps) {
 
     term.attachCustomKeyEventHandler((event) => {
       if (!handleSearchHotkey(event)) return false;
+      // Pane / project hotkeys (Cmd+\, Cmd+W, Cmd+N) live on the document.
+      // Returning false here keeps xterm from forwarding the keystroke to
+      // the PTY (so the shell never sees ^\, ^W, ^N) while letting the
+      // event bubble up to the document-level installPaneHotkeys handler.
+      if (event.type === "keydown" && (event.metaKey || event.ctrlKey) && !event.altKey) {
+        const k = event.key.toLowerCase();
+        if (event.key === "\\" || k === "w" || k === "n") return false;
+      }
       return handleCopyPasteKey(event);
     });
 
