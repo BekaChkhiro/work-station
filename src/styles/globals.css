@@ -332,6 +332,165 @@ button {
   text-align: center;
 }
 
+/* T6.4 — Quick switcher modal. Compact (~520px) Cmd+K palette anchored
+ * near the top of the viewport. Mirrors the prototype's `.qs` rules from
+ * work-station-design/styles.css under the `ws-qs` prefix. */
+.ws-qs__backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-canvas) 70%, transparent);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 14vh;
+  z-index: 220;
+  animation: wsQsFade 140ms var(--ease);
+}
+@keyframes wsQsFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.ws-qs {
+  width: min(520px, calc(100vw - 32px));
+  max-height: 70vh;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: wsQsPop 160ms var(--ease);
+}
+@keyframes wsQsPop {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ws-qs__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+}
+.ws-qs__input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+.ws-qs__input::placeholder {
+  color: var(--text-tertiary);
+}
+.ws-qs__kbd {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.4;
+}
+.ws-qs__list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.ws-qs__row {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-md, 6px);
+  cursor: default;
+  color: var(--text-secondary);
+}
+.ws-qs__row.is-selected {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.ws-qs__icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+}
+.ws-qs__name {
+  font-size: 13px;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-qs__match {
+  color: var(--accent);
+  font-weight: 600;
+}
+.ws-qs__meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.ws-qs__row.is-selected .ws-qs__meta {
+  color: var(--text-secondary);
+}
+.ws-qs__live {
+  color: var(--accent);
+}
+.ws-qs__active-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.ws-qs__empty {
+  padding: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.ws-qs__foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.ws-qs__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.ws-qs__foot-label {
+  margin-left: auto;
+}
+
 /* T5.5 — Pane focus ring. Mirrors the prototype's `.pane` / `.pane.focused`
  * rules in work-station-design/styles.css under the `ws-pane` prefix.
  * Border-color + inset/outer ring transition together so the focus shift
