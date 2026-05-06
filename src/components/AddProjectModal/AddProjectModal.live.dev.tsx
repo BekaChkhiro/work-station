@@ -77,7 +77,7 @@ export function AddProjectModalLiveHarness(): JSX.Element {
               {(s) => (
                 <li class="font-mono text-fg-secondary">
                   {new Date(s.at).toISOString().slice(11, 19)} — {s.glyph} · {s.name} · {s.path} ·{" "}
-                  <span style={{ color: s.color }}>{s.color}</span>
+                  <span style={{ color: s.color }}>{s.color}</span> · cli={s.defaultCli ?? "—"}
                 </li>
               )}
             </For>

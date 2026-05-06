@@ -11,9 +11,12 @@ import SidebarLiveHarness from "./components/Sidebar/Sidebar.live.dev";
 import AppShellLiveHarness from "./components/AppShell/AppShell.live.dev";
 import AddProjectModalLiveHarness from "./components/AddProjectModal/AddProjectModal.live.dev";
 import EditProjectFlowLiveHarness from "./components/EditProjectFlow/EditProjectFlow.live.dev";
+import ProjectsEmptyStateLiveHarness from "./components/ProjectsEmptyState/ProjectsEmptyState.live.dev";
+import { AppRoot } from "./components/AppRoot";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { QuickSwitcher } from "./components/QuickSwitcher";
+import { isEditableTarget } from "./utils/platform";
 import "./styles/globals.css";
 
 type DebugMode =
@@ -28,6 +31,8 @@ type DebugMode =
   | "appshell"
   | "addproject"
   | "editproject"
+  | "projectsempty"
+  | "tokens"
   | null;
 
 const debugMode = (): DebugMode => {
@@ -43,7 +48,9 @@ const debugMode = (): DebugMode => {
     v === "sidebar" ||
     v === "appshell" ||
     v === "addproject" ||
-    v === "editproject"
+    v === "editproject" ||
+    v === "projectsempty" ||
+    v === "tokens"
     ? v
     : null;
 };
@@ -72,6 +79,11 @@ export default function App() {
         return;
       }
       if (!e.shiftKey && e.key.toLowerCase() === "k") {
+        // Mirror T6.3's editable-target guard so Cmd+K doesn't steal focus
+        // while the user is typing in a shell or input. The switcher itself
+        // ignores this guard because its own input is already mounted by
+        // the time it dispatches keys.
+        if (isEditableTarget(document.activeElement)) return;
         e.preventDefault();
         setSwitcherOpen((open) => !open);
         return;
@@ -84,7 +96,10 @@ export default function App() {
   return (
     <AppErrorBoundary>
       <PanelErrorBoundary scope="panel">
-        <Switch fallback={<TokenShowcase />}>
+        <Switch fallback={<AppRoot />}>
+          <Match when={debugMode() === "tokens"}>
+            <TokenShowcase />
+          </Match>
           <Match when={debugMode() === "errorboundary"}>
             <ErrorThrower />
           </Match>
@@ -117,6 +132,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "editproject"}>
             <EditProjectFlowLiveHarness />
+          </Match>
+          <Match when={debugMode() === "projectsempty"}>
+            <ProjectsEmptyStateLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>

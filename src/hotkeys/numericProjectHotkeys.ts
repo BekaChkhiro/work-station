@@ -16,24 +16,7 @@
 
 import { onCleanup, onMount } from "solid-js";
 import { projects, setActiveProject } from "../stores/workspace";
-
-const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
-
-/** True when the keystroke should belong to the user's typing context
- *  (input, textarea, contenteditable, or an xterm pane) rather than
- *  the project switcher. */
-function isEditableTarget(el: Element | null): boolean {
-  if (!el) return false;
-  if (el instanceof HTMLElement && el.isContentEditable) return true;
-  const tag = el.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
-  // xterm.js puts focus on `.xterm-helper-textarea` inside the `.xterm`
-  // root; the textarea check above already catches it, but the closest()
-  // probe also covers any future xterm versions that swap the focus
-  // target — and any custom child element a pane might render.
-  if (el.closest(".xterm")) return true;
-  return false;
-}
+import { isEditableTarget, isMac } from "../utils/platform";
 
 /** Install document-level Cmd/Ctrl+1..9 → switch active project by
  *  sidebar position. Returns a cleanup that removes the listener. */

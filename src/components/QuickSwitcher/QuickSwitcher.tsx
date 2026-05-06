@@ -12,9 +12,11 @@
 //   • Hovering a row updates the selection so the keyboard and mouse stay
 //     in sync.
 //
-// Filter: case-insensitive substring match on project name. The matched
-// segment is wrapped in a `.ws-qs__match` span so the accent color makes
-// the hit visible without resorting to fuzzy ranking.
+// Filter: case-insensitive substring match on project name. Results are
+// ranked so prefix matches and word-boundary matches surface above
+// mid-string substring matches. Among equal-score hits, original sidebar
+// order is preserved (stable sort). The matched segment is wrapped in a
+// `.ws-qs__match` span so the accent color makes the hit visible.
 
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
@@ -34,7 +36,17 @@ interface MatchResult {
   /** Substring match position in lowercased name; -1 means show whole name. */
   matchStart: number;
   matchLength: number;
+  /** Lower is better. 0 = prefix, 1 = word boundary, 2 = mid-string. Used to
+   *  rank results before render. */
+  score: number;
+  /** Original index in `projects()`; tiebreaker for stable ordering. */
+  origIndex: number;
 }
+
+const SCORE_PREFIX = 0;
+const SCORE_WORD_BOUNDARY = 1;
+const SCORE_SUBSTRING = 2;
+const WORD_BOUNDARY_RE = /[\s_\-./:]/;
 
 export function QuickSwitcher(props: QuickSwitcherProps): JSX.Element {
   let inputEl: HTMLInputElement | undefined;
@@ -47,7 +59,9 @@ export function QuickSwitcher(props: QuickSwitcherProps): JSX.Element {
     const all = projects();
     const q = query().trim().toLowerCase();
     const list: MatchResult[] = [];
-    for (const p of all) {
+    for (let i = 0; i < all.length; i++) {
+      const p = all[i];
+      if (!p) continue;
       if (!q) {
         list.push({
           id: p.id,
@@ -57,11 +71,21 @@ export function QuickSwitcher(props: QuickSwitcherProps): JSX.Element {
           sessions: sessionCount(p.id),
           matchStart: -1,
           matchLength: 0,
+          score: SCORE_SUBSTRING,
+          origIndex: i,
         });
         continue;
       }
-      const idx = p.name.toLowerCase().indexOf(q);
+      const lower = p.name.toLowerCase();
+      const idx = lower.indexOf(q);
       if (idx < 0) continue;
+      let score: number;
+      if (idx === 0) {
+        score = SCORE_PREFIX;
+      } else {
+        const prevChar = lower.charAt(idx - 1);
+        score = WORD_BOUNDARY_RE.test(prevChar) ? SCORE_WORD_BOUNDARY : SCORE_SUBSTRING;
+      }
       list.push({
         id: p.id,
         name: p.name,
@@ -70,7 +94,12 @@ export function QuickSwitcher(props: QuickSwitcherProps): JSX.Element {
         sessions: sessionCount(p.id),
         matchStart: idx,
         matchLength: q.length,
+        score,
+        origIndex: i,
       });
+    }
+    if (q) {
+      list.sort((a, b) => a.score - b.score || a.origIndex - b.origIndex);
     }
     return list;
   });
@@ -171,6 +200,7 @@ export function QuickSwitcher(props: QuickSwitcherProps): JSX.Element {
         <div
           class="ws-qs"
           role="dialog"
+          aria-modal="true"
           aria-label="Quick switcher"
           onMouseDown={(e) => e.stopPropagation()}
         >

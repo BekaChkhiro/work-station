@@ -145,6 +145,25 @@ impl PtyManager {
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
         }
+        // portable-pty's `CommandBuilder::new()` starts with an empty
+        // environment on Unix. Inherit the host process's env so spawned
+        // shells see PATH / HOME / LANG / TERM-like vars and child tools
+        // (claude, mcp servers, language toolchains) can find their
+        // config files. Caller-supplied `config.env` then overrides /
+        // augments — used to inject WS_PROJECT_ID and friends.
+        for (k, v) in std::env::vars_os() {
+            // Skip vars with non-UTF8 contents — CommandBuilder::env takes
+            // &str. The kernel allows arbitrary bytes here but we never
+            // need them in practice and they'd silently fail the cast.
+            if let (Some(k), Some(v)) = (k.to_str(), v.to_str()) {
+                cmd.env(k, v);
+            }
+        }
+        // Force a sensible TERM when the host didn't have one set so xterm
+        // negotiation works (e.g. Tauri launched from Finder gets nothing).
+        if std::env::var_os("TERM").is_none() {
+            cmd.env("TERM", "xterm-256color");
+        }
         for (k, v) in &config.env {
             cmd.env(k, v);
         }

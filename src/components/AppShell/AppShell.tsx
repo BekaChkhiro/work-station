@@ -20,6 +20,7 @@
 import { For, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { LayoutTree } from "../LayoutTree";
+import { ProjectsEmptyState } from "../ProjectsEmptyState";
 import { Sidebar } from "../Sidebar";
 import type { LayoutPath } from "../../types/layout";
 import {
@@ -76,6 +77,9 @@ export function AppShell(props: AppShellProps): JSX.Element {
   return (
     <div class="ws-appshell relative grid h-full w-full grid-cols-[1fr_auto] bg-canvas text-fg">
       <div class="ws-appshell__workspace relative min-h-0">
+        <Show when={projects().length === 0}>
+          <ProjectsEmptyState onAddProject={() => props.onAddProject?.()} shortcut="⌘N" />
+        </Show>
         <For each={projects()}>
           {(project) => {
             const isActive = (): boolean => activeProjectId() === project.id;
@@ -85,7 +89,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
                 data-project-id={project.id}
                 data-active={isActive() ? "true" : undefined}
                 style={{ display: isActive() ? "flex" : "none" }}
-                aria-hidden={!isActive()}
+                aria-hidden={isActive() ? undefined : "true"}
               >
                 <ProjectWorkspaceView
                   projectId={project.id}

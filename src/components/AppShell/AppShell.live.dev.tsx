@@ -128,6 +128,8 @@ export function AppShellLiveHarness(): JSX.Element {
   // once projects own their full DB row (T6.6 doesn't promote `path` to
   // ProjectMeta — keeping the store minimal — so we shadow it here.).
   const projectPaths: Record<string, string> = {};
+  // T6.5 default CLI shadow — same rationale as projectPaths.
+  const projectClis: Record<string, string | null> = {};
   // Sessions we own per project. We register one shell per project at
   // start; opening more (T5.6) would extend this list.
   const sessionsByProject: Record<string, string[]> = {};
@@ -156,6 +158,7 @@ export function AppShellLiveHarness(): JSX.Element {
       const sessionId = await spawnShell(persisted.id, demo.startupCommands);
       trackSession(persisted.id, sessionId);
       projectPaths[persisted.id] = persisted.path;
+      projectClis[persisted.id] = persisted.defaultCli;
       addProject(
         {
           id: persisted.id,
@@ -217,12 +220,14 @@ export function AppShellLiveHarness(): JSX.Element {
       path: value.path,
       color: value.color,
       icon: value.glyph,
+      defaultCli: value.defaultCli,
     });
     const sessionId = await spawnShell(created.id, [
       `echo "${created.name} — fresh project. Try ls."`,
     ]);
     trackSession(created.id, sessionId);
     projectPaths[created.id] = created.path;
+    projectClis[created.id] = created.defaultCli;
     addProject(
       {
         id: created.id,
@@ -244,8 +249,10 @@ export function AppShellLiveHarness(): JSX.Element {
       path: value.path,
       color: value.color,
       icon: value.glyph,
+      defaultCli: value.defaultCli,
     });
     projectPaths[target.id] = updated.path;
+    projectClis[target.id] = updated.defaultCli;
     updateProjectMeta(target.id, {
       name: updated.name,
       color: updated.color ?? value.color,
@@ -265,6 +272,7 @@ export function AppShellLiveHarness(): JSX.Element {
         path,
         color: meta.color,
         glyph: meta.glyph,
+        defaultCli: projectClis[projectId] ?? null,
       },
     });
   };
@@ -279,10 +287,19 @@ export function AppShellLiveHarness(): JSX.Element {
     const target = deleteTarget();
     if (!target) return;
     // Kill PTYs first so the DB delete doesn't leave orphaned children
-    // outliving their project. Failures here are non-fatal — the row goes
-    // either way and any zombie shell is cleaned up at app exit.
-    const owned = sessionsByProject[target.id] ?? [];
-    for (const sessionId of owned) {
+    // outliving their project. The workspace store's layout tree is the
+    // authoritative session list — covers panes opened via T5.6 splits in
+    // addition to the harness's initial shell. Falls back to the harness-
+    // tracked list for the (rare) case where a session lives outside any
+    // layout. Failures here are non-fatal — the row goes either way and
+    // any zombie shell is cleaned up at app exit.
+    const liveSessions = new Set<string>();
+    const ws = getWorkspace(target.id);
+    if (ws && ws.layout) {
+      for (const pane of collectPanes(ws.layout)) liveSessions.add(pane.sessionId);
+    }
+    for (const id of sessionsByProject[target.id] ?? []) liveSessions.add(id);
+    for (const sessionId of liveSessions) {
       try {
         await ptyKill(sessionId);
       } catch {
@@ -298,6 +315,7 @@ export function AppShellLiveHarness(): JSX.Element {
       throw err;
     }
     projectPaths[target.id] = "";
+    projectClis[target.id] = null;
     removeProject(target.id);
     setDeleteTarget(null);
     setEditTarget(null);
@@ -453,6 +471,7 @@ export function AppShellLiveHarness(): JSX.Element {
                 path: projectPaths[t.projectId] ?? "",
                 color: meta.color,
                 glyph: meta.glyph,
+                defaultCli: projectClis[t.projectId] ?? null,
               },
             });
           }
