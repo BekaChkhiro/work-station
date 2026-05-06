@@ -9,6 +9,7 @@ import LayoutTreeLiveHarness from "./components/LayoutTree/LayoutTree.live.dev";
 import PaneLiveHarness from "./components/Pane/Pane.live.dev";
 import SidebarLiveHarness from "./components/Sidebar/Sidebar.live.dev";
 import AppShellLiveHarness from "./components/AppShell/AppShell.live.dev";
+import AddProjectModalLiveHarness from "./components/AddProjectModal/AddProjectModal.live.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { QuickSwitcher } from "./components/QuickSwitcher";
@@ -24,6 +25,7 @@ type DebugMode =
   | "pane"
   | "sidebar"
   | "appshell"
+  | "addproject"
   | null;
 
 const debugMode = (): DebugMode => {
@@ -37,7 +39,8 @@ const debugMode = (): DebugMode => {
     v === "layouttree" ||
     v === "pane" ||
     v === "sidebar" ||
-    v === "appshell"
+    v === "appshell" ||
+    v === "addproject"
     ? v
     : null;
 };
@@ -105,6 +108,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "appshell"}>
             <AppShellLiveHarness />
+          </Match>
+          <Match when={debugMode() === "addproject"}>
+            <AddProjectModalLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>

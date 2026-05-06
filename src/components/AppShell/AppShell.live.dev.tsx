@@ -13,8 +13,18 @@ import { Match, Switch, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { AppShell } from "./AppShell";
 import { Terminal } from "../Terminal/Terminal";
+import { AddProjectModal } from "../AddProjectModal";
+import type { AddProjectFormValue } from "../AddProjectModal";
 import { ptyKill, ptySpawn } from "../../ipc/pty";
-import { activeProjectId, addProject, projects, setLayout } from "../../stores/workspace";
+import { createProject } from "../../db/projects";
+import { pickProjectFolder } from "../../ipc/picker";
+import {
+  activeProjectId,
+  addProject,
+  projects,
+  setActiveProject,
+  setLayout,
+} from "../../stores/workspace";
 import { paneNode } from "../../types/layout";
 
 interface DemoProject {
@@ -80,6 +90,7 @@ type SpawnState = { kind: "spawning" } | { kind: "ready" } | { kind: "failed"; m
 export function AppShellLiveHarness(): JSX.Element {
   const [state, setState] = createSignal<SpawnState>({ kind: "spawning" });
   const [collapsed, setCollapsed] = createSignal(false);
+  const [addOpen, setAddOpen] = createSignal(false);
   // Track sessions we own so they're killed on harness unmount. The store
   // doesn't reach into the IPC layer; the harness is the IPC owner here.
   const ownedSessions: string[] = [];
@@ -142,6 +153,36 @@ export function AppShellLiveHarness(): JSX.Element {
     />
   );
 
+  // T6.5: persist the new project, spawn its first shell, register the
+  // workspace, switch to it. Rejections bubble up to the modal so backend
+  // validation messages (duplicate name, missing path) reach the user.
+  const handleCreateProject = async (value: AddProjectFormValue): Promise<void> => {
+    const created = await createProject({
+      name: value.name,
+      path: value.path,
+      color: value.color,
+      icon: value.glyph,
+    });
+    const sessionId = await spawnShell({
+      id: created.id,
+      name: created.name,
+      color: value.color,
+      glyph: value.glyph,
+      startupCommands: [`echo "${created.name} — fresh project. Try ls."`],
+    });
+    ownedSessions.push(sessionId);
+    addProject(
+      {
+        id: created.id,
+        name: created.name,
+        color: value.color,
+        glyph: value.glyph,
+      },
+      { layout: paneNode(sessionId), focusedSessionId: sessionId },
+    );
+    setActiveProject(created.id);
+  };
+
   const headerActiveLabel = (): string => {
     const id = activeProjectId();
     const list = projects();
@@ -152,7 +193,7 @@ export function AppShellLiveHarness(): JSX.Element {
     <div class="grid h-full w-full grid-rows-[auto_1fr] gap-2 bg-canvas p-3 text-fg">
       <div class="rounded-md border border-border-default bg-surface p-2 text-xs">
         <div class="flex items-center gap-3">
-          <div class="font-semibold">AppShell harness (T6.2)</div>
+          <div class="font-semibold">AppShell harness (T6.2 + T6.5)</div>
           <div class="text-fg-tertiary">
             Cmd/Ctrl+1..3 switches projects (click outside a pane first) · sidebar click also works
             · active: <span class="text-fg">{headerActiveLabel()}</span>
@@ -160,7 +201,8 @@ export function AppShellLiveHarness(): JSX.Element {
         </div>
         <div class="mt-1 text-fg-secondary">
           Run a long loop in argon, switch to kepler/borealis for a few seconds, switch back —
-          argon's terminal should show every line that printed while it was hidden.
+          argon's terminal should show every line that printed while it was hidden. Click "+ New
+          project" in the sidebar (or the bottom row) to open the Add Project modal (T6.5).
         </div>
       </div>
       <div class="min-h-0 overflow-hidden rounded-md border border-border-default">
@@ -181,10 +223,17 @@ export function AppShellLiveHarness(): JSX.Element {
               renderPane={renderPane}
               sidebarCollapsed={collapsed()}
               onToggleSidebar={() => setCollapsed((c) => !c)}
+              onAddProject={() => setAddOpen(true)}
             />
           </Match>
         </Switch>
       </div>
+      <AddProjectModal
+        open={addOpen()}
+        onClose={() => setAddOpen(false)}
+        onPickFolder={pickProjectFolder}
+        onCreate={handleCreateProject}
+      />
     </div>
   );
 }
