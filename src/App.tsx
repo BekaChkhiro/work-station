@@ -11,6 +11,7 @@ import SidebarLiveHarness from "./components/Sidebar/Sidebar.live.dev";
 import AppShellLiveHarness from "./components/AppShell/AppShell.live.dev";
 import AddProjectModalLiveHarness from "./components/AddProjectModal/AddProjectModal.live.dev";
 import EditProjectFlowLiveHarness from "./components/EditProjectFlow/EditProjectFlow.live.dev";
+import ProjectsEmptyStateLiveHarness from "./components/ProjectsEmptyState/ProjectsEmptyState.live.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { QuickSwitcher } from "./components/QuickSwitcher";
@@ -28,6 +29,7 @@ type DebugMode =
   | "appshell"
   | "addproject"
   | "editproject"
+  | "projectsempty"
   | null;
 
 const debugMode = (): DebugMode => {
@@ -43,7 +45,8 @@ const debugMode = (): DebugMode => {
     v === "sidebar" ||
     v === "appshell" ||
     v === "addproject" ||
-    v === "editproject"
+    v === "editproject" ||
+    v === "projectsempty"
     ? v
     : null;
 };
@@ -117,6 +120,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "editproject"}>
             <EditProjectFlowLiveHarness />
+          </Match>
+          <Match when={debugMode() === "projectsempty"}>
+            <ProjectsEmptyStateLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>
