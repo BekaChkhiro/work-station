@@ -8,6 +8,7 @@ import TabStripLiveHarness from "./components/TabStrip/TabStrip.live.dev";
 import LayoutTreeLiveHarness from "./components/LayoutTree/LayoutTree.live.dev";
 import PaneLiveHarness from "./components/Pane/Pane.live.dev";
 import SidebarLiveHarness from "./components/Sidebar/Sidebar.live.dev";
+import AppShellLiveHarness from "./components/AppShell/AppShell.live.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import "./styles/globals.css";
@@ -21,6 +22,7 @@ type DebugMode =
   | "layouttree"
   | "pane"
   | "sidebar"
+  | "appshell"
   | null;
 
 const debugMode = (): DebugMode => {
@@ -33,7 +35,8 @@ const debugMode = (): DebugMode => {
     v === "tabstrip" ||
     v === "layouttree" ||
     v === "pane" ||
-    v === "sidebar"
+    v === "sidebar" ||
+    v === "appshell"
     ? v
     : null;
 };
@@ -85,6 +88,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "sidebar"}>
             <SidebarLiveHarness />
+          </Match>
+          <Match when={debugMode() === "appshell"}>
+            <AppShellLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>
