@@ -4,16 +4,21 @@ import { ErrorThrower } from "./components/ErrorBoundary/ErrorThrower.dev";
 import TerminalLiveHarness from "./components/Terminal/Terminal.live.dev";
 import TerminalStressHarness from "./components/Terminal/Terminal.stress.dev";
 import SplitPaneLiveHarness from "./components/SplitPane/SplitPane.live.dev";
+import TabStripLiveHarness from "./components/TabStrip/TabStrip.live.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import "./styles/globals.css";
 
-type DebugMode = "errorboundary" | "terminal-stress" | "terminal" | "splitpane" | null;
+type DebugMode = "errorboundary" | "terminal-stress" | "terminal" | "splitpane" | "tabstrip" | null;
 
 const debugMode = (): DebugMode => {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
   const v = new URLSearchParams(window.location.search).get("wsdebug");
-  return v === "errorboundary" || v === "terminal-stress" || v === "terminal" || v === "splitpane"
+  return v === "errorboundary" ||
+    v === "terminal-stress" ||
+    v === "terminal" ||
+    v === "splitpane" ||
+    v === "tabstrip"
     ? v
     : null;
 };
@@ -53,6 +58,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "splitpane"}>
             <SplitPaneLiveHarness />
+          </Match>
+          <Match when={debugMode() === "tabstrip"}>
+            <TabStripLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>

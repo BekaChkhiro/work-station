@@ -331,3 +331,173 @@ button {
   color: var(--text-tertiary);
   text-align: center;
 }
+
+/* T5.3 — TabStrip. Mirrors the prototype's `.tabstrip` rules in
+ * work-station-design/styles.css with the `ws-tabstrip__*` prefix so it
+ * doesn't collide if the prototype is mounted side-by-side. */
+.ws-tabstrip {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  background: var(--bg-canvas);
+  border-bottom: 1px solid var(--border-default);
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  flex-shrink: 0;
+}
+.ws-tabstrip__scroll {
+  display: flex;
+  align-items: stretch;
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  flex: 1;
+}
+.ws-tabstrip__scroll::-webkit-scrollbar {
+  display: none;
+}
+.ws-tabstrip__tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  height: 100%;
+  min-width: 140px;
+  max-width: 220px;
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: default;
+  flex-shrink: 0;
+  outline: none;
+  transition:
+    background var(--dur-fast, 150ms) var(--ease, ease),
+    color var(--dur-fast, 150ms) var(--ease, ease);
+}
+.ws-tabstrip__tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-tabstrip__tab:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: -1px;
+}
+.ws-tabstrip__tab[data-active="true"] {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+.ws-tabstrip__tab[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: var(--accent);
+}
+.ws-tabstrip__tab[data-dragging="true"] {
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-popover);
+  border-right-color: transparent;
+}
+.ws-tabstrip__icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  border-radius: 3px;
+  background: var(--bg-active);
+}
+.ws-tabstrip__tab[data-active="true"] .ws-tabstrip__icon {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.ws-tabstrip__label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-tabstrip__dirty {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+.ws-tabstrip__close {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 3px;
+  display: grid;
+  place-items: center;
+  cursor: default;
+  opacity: 0;
+  transition: opacity 120ms var(--ease, ease);
+  flex-shrink: 0;
+  padding: 0;
+}
+.ws-tabstrip__tab:hover .ws-tabstrip__close,
+.ws-tabstrip__tab:focus-within .ws-tabstrip__close,
+.ws-tabstrip__tab[data-active="true"] .ws-tabstrip__close {
+  opacity: 1;
+}
+.ws-tabstrip__close:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+.ws-tabstrip__close:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: 1px;
+  opacity: 1;
+}
+.ws-tabstrip__indicator {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 3;
+}
+.ws-tabstrip__overflow-mask {
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 32px;
+  width: 24px;
+  background: linear-gradient(to right, transparent, var(--bg-canvas));
+}
+.ws-tabstrip__new {
+  width: 32px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  flex-shrink: 0;
+  padding: 0;
+}
+.ws-tabstrip__new:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-tabstrip__new:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: -2px;
+}
