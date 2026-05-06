@@ -118,6 +118,10 @@ export function LayoutTreeLiveHarness() {
   // counter map is the source of truth; this signal is just a render kick.
   const [mountTick, setMountTick] = createSignal(0);
   const [autoDragRunning, setAutoDragRunning] = createSignal(false);
+  // T5.5 — focused pane sessionId. Starts at the first pane's id once we
+  // know it; click any pane to switch. Verifies the Pane focus ring
+  // tracks click events and the contract bubbles through LayoutTree.
+  const [focusedSessionId, setFocusedSessionId] = createSignal<string | null>(null);
 
   onMount(() => {
     let killOnUnmount: string[] = [];
@@ -138,6 +142,7 @@ export function LayoutTreeLiveHarness() {
         const sessions = { a, b, c };
         setState({ kind: "ready", sessions });
         setTree(buildLayout(shape(), sessions));
+        setFocusedSessionId(a);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setState({ kind: "failed", message });
@@ -249,8 +254,21 @@ export function LayoutTreeLiveHarness() {
           >
             {autoDragRunning() ? "Dragging…" : "Drag handle 100×"}
           </button>
-          <div class="ml-auto font-mono text-fg-secondary">
-            mounts: <span class="text-fg">{mountSummary()}</span>
+          <div class="ml-auto flex gap-3 font-mono text-fg-secondary">
+            <span>
+              focus:{" "}
+              <span class="text-fg">
+                {(() => {
+                  const id = focusedSessionId();
+                  const s = state();
+                  if (!id || s.kind !== "ready") return "—";
+                  return id === s.sessions.a ? "A" : id === s.sessions.b ? "B" : "C";
+                })()}
+              </span>
+            </span>
+            <span>
+              mounts: <span class="text-fg">{mountSummary()}</span>
+            </span>
           </div>
         </div>
       </div>
@@ -273,6 +291,8 @@ export function LayoutTreeLiveHarness() {
                   node={node()}
                   renderPane={renderPane}
                   onRatioChange={handleRatioChange}
+                  focusedSessionId={focusedSessionId()}
+                  onFocusPane={setFocusedSessionId}
                 />
               )}
             </Show>
