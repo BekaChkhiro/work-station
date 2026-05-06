@@ -14,13 +14,7 @@ import type { JSX } from "solid-js";
 import { AppShell } from "./AppShell";
 import { Terminal } from "../Terminal/Terminal";
 import { ptyKill, ptySpawn } from "../../ipc/pty";
-import {
-  activeProjectId,
-  addProject,
-  projects,
-  setActiveProject,
-  setLayout,
-} from "../../stores/workspace";
+import { activeProjectId, addProject, projects, setLayout } from "../../stores/workspace";
 import { paneNode } from "../../types/layout";
 
 interface DemoProject {
@@ -133,25 +127,12 @@ export function AppShellLiveHarness(): JSX.Element {
     });
   });
 
-  // Cmd/Ctrl+1..3 switches between the three demo projects. Listening on
-  // window so xterm's textarea doesn't swallow the keystroke. Numeric
-  // hotkeys for the real product land in T6.3 — this is a quick way to
-  // exercise the switch path without reaching for the mouse.
-  onMount(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      const mod = isMac ? e.metaKey : e.ctrlKey;
-      if (!mod || e.altKey || e.shiftKey) return;
-      if (e.key < "1" || e.key > "9") return;
-      const idx = Number.parseInt(e.key, 10) - 1;
-      const list = projects();
-      const target = list[idx];
-      if (!target) return;
-      e.preventDefault();
-      setActiveProject(target.id);
-    };
-    window.addEventListener("keydown", onKey);
-    onCleanup(() => window.removeEventListener("keydown", onKey));
-  });
+  // T6.3: AppShell installs Cmd/Ctrl+1..9 → switch project on mount, so
+  // the harness no longer needs its own keydown listener. Behaviour is
+  // intentionally different from the inline version that lived here: the
+  // hotkey is suppressed when focus is inside a terminal pane or text
+  // input. Click anywhere outside a pane (e.g. the sidebar) before
+  // pressing the shortcut.
 
   const renderPane = (projectId: string, sessionId: string): JSX.Element => (
     <Terminal
@@ -173,8 +154,8 @@ export function AppShellLiveHarness(): JSX.Element {
         <div class="flex items-center gap-3">
           <div class="font-semibold">AppShell harness (T6.2)</div>
           <div class="text-fg-tertiary">
-            Cmd/Ctrl+1..3 switches projects · sidebar click also works · active:{" "}
-            <span class="text-fg">{headerActiveLabel()}</span>
+            Cmd/Ctrl+1..3 switches projects (click outside a pane first) · sidebar click also works
+            · active: <span class="text-fg">{headerActiveLabel()}</span>
           </div>
         </div>
         <div class="mt-1 text-fg-secondary">
