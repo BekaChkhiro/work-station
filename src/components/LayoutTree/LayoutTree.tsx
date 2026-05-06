@@ -26,6 +26,7 @@
 import { Match, Show, Switch } from "solid-js";
 import type { JSX } from "solid-js";
 import { SplitPane } from "../SplitPane";
+import { Pane } from "../Pane";
 import {
   isPane,
   isSplit,
@@ -46,6 +47,13 @@ export interface LayoutTreeProps {
    *  the split inside the tree — feed it to `updateSplitRatio` and pass
    *  the result back as `node`. */
   onRatioChange?: (path: LayoutPath, ratio: number) => void;
+  /** T5.5 — sessionId of the currently focused pane (controlled). When
+   *  omitted, the focus ring layer is bypassed entirely so legacy callers
+   *  see no visual change. Pair with `onFocusPane` to enable click-to-focus. */
+  focusedSessionId?: string | null;
+  /** T5.5 — fired when a pane is clicked or receives keyboard focus
+   *  (focusin from any descendant). Reduce these into `focusedSessionId`. */
+  onFocusPane?: (sessionId: string) => void;
   /** Internal — accumulates "L"/"R" chars on the recursive descent. The
    *  root call defaults to "". Callers should leave this unset. */
   path?: LayoutPath;
@@ -53,13 +61,36 @@ export interface LayoutTreeProps {
 
 export function LayoutTree(props: LayoutTreeProps): JSX.Element {
   const path = (): LayoutPath => props.path ?? "";
+  // Focus tracking is opt-in: the wrapper only renders when a parent has
+  // wired BOTH ends of the contract. Half-wired (only the state, only the
+  // setter) would result in either a stuck ring or click events that go
+  // nowhere — failing closed keeps the contract self-documenting.
+  const focusEnabled = (): boolean =>
+    props.focusedSessionId !== undefined && props.onFocusPane !== undefined;
+
+  // The Pane wrapper preserves children identity across `focused` prop
+  // changes — flipping focus does NOT remount the Terminal subtree, which
+  // is required to keep T5.4's "100 drags = 1 mount" acceptance intact
+  // even when focus is being toggled in tandem.
+  const renderLeaf = (sessionId: string): JSX.Element => {
+    if (!focusEnabled()) return props.renderPane(sessionId);
+    return (
+      <Pane
+        sessionId={sessionId}
+        focused={props.focusedSessionId === sessionId}
+        onFocus={props.onFocusPane}
+      >
+        {props.renderPane(sessionId)}
+      </Pane>
+    );
+  };
 
   return (
     <Switch>
       <Match when={isPane(props.node) ? (props.node as PaneNode) : null}>
         {(pane) => (
           <Show keyed when={pane().sessionId}>
-            {(sessionId) => props.renderPane(sessionId)}
+            {(sessionId) => renderLeaf(sessionId)}
           </Show>
         )}
       </Match>
@@ -74,6 +105,8 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
                 node={split().children[0]}
                 renderPane={props.renderPane}
                 onRatioChange={props.onRatioChange}
+                focusedSessionId={props.focusedSessionId}
+                onFocusPane={props.onFocusPane}
                 path={path() + "L"}
               />
             }
@@ -82,6 +115,8 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
                 node={split().children[1]}
                 renderPane={props.renderPane}
                 onRatioChange={props.onRatioChange}
+                focusedSessionId={props.focusedSessionId}
+                onFocusPane={props.onFocusPane}
                 path={path() + "R"}
               />
             }

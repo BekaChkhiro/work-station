@@ -332,6 +332,31 @@ button {
   text-align: center;
 }
 
+/* T5.5 — Pane focus ring. Mirrors the prototype's `.pane` / `.pane.focused`
+ * rules in work-station-design/styles.css under the `ws-pane` prefix.
+ * Border-color + inset/outer ring transition together so the focus shift
+ * feels like a single accent pulse rather than two layered effects.
+ */
+.ws-pane {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--bg-terminal);
+  outline: none;
+  transition:
+    border-color 100ms var(--ease, ease),
+    box-shadow 100ms var(--ease, ease);
+}
+.ws-pane[data-focused="true"] {
+  border-color: var(--accent-ring);
+  box-shadow:
+    0 0 0 1px var(--accent-ring) inset,
+    0 0 0 1px var(--accent-soft);
+}
+
 /* T5.3 — TabStrip. Mirrors the prototype's `.tabstrip` rules in
  * work-station-design/styles.css with the `ws-tabstrip__*` prefix so it
  * doesn't collide if the prototype is mounted side-by-side. */
