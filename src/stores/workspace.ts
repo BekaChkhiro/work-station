@@ -103,6 +103,24 @@ export function addProject(meta: ProjectMeta, initial: ProjectWorkspace): void {
   );
 }
 
+/** Update an already-registered project's metadata in place (T6.6).
+ *  No-op when `id` isn't registered. The workspace (layout, focused
+ *  session) is left untouched — only the sidebar-visible fields move. */
+export function updateProjectMeta(id: string, patch: Partial<Omit<ProjectMeta, "id">>): void {
+  setState(
+    produce((s) => {
+      const idx = s.projects.findIndex((p) => p.id === id);
+      if (idx < 0) return;
+      const current = s.projects[idx];
+      if (!current) return;
+      s.projects[idx] = {
+        ...current,
+        ...patch,
+      };
+    }),
+  );
+}
+
 /** Remove a project and its workspace. The caller is responsible for killing
  *  the PTYs referenced by the layout tree before invoking this — the store
  *  doesn't reach into the IPC layer on its own. If `projectId` was active,

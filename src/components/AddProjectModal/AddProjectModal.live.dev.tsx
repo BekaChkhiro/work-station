@@ -34,7 +34,7 @@ export function AddProjectModalLiveHarness(): JSX.Element {
     return path;
   };
 
-  const onCreate = async (value: AddProjectFormValue): Promise<void> => {
+  const onSubmit = async (value: AddProjectFormValue): Promise<void> => {
     await new Promise((r) => setTimeout(r, 250));
     if (forceError()) {
       throw new Error('A project named "' + value.name + '" already exists.');
@@ -88,7 +88,7 @@ export function AddProjectModalLiveHarness(): JSX.Element {
         open={open()}
         onClose={() => setOpen(false)}
         onPickFolder={onPickFolder}
-        onCreate={onCreate}
+        onSubmit={onSubmit}
       />
     </div>
   );

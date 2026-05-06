@@ -12,8 +12,14 @@
 // element stays in the DOM and CSS hides the labels in the collapsed
 // state, so the panel's width transition carries the visual change end-
 // to-end.
+//
+// T6.6 additions: each row exposes a hover-only pencil icon that fires
+// `onEdit(id)`, and right-clicking the row fires `onContextMenu(id, x, y)`
+// so the parent can render the project context menu at viewport coords.
+// Both are no-ops when their respective callbacks aren't wired so the
+// component still reads cleanly in earlier-phase harnesses.
 
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import type { JSX } from "solid-js";
 
 export interface SidebarProject {
@@ -35,6 +41,13 @@ export interface SidebarProps {
   collapsed?: boolean;
   /** Fires when a project row is activated (click or Enter/Space). */
   onActivate?(id: string): void;
+  /** Fires when the inline pencil-icon button is pressed (visible on
+   *  hover). The parent typically opens the Edit modal. */
+  onEdit?(id: string): void;
+  /** Fires when the row is right-clicked. The parent decides whether to
+   *  open a context menu and where to anchor it. Coordinates are in
+   *  viewport space (clientX / clientY). */
+  onContextMenu?(id: string, x: number, y: number): void;
   /** Fires when "New project" is pressed. */
   onAdd?(): void;
   /** Fires when the footer settings cog is pressed. */
@@ -86,7 +99,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
           {(p) => {
             const isActive = (): boolean => p.id === props.activeId;
             return (
-              <li>
+              <li class="ws-sb__row-host">
                 <button
                   type="button"
                   class="ws-sb__row"
@@ -96,6 +109,11 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                   title={isCollapsed() ? p.name : undefined}
                   onClick={() => props.onActivate?.(p.id)}
                   onKeyDown={(e) => handleRowKey(e, p.id)}
+                  onContextMenu={(e) => {
+                    if (!props.onContextMenu) return;
+                    e.preventDefault();
+                    props.onContextMenu(p.id, e.clientX, e.clientY);
+                  }}
                 >
                   <span class="ws-sb__icon" style={{ background: p.color }} aria-hidden="true">
                     {p.glyph}
@@ -117,6 +135,20 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                     )}
                   </span>
                 </button>
+                <Show when={props.onEdit && !isCollapsed()}>
+                  <button
+                    type="button"
+                    class="ws-sb__row-edit"
+                    aria-label={`Edit ${p.name}`}
+                    title="Edit project"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onEdit?.(p.id);
+                    }}
+                  >
+                    <IconPencil size={12} />
+                  </button>
+                </Show>
               </li>
             );
           }}
@@ -179,6 +211,25 @@ function IconCog(props: { size?: number }): JSX.Element {
     >
       <circle cx="7" cy="7" r="2.2" />
       <path d="M7 1.5 V3 M7 11 V12.5 M1.5 7 H3 M11 7 H12.5 M2.6 2.6 L3.7 3.7 M10.3 10.3 L11.4 11.4 M2.6 11.4 L3.7 10.3 M10.3 3.7 L11.4 2.6" />
+    </svg>
+  );
+}
+
+function IconPencil(props: { size?: number }): JSX.Element {
+  return (
+    <svg
+      width={props.size ?? 12}
+      height={props.size ?? 12}
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.3"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8.2 1.6 L10.4 3.8 L4 10.2 L1.5 10.5 L1.8 8 z" />
+      <path d="M7.4 2.4 L9.6 4.6" />
     </svg>
   );
 }

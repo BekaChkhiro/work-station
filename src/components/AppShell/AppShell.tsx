@@ -43,6 +43,12 @@ export interface AppShellProps {
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
   onAddProject?: () => void;
+  /** T6.6 — fires when the inline pencil-icon button on a sidebar row
+   *  is pressed. The parent typically opens the project Edit modal. */
+  onEditProject?: (projectId: string) => void;
+  /** T6.6 — fires when a sidebar row is right-clicked. The parent owns
+   *  the context-menu state and decides where to anchor it. */
+  onProjectContextMenu?: (projectId: string, x: number, y: number) => void;
   onOpenSettings?: () => void;
   /** Placeholder rendered when a project has no layout (no panes). The
    *  caller can return a "spawn first pane" CTA, an empty illustration,
@@ -99,6 +105,8 @@ export function AppShell(props: AppShellProps): JSX.Element {
         collapsed={props.sidebarCollapsed === true}
         onActivate={(id) => setActiveProject(id)}
         onAdd={() => props.onAddProject?.()}
+        onEdit={props.onEditProject}
+        onContextMenu={props.onProjectContextMenu}
         onSettings={() => props.onOpenSettings?.()}
         onToggleCollapse={() => props.onToggleSidebar?.()}
         newProjectShortcut="⌘N"

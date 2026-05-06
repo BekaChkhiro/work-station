@@ -1283,3 +1283,225 @@ button {
   padding: 0 8px;
   font-size: 11.5px;
 }
+/* T6.6 — destructive footer text-button on the Edit modal. Sits flush
+ * left in the footer, with the spacer pushing Cancel + Save to the right. */
+.ws-apm__foot-spacer {
+  flex: 1;
+}
+.ws-apm__btn--danger-text {
+  background: transparent;
+  border-color: transparent;
+  color: var(--error);
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.ws-apm__btn--danger-text:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+}
+.ws-apm__btn--danger-text:focus-visible {
+  outline: 1px solid var(--error);
+  outline-offset: 1px;
+}
+/* T6.6 — solid red destructive button used in DeleteProjectConfirm. */
+.ws-apm__btn--danger {
+  position: relative;
+  overflow: hidden;
+  background: var(--error);
+  color: #fff;
+  border-color: transparent;
+}
+.ws-apm__btn--danger:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+.ws-apm__btn--danger:disabled {
+  opacity: 1;
+  background: color-mix(in srgb, var(--error) 55%, var(--bg-surface));
+  color: rgba(255, 255, 255, 0.85);
+  cursor: not-allowed;
+}
+
+/* T6.6 — Delete project confirm modal. Smaller (420px), centred, opened
+ * on top of the Edit modal. The Delete button has a 500ms safety delay
+ * with a progress fill that sweeps left → right before the button arms. */
+.ws-dpc__backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-canvas) 60%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 240;
+  animation: wsApmFade 120ms var(--ease);
+}
+.ws-dpc {
+  width: min(420px, calc(100vw - 32px));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: wsApmPop 180ms var(--ease);
+}
+.ws-dpc__body {
+  padding: 22px 24px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ws-dpc__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ws-dpc__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.ws-dpc__copy p {
+  margin: 0;
+}
+.ws-dpc__copy-warn {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.ws-dpc__foot {
+  padding: 12px 18px 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.ws-dpc__btn-fill {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.18);
+  transform-origin: left center;
+  transform: scaleX(0);
+  pointer-events: none;
+}
+.ws-dpc .ws-apm__btn--danger:not([data-armed="true"]) .ws-dpc__btn-fill {
+  animation: wsDpcArm var(--ws-dpc-delay, 500ms) linear forwards;
+}
+.ws-dpc .ws-apm__btn--danger[data-armed="true"] .ws-dpc__btn-fill {
+  display: none;
+}
+.ws-dpc__btn-label {
+  position: relative;
+  z-index: 1;
+}
+@keyframes wsDpcArm {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* T6.6 — sidebar row: pencil icon visible on hover, project context menu. */
+.ws-sb__row-host {
+  position: relative;
+}
+.ws-sb__row-edit {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  cursor: default;
+  pointer-events: none;
+  transition:
+    opacity 120ms var(--ease, ease),
+    background 120ms var(--ease, ease),
+    color 120ms var(--ease, ease);
+}
+.ws-sb__row-host:hover .ws-sb__row-edit,
+.ws-sb__row-edit:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ws-sb__row-edit:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+.ws-sb__row-edit:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: -1px;
+}
+/* While the pencil is visible, hide the meta column so the badge doesn't
+ * collide with it. The host's hover state covers both the row button and
+ * the floating pencil so this stays stable while the cursor sits on
+ * either. */
+.ws-sb__row-host:hover .ws-sb__row .ws-sb__meta {
+  opacity: 0;
+}
+.ws-sb[data-collapsed="true"] .ws-sb__row-edit {
+  display: none;
+}
+
+.ws-pcm {
+  position: fixed;
+  z-index: 250;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-popover);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: wsPcmPop 110ms var(--ease, ease);
+}
+@keyframes wsPcmPop {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ws-pcm__item {
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 6px 10px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: default;
+  display: flex;
+  align-items: center;
+}
+.ws-pcm__item[data-highlighted="true"] {
+  background: var(--bg-hover);
+}
+.ws-pcm__item[data-danger="true"] {
+  color: var(--error);
+}
+.ws-pcm__item[data-danger="true"][data-highlighted="true"] {
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+}
+.ws-pcm__sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-subtle);
+}
