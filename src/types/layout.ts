@@ -193,6 +193,72 @@ export function splitPaneAt(
   return node;
 }
 
+export interface ClosePaneResult {
+  /** The new tree, or `null` when the closed pane was the only one left. The
+   *  caller maps `null` to `EMPTY_LAYOUT` (or "tab is empty") at the
+   *  layout-state boundary. */
+  tree: LayoutNode | null;
+  /** Sibling pane's sessionId to focus after the close, or `null` when the
+   *  pane wasn't found OR the closed pane was the last one. The renderer
+   *  uses this to refocus without traversing the new tree itself. */
+  nextFocusSessionId: string | null;
+}
+
+function leftmostPaneId(node: LayoutNode): string {
+  if (isPane(node)) return node.sessionId;
+  return leftmostPaneId(node.children[0]);
+}
+
+/** T5.7 — remove the pane with `targetSessionId` from the tree.
+ *
+ *  Behaviour per the project plan acceptance:
+ *    • Closing one child of a split collapses the split: the surviving
+ *      sibling subtree replaces the split entirely, and `nextFocusSessionId`
+ *      points at that sibling's leftmost pane so the caller can refocus.
+ *    • Closing the only pane in the tree returns `tree: null` —
+ *      "tab is empty"; the caller decides whether to close the tab.
+ *    • If `targetSessionId` isn't present, the input tree is returned by
+ *      reference and `nextFocusSessionId` is `null`. Untouched subtrees
+ *      keep their references so the renderer (T5.4) doesn't remount
+ *      unrelated panes when a sibling closes. */
+export function closePaneAt(node: LayoutNode, targetSessionId: string): ClosePaneResult {
+  if (isPane(node)) {
+    return node.sessionId === targetSessionId
+      ? { tree: null, nextFocusSessionId: null }
+      : { tree: node, nextFocusSessionId: null };
+  }
+
+  const [left, right] = node.children;
+  const leftResult = closePaneAt(left, targetSessionId);
+  if (leftResult.tree !== left) {
+    // Left child collapsed entirely → the split disappears with it; right
+    // sibling is promoted in place. nextFocus jumps to that sibling's
+    // leftmost pane so a closed pane never strands focus on a dead id.
+    if (leftResult.tree === null) {
+      return { tree: right, nextFocusSessionId: leftmostPaneId(right) };
+    }
+    // Left subtree changed but still exists — reuse the recursion's
+    // nextFocus (it already picked a surviving pane inside `left`).
+    return {
+      tree: { ...node, children: [leftResult.tree, right] },
+      nextFocusSessionId: leftResult.nextFocusSessionId,
+    };
+  }
+
+  const rightResult = closePaneAt(right, targetSessionId);
+  if (rightResult.tree !== right) {
+    if (rightResult.tree === null) {
+      return { tree: left, nextFocusSessionId: leftmostPaneId(left) };
+    }
+    return {
+      tree: { ...node, children: [left, rightResult.tree] },
+      nextFocusSessionId: rightResult.nextFocusSessionId,
+    };
+  }
+
+  return { tree: node, nextFocusSessionId: null };
+}
+
 /** Parse a `sessions.layout_json` value. Returns `EMPTY_LAYOUT` on any failure. */
 export function parseLayoutJson(raw: string | null | undefined): Layout {
   if (!raw) return EMPTY_LAYOUT;

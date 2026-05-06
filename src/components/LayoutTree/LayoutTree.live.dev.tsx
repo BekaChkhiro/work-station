@@ -15,6 +15,10 @@
 //     Buttons in the toolbar invoke the same actions. The new pane
 //     spawns in the focused pane's tracked cwd — verify the prompt
 //     appears at the same path as the parent pane.
+//   • T5.7: ⌘W (or Ctrl+W) closes the focused pane. The PTY is killed
+//     (T2.8 graceful shutdown), the enclosing split collapses, and
+//     focus jumps to the sibling's leftmost pane. Closing the last
+//     pane drops the tree into an empty-state placeholder.
 //
 // Reachable via `?wsdebug=layouttree` in dev builds.
 
@@ -24,6 +28,7 @@ import { LayoutTree } from "./LayoutTree";
 import { Terminal } from "../Terminal/Terminal";
 import { ptyKill, ptySpawn } from "../../ipc/pty";
 import {
+  closePaneAt,
   paneNode,
   splitNode,
   splitPaneAt,
@@ -142,12 +147,19 @@ export function LayoutTreeLiveHarness() {
   // T5.6 — track sessionIds spawned by split actions so they're killed on
   // harness unmount alongside the initial three. Initial sessions live in
   // `killOnUnmount`; split-spawned ones get appended to `splitSessions` and
-  // both lists are drained in onCleanup.
+  // both lists are drained in onCleanup. Both lists are mutated in place
+  // when a pane is closed via T5.7 so we don't double-kill on unmount.
   const splitSessions: string[] = [];
+  let killOnUnmount: string[] = [];
+
+  const dropFromKillLists = (sessionId: string): void => {
+    const i = killOnUnmount.indexOf(sessionId);
+    if (i !== -1) killOnUnmount.splice(i, 1);
+    const j = splitSessions.indexOf(sessionId);
+    if (j !== -1) splitSessions.splice(j, 1);
+  };
 
   onMount(() => {
-    let killOnUnmount: string[] = [];
-
     if (typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)) {
       setState({
         kind: "failed",
@@ -263,17 +275,50 @@ export function LayoutTreeLiveHarness() {
     setFocusedSessionId(newId);
   };
 
+  // T5.7 — close the currently focused pane. Pure-function `closePaneAt`
+  // computes the new tree and the sibling pane to refocus (or null when
+  // the closed pane was the last one in the tree). The PTY is killed via
+  // T2.8's graceful shutdown only AFTER the layout state updates, so the
+  // renderer never tries to wire keystrokes to a half-dead session.
+  const closeFocused = async (): Promise<void> => {
+    const targetId = focusedSessionId();
+    const current = tree();
+    if (!targetId || !current) return;
+    const result = closePaneAt(current, targetId);
+    // Pane wasn't in the tree (shouldn't happen given focus tracking, but
+    // bail rather than fire ptyKill on an id we don't actually own).
+    if (result.tree === current) return;
+    setTree(result.tree);
+    setFocusedSessionId(result.nextFocusSessionId);
+    cwdBySessionId.delete(targetId);
+    dropFromKillLists(targetId);
+    // Best-effort kill — the PTY is already orphaned from the layout, so
+    // failures here just mean the child outlives the harness for a moment.
+    void ptyKill(targetId).catch((error) => {
+      console.error("[layouttree harness] close kill failed", error);
+    });
+  };
+
   // ⌘\ (mac) / Ctrl+\ (others) → vertical split (new pane to the right).
-  // ⌘⇧\ / Ctrl+Shift+\ → horizontal split (new pane below). Listening on
-  // the window so the binding works regardless of which pane has focus —
-  // xterm's textarea would otherwise swallow the keystroke before any
-  // pane-level handler ran.
+  // ⌘⇧\ / Ctrl+Shift+\ → horizontal split (new pane below). ⌘W / Ctrl+W
+  // closes the focused pane (T5.7). Listening on the window so the
+  // binding works regardless of which pane has focus — xterm's textarea
+  // would otherwise swallow the keystroke before any pane-level handler ran.
   onMount(() => {
     const onKey = (e: KeyboardEvent): void => {
       const mod = isMac ? e.metaKey : e.ctrlKey;
-      if (!mod || e.key !== "\\") return;
-      e.preventDefault();
-      void splitFocused(e.shiftKey ? "v" : "h");
+      if (!mod) return;
+      if (e.key === "\\") {
+        e.preventDefault();
+        void splitFocused(e.shiftKey ? "v" : "h");
+        return;
+      }
+      // Match by lowercase so Cmd+Shift+W (which produces "W") also
+      // closes — keeps the binding forgiving without adding a second case.
+      if (e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        void closeFocused();
+      }
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
@@ -363,6 +408,15 @@ export function LayoutTreeLiveHarness() {
               horizontal
             </button>
           </div>
+          <button
+            type="button"
+            class="rounded border border-border-default px-2 py-1 hover:bg-bg-hover"
+            onClick={() => void closeFocused()}
+            disabled={state().kind !== "ready" || focusedSessionId() === null || tree() === null}
+            title={isMac ? "⌘W" : "Ctrl+W"}
+          >
+            close pane
+          </button>
           <div class="ml-auto flex gap-3 font-mono text-fg-secondary">
             <span>
               focus:{" "}
@@ -392,6 +446,11 @@ export function LayoutTreeLiveHarness() {
                 <div class="p-3 text-xs text-danger">Spawn failed: {failed().message}</div>
               )}
             </Show>
+          </Match>
+          <Match when={state().kind === "ready" && tree() === null}>
+            <div class="flex h-full items-center justify-center p-4 text-xs text-fg-secondary">
+              No panes — pick a layout above to repopulate the tree.
+            </div>
           </Match>
           <Match when={state().kind === "ready" && tree() !== null}>
             <Show when={tree()}>
