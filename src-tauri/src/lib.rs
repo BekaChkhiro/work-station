@@ -72,6 +72,7 @@ pub fn run() {
             commands::projects::project_create,
             commands::projects::project_update,
             commands::projects::project_delete,
+            commands::projects::project_reorder,
             commands::picker::pick_project_folder,
         ])
         .run(tauri::generate_context!())

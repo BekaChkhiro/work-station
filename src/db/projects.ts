@@ -82,6 +82,13 @@ export async function deleteProject(id: string): Promise<void> {
   await invoke("project_delete", { args: { id } });
 }
 
+/** T6.7: persist a new sidebar order. `ids` must list every project exactly
+ *  once — the backend reassigns `position = idx` inside a single SQLite
+ *  transaction. */
+export async function reorderProjects(ids: string[]): Promise<void> {
+  await invoke("project_reorder", { args: { ids } });
+}
+
 // Normalize undefined → null so the Rust side sees a consistent shape.
 // `env` and `startupCommands` default to empty so the backend never has to
 // special-case missing.

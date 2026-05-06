@@ -18,8 +18,17 @@
 // so the parent can render the project context menu at viewport coords.
 // Both are no-ops when their respective callbacks aren't wired so the
 // component still reads cleanly in earlier-phase harnesses.
+//
+// T6.7 additions: a hover-revealed grip handle on the left edge of each
+// row drags the project to a new sidebar position. Mirrors the TabStrip
+// (T5.3) reorder pattern — pointer events + pointer capture, with an
+// insertion bar shown between rows during drag. On pointerup the parent
+// receives `onReorder(nextIds)` with the full reordered id list and is
+// expected to (a) persist it and (b) update its source-of-truth so the
+// next render reflects the new order. The dragged row floats up by 2px
+// with a popover shadow during the drag for tactile feedback.
 
-import { For, Show } from "solid-js";
+import { For, Show, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
 
 export interface SidebarProject {
@@ -48,6 +57,11 @@ export interface SidebarProps {
    *  open a context menu and where to anchor it. Coordinates are in
    *  viewport space (clientX / clientY). */
   onContextMenu?(id: string, x: number, y: number): void;
+  /** T6.7 — fires on pointerup after a successful drag-to-reorder. The
+   *  payload is the full list of project ids in their new order. The
+   *  parent owns persistence (DB `position` column) and must update its
+   *  state so the next render of `projects` reflects the new order. */
+  onReorder?(nextIds: string[]): void;
   /** Fires when "New project" is pressed. */
   onAdd?(): void;
   /** Fires when the footer settings cog is pressed. */
@@ -58,10 +72,45 @@ export interface SidebarProps {
   newProjectShortcut?: string;
 }
 
+interface RowRect {
+  id: string;
+  top: number;
+  bottom: number;
+}
+
+interface DragState {
+  pointerId: number;
+  fromIndex: number;
+  startClientY: number;
+  /** Row rects in list-container coordinates (top-left of `.ws-sb__list`),
+   *  captured at drag start so the math doesn't drift if the list scrolls
+   *  mid-drag. */
+  rects: RowRect[];
+  /** Cumulative pointer delta along Y, in pixels. */
+  deltaY: number;
+  /** Nullable until the pointer has moved past the slop threshold; lets
+   *  click-on-grip stay clickable without triggering a phantom reorder. */
+  insertionIndex: number | null;
+}
+
 const NAV_ID = "ws-sb-nav";
+const DRAG_SLOP_PX = 4;
+const DRAG_LIFT_PX = 2;
 
 export function Sidebar(props: SidebarProps): JSX.Element {
   const isCollapsed = (): boolean => props.collapsed === true;
+
+  let listEl!: HTMLUListElement;
+  // Row LIs registered via ref callback. Order matches `props.projects`
+  // because Solid's `<For>` invokes refs in render order.
+  const rowEls = new Map<string, HTMLLIElement>();
+
+  const [drag, setDrag] = createSignal<DragState | null>(null);
+  // Set when a drag actually moved past the slop threshold; consulted by
+  // the row button's onClick to suppress the synthetic click that follows
+  // pointerup. Cleared on the next pointerdown. We can't use `drag()`
+  // here — endDrag clears it before the click fires.
+  let didDrag = false;
 
   // Native <button> handles Enter via `click`, but Space on a focused button
   // also scrolls the document by default. Suppress that one case so list
@@ -73,11 +122,110 @@ export function Sidebar(props: SidebarProps): JSX.Element {
     }
   };
 
+  // Pointer handlers live on the row's <li> rather than the grip span so
+  // pointer capture survives the grip unmounting mid-drag (e.g. when
+  // `onReorder` becomes undefined or the sidebar collapses). The grip is
+  // only the *visual* handle — beginDrag verifies the original target was
+  // inside `.ws-sb__grip` so dragging from anywhere else on the row is a
+  // no-op.
+  const beginDrag = (e: PointerEvent, index: number): void => {
+    if (e.button !== 0) return;
+    if (!props.onReorder) return;
+    if (isCollapsed()) return;
+    if (!(e.target instanceof Element)) return;
+    if (!e.target.closest(".ws-sb__grip")) return;
+    const host = e.currentTarget;
+    if (!(host instanceof HTMLElement)) return;
+
+    didDrag = false;
+
+    const containerRect = listEl.getBoundingClientRect();
+    const rects: RowRect[] = props.projects.map((p) => {
+      const el = rowEls.get(p.id);
+      if (!el) return { id: p.id, top: 0, bottom: 0 };
+      const r = el.getBoundingClientRect();
+      return {
+        id: p.id,
+        top: r.top - containerRect.top + listEl.scrollTop,
+        bottom: r.bottom - containerRect.top + listEl.scrollTop,
+      };
+    });
+
+    host.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    setDrag({
+      pointerId: e.pointerId,
+      fromIndex: index,
+      startClientY: e.clientY,
+      rects,
+      deltaY: 0,
+      insertionIndex: null,
+    });
+  };
+
+  const moveDrag = (e: PointerEvent): void => {
+    const d = drag();
+    if (!d || e.pointerId !== d.pointerId) return;
+    const deltaY = e.clientY - d.startClientY;
+    if (Math.abs(deltaY) < DRAG_SLOP_PX && d.insertionIndex === null) {
+      setDrag({ ...d, deltaY });
+      return;
+    }
+    didDrag = true;
+    const containerRect = listEl.getBoundingClientRect();
+    const pointerInContainer = e.clientY - containerRect.top + listEl.scrollTop;
+    const insertionIndex = computeInsertionIndex(d.rects, d.fromIndex, pointerInContainer);
+    setDrag({ ...d, deltaY, insertionIndex });
+  };
+
+  const endDrag = (e: PointerEvent): void => {
+    const d = drag();
+    if (!d || e.pointerId !== d.pointerId) return;
+    const host = e.currentTarget;
+    if (host instanceof HTMLElement && host.hasPointerCapture(d.pointerId)) {
+      host.releasePointerCapture(d.pointerId);
+    }
+    const insertion = d.insertionIndex;
+    setDrag(null);
+    if (insertion === null || insertion === d.fromIndex || insertion === d.fromIndex + 1) return;
+    const next = reorderIds(props.projects, d.fromIndex, insertion);
+    props.onReorder?.(next);
+  };
+
+  // Drop the drag signal if the sidebar unmounts mid-drag so a re-mount
+  // doesn't pick up phantom drag state. The browser releases pointer
+  // capture automatically when the captured element is removed from the
+  // DOM, so there's no listener leak to clean up here.
+  onCleanup(() => {
+    setDrag(null);
+  });
+
+  const rowStyle = (index: number): JSX.CSSProperties => {
+    const d = drag();
+    if (!d || d.fromIndex !== index) return {};
+    return {
+      transform: `translateY(${d.deltaY - DRAG_LIFT_PX}px)`,
+      "z-index": 2,
+      "box-shadow": "var(--shadow-popover)",
+      "border-radius": "var(--r-md)",
+    };
+  };
+
+  const indicatorStyle = (): JSX.CSSProperties | null => {
+    const d = drag();
+    if (!d || d.insertionIndex === null) return null;
+    if (d.insertionIndex === d.fromIndex || d.insertionIndex === d.fromIndex + 1) return null;
+    const yInContainer = gapCenter(d.rects, d.insertionIndex);
+    if (yInContainer === null) return null;
+    return { top: `${yInContainer - listEl.scrollTop}px` };
+  };
+
   return (
     <nav
       id={NAV_ID}
       class="ws-sb"
       data-collapsed={isCollapsed() ? "true" : undefined}
+      data-dragging={drag() ? "true" : undefined}
       aria-label="Projects"
     >
       <div class="ws-sb__section">
@@ -94,12 +242,32 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         </button>
       </div>
 
-      <ul class="ws-sb__list" role="list">
+      <ul ref={listEl} class="ws-sb__list" role="list">
         <For each={props.projects}>
-          {(p) => {
+          {(p, index) => {
             const isActive = (): boolean => p.id === props.activeId;
+            const isDragging = (): boolean => drag()?.fromIndex === index();
             return (
-              <li class="ws-sb__row-host">
+              <li
+                ref={(el) => {
+                  rowEls.set(p.id, el);
+                  onCleanup(() => {
+                    if (rowEls.get(p.id) === el) rowEls.delete(p.id);
+                  });
+                }}
+                class="ws-sb__row-host"
+                data-dragging={isDragging() ? "true" : undefined}
+                style={rowStyle(index())}
+                onPointerDown={(e) => beginDrag(e, index())}
+                onPointerMove={moveDrag}
+                onPointerUp={endDrag}
+                onPointerCancel={endDrag}
+              >
+                <Show when={props.onReorder && !isCollapsed()}>
+                  <span class="ws-sb__grip" title="Drag to reorder" aria-hidden="true">
+                    <IconGrip />
+                  </span>
+                </Show>
                 <button
                   type="button"
                   class="ws-sb__row"
@@ -107,7 +275,16 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                   aria-current={isActive() ? "page" : undefined}
                   aria-label={`Switch to ${p.name}`}
                   title={isCollapsed() ? p.name : undefined}
-                  onClick={() => props.onActivate?.(p.id)}
+                  onClick={() => {
+                    // Suppress the synthetic click that follows pointerup
+                    // when the user actually dragged. didDrag is set in
+                    // moveDrag once the slop threshold trips.
+                    if (didDrag) {
+                      didDrag = false;
+                      return;
+                    }
+                    props.onActivate?.(p.id);
+                  }}
                   onKeyDown={(e) => handleRowKey(e, p.id)}
                   onContextMenu={(e) => {
                     if (!props.onContextMenu) return;
@@ -153,6 +330,9 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             );
           }}
         </For>
+        <Show when={indicatorStyle()}>
+          {(s) => <div class="ws-sb__indicator" aria-hidden="true" style={s()} />}
+        </Show>
       </ul>
 
       <div class="ws-sb__footer">
@@ -181,6 +361,51 @@ export function Sidebar(props: SidebarProps): JSX.Element {
       </div>
     </nav>
   );
+}
+
+function reorderIds(
+  projects: SidebarProject[],
+  fromIndex: number,
+  insertionIndex: number,
+): string[] {
+  const ids = projects.map((p) => p.id);
+  const [moved] = ids.splice(fromIndex, 1);
+  if (moved === undefined) return projects.map((p) => p.id);
+  const adjusted = insertionIndex > fromIndex ? insertionIndex - 1 : insertionIndex;
+  ids.splice(adjusted, 0, moved);
+  return ids;
+}
+
+function computeInsertionIndex(rects: RowRect[], fromIndex: number, pointerY: number): number {
+  let bestIndex = fromIndex;
+  let bestDist = Infinity;
+  for (let i = 0; i <= rects.length; i++) {
+    if (i === fromIndex || i === fromIndex + 1) continue;
+    const center = gapCenter(rects, i);
+    if (center === null) continue;
+    const dist = Math.abs(pointerY - center);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+
+function gapCenter(rects: RowRect[], index: number): number | null {
+  if (rects.length === 0) return null;
+  if (index <= 0) {
+    const first = rects[0];
+    return first ? first.top : null;
+  }
+  if (index >= rects.length) {
+    const last = rects[rects.length - 1];
+    return last ? last.bottom : null;
+  }
+  const before = rects[index - 1];
+  const after = rects[index];
+  if (!before || !after) return null;
+  return (before.bottom + after.top) / 2;
 }
 
 function IconPlus(props: { size?: number }): JSX.Element {
@@ -230,6 +455,24 @@ function IconPencil(props: { size?: number }): JSX.Element {
     >
       <path d="M8.2 1.6 L10.4 3.8 L4 10.2 L1.5 10.5 L1.8 8 z" />
       <path d="M7.4 2.4 L9.6 4.6" />
+    </svg>
+  );
+}
+
+// 6×6 grip-dots (two columns of three) — matches the sketch in
+// PROJECT_PLAN.md T6.7. Pure presentational; the host span carries the
+// pointer handlers and the role.
+function IconGrip(): JSX.Element {
+  return (
+    <svg width="6" height="10" viewBox="0 0 6 10" aria-hidden="true">
+      <g fill="currentColor">
+        <circle cx="1.25" cy="1.5" r="0.9" />
+        <circle cx="4.75" cy="1.5" r="0.9" />
+        <circle cx="1.25" cy="5" r="0.9" />
+        <circle cx="4.75" cy="5" r="0.9" />
+        <circle cx="1.25" cy="8.5" r="0.9" />
+        <circle cx="4.75" cy="8.5" r="0.9" />
+      </g>
     </svg>
   );
 }

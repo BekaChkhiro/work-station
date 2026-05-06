@@ -1454,6 +1454,62 @@ button {
   display: none;
 }
 
+/* T6.7 — drag-to-reorder grip + insertion indicator. */
+.ws-sb__list {
+  position: relative;
+}
+.ws-sb__grip {
+  position: absolute;
+  left: -2px;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  display: grid;
+  place-items: center;
+  color: var(--text-tertiary);
+  opacity: 0;
+  cursor: grab;
+  touch-action: none;
+  transition: opacity 120ms var(--ease, ease);
+  z-index: 1;
+}
+.ws-sb__row-host:hover .ws-sb__grip {
+  opacity: 0.7;
+}
+.ws-sb__grip:hover {
+  opacity: 1;
+}
+.ws-sb__row-host[data-dragging="true"] .ws-sb__grip,
+.ws-sb[data-dragging="true"] .ws-sb__grip {
+  cursor: grabbing;
+}
+.ws-sb__row-host[data-dragging="true"] {
+  position: relative;
+  transition:
+    transform var(--dur-base, 150ms) var(--ease, ease),
+    box-shadow 120ms var(--ease, ease);
+}
+.ws-sb__indicator {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  transform: translateY(-1px);
+  z-index: 3;
+}
+/* While a drag is in flight, suppress the hover-revealed pencil so the
+ * grip + insertion bar are the only affordances on screen. */
+.ws-sb[data-dragging="true"] .ws-sb__row-edit {
+  opacity: 0;
+  pointer-events: none;
+}
+.ws-sb[data-collapsed="true"] .ws-sb__grip {
+  display: none;
+}
+
 .ws-pcm {
   position: fixed;
   z-index: 250;

@@ -145,6 +145,31 @@ export function removeProject(projectId: string): void {
   );
 }
 
+/** T6.7: rearrange the registered project list to match `nextIds`. The list
+ *  must be a permutation of the currently-registered ids — extra ids,
+ *  missing ids, or duplicates are no-ops so an out-of-sync caller can't
+ *  silently drop projects from the sidebar. The persistence side (DB
+ *  position column) is the caller's responsibility; this only moves the
+ *  in-memory order so the Sidebar reflects the drop immediately. */
+export function reorderProjects(nextIds: string[]): void {
+  const current = state.projects;
+  if (nextIds.length !== current.length) return;
+  const seen = new Set<string>();
+  for (const id of nextIds) {
+    if (seen.has(id)) return;
+    seen.add(id);
+  }
+  const byId = new Map<string, ProjectMeta>();
+  for (const p of current) byId.set(p.id, p);
+  const next: ProjectMeta[] = [];
+  for (const id of nextIds) {
+    const meta = byId.get(id);
+    if (!meta) return;
+    next.push(meta);
+  }
+  setState("projects", next);
+}
+
 /** Switch the active project. No-op if `projectId` isn't registered or is
  *  already active. */
 export function setActiveProject(projectId: string): void {

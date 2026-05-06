@@ -49,6 +49,11 @@ export interface AppShellProps {
   /** T6.6 — fires when a sidebar row is right-clicked. The parent owns
    *  the context-menu state and decides where to anchor it. */
   onProjectContextMenu?: (projectId: string, x: number, y: number) => void;
+  /** T6.7 — fires after a sidebar drag-to-reorder lands. The payload is
+   *  the full project id list in its new order. The parent persists the
+   *  ordering (DB `position` column) and updates the workspace store so
+   *  the next render reflects the change. */
+  onReorderProjects?: (nextIds: string[]) => void;
   onOpenSettings?: () => void;
   /** Placeholder rendered when a project has no layout (no panes). The
    *  caller can return a "spawn first pane" CTA, an empty illustration,
@@ -107,6 +112,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
         onAdd={() => props.onAddProject?.()}
         onEdit={props.onEditProject}
         onContextMenu={props.onProjectContextMenu}
+        onReorder={props.onReorderProjects}
         onSettings={() => props.onOpenSettings?.()}
         onToggleCollapse={() => props.onToggleSidebar?.()}
         newProjectShortcut="⌘N"
