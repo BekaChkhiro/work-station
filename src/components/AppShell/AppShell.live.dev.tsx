@@ -30,6 +30,7 @@ import {
   createProject,
   deleteProject,
   listProjects,
+  reorderProjects,
   updateProject,
   type Project,
 } from "../../db/projects";
@@ -40,6 +41,7 @@ import {
   getWorkspace,
   projects,
   removeProject,
+  reorderProjects as reorderProjectsLocal,
   setActiveProject,
   setLayout,
   updateProjectMeta,
@@ -301,6 +303,28 @@ export function AppShellLiveHarness(): JSX.Element {
     setEditTarget(null);
   };
 
+  // Generation token for in-flight reorders. Bumped on each new drop so
+  // that if drop A's IPC fails after drop B has already issued, A's
+  // rollback is suppressed — otherwise we'd stomp B's optimistic state
+  // back to A's pre-drop snapshot, leaving the UI desynced from the DB.
+  let reorderGeneration = 0;
+
+  const handleReorder = async (nextIds: string[]): Promise<void> => {
+    const generation = ++reorderGeneration;
+    const prev = projects().map((p) => p.id);
+    reorderProjectsLocal(nextIds);
+    try {
+      await reorderProjects(nextIds);
+    } catch (err) {
+      // Only roll back if no newer drop has landed since this one. If a
+      // later drop superseded us, its own commit/rollback owns the truth.
+      if (reorderGeneration === generation) {
+        reorderProjectsLocal(prev);
+        setActionError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  };
+
   const handleReveal = async (projectId: string): Promise<void> => {
     const path = projectPaths[projectId];
     if (!path) {
@@ -366,6 +390,7 @@ export function AppShellLiveHarness(): JSX.Element {
               onProjectContextMenu={(id, x, y) =>
                 setContextTarget({ projectId: id, position: { x, y } })
               }
+              onReorderProjects={(ids) => void handleReorder(ids)}
             />
           </Match>
         </Switch>

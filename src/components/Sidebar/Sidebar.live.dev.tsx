@@ -19,6 +19,7 @@ const DEMO_PROJECTS: SidebarProject[] = [
 ];
 
 export function SidebarLiveHarness(): JSX.Element {
+  const [projects, setProjects] = createSignal<SidebarProject[]>(DEMO_PROJECTS);
   const [activeId, setActiveId] = createSignal<string>("argon");
   const [collapsed, setCollapsed] = createSignal(false);
   const [lastEvent, setLastEvent] = createSignal<string>("—");
@@ -47,7 +48,7 @@ export function SidebarLiveHarness(): JSX.Element {
         </div>
       </div>
       <Sidebar
-        projects={DEMO_PROJECTS}
+        projects={projects()}
         activeId={activeId()}
         collapsed={collapsed()}
         newProjectShortcut="⌘N"
@@ -60,6 +61,11 @@ export function SidebarLiveHarness(): JSX.Element {
         onToggleCollapse={() => {
           setCollapsed((c) => !c);
           setLastEvent("toggleCollapse");
+        }}
+        onReorder={(nextIds) => {
+          const byId = new Map(projects().map((p) => [p.id, p]));
+          setProjects(nextIds.map((id) => byId.get(id)).filter((p): p is SidebarProject => !!p));
+          setLastEvent(`reorder(${nextIds.join(",")})`);
         }}
       />
     </div>

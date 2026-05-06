@@ -60,6 +60,12 @@ pub struct DeleteProjectArgs {
     pub id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderProjectsArgs {
+    pub ids: Vec<String>,
+}
+
 #[derive(Debug, Error, Serialize)]
 #[serde(
     tag = "kind",
@@ -138,6 +144,12 @@ impl From<ProjectError> for ProjectCommandError {
             }
             ProjectError::PathNotReadable => Self::invalid_args("Project path is not readable."),
             ProjectError::NotFound(id) => Self::not_found(id),
+            ProjectError::ReorderMismatch { expected, got } => Self::invalid_args(format!(
+                "Reorder list size mismatch (expected {expected}, got {got}). Refresh and try again."
+            )),
+            ProjectError::ReorderDuplicate(id) => {
+                Self::invalid_args(format!("Reorder list contains a duplicate id: {id}"))
+            }
             ProjectError::EnvSerialize(e) => {
                 Self::invalid_args(format!("Project environment is not serializable: {e}"))
             }
@@ -204,5 +216,15 @@ pub async fn project_delete<R: Runtime>(
 ) -> Result<(), ProjectCommandError> {
     let pool = db::pool(&app).await?;
     projects::delete(&pool, &args.id).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn project_reorder<R: Runtime>(
+    app: AppHandle<R>,
+    args: ReorderProjectsArgs,
+) -> Result<(), ProjectCommandError> {
+    let pool = db::pool(&app).await?;
+    projects::reorder(&pool, &args.ids).await?;
     Ok(())
 }

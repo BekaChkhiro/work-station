@@ -81,6 +81,12 @@ pub enum ProjectError {
     PathNotReadable,
     #[error("project not found: {0}")]
     NotFound(String),
+    #[error(
+        "reorder list must contain every project exactly once (expected {expected}, got {got})"
+    )]
+    ReorderMismatch { expected: usize, got: usize },
+    #[error("reorder list contains a duplicate id: {0}")]
+    ReorderDuplicate(String),
     #[error("env serialization: {0}")]
     EnvSerialize(#[from] serde_json::Error),
     #[error("sqlx: {0}")]
@@ -257,6 +263,53 @@ pub async fn update(pool: &SqlitePool, input: ProjectUpdate) -> Result<Project, 
     }
 
     fetch_one(pool, &input.id).await
+}
+
+/// Persist a new sidebar ordering atomically. `ids` must list every project
+/// in the desired final order — `position` is reassigned to each row's index
+/// in the slice (`0..ids.len()`) inside a single transaction so a mid-flight
+/// crash leaves the table either fully reordered or fully untouched. Returns
+/// `ReorderMismatch` when the caller's list doesn't cover the full table
+/// (indicating a stale snapshot — the UI should refetch and retry).
+pub async fn reorder(pool: &SqlitePool, ids: &[String]) -> Result<(), ProjectError> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(id.as_str()) {
+            return Err(ProjectError::ReorderDuplicate(id.clone()));
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
+        .fetch_one(&mut *tx)
+        .await?;
+    debug_assert!(total >= 0, "COUNT(*) returned a negative value: {total}");
+    let total_usize = usize::try_from(total).map_err(|_| ProjectError::ReorderMismatch {
+        expected: 0,
+        got: ids.len(),
+    })?;
+    if total_usize != ids.len() {
+        return Err(ProjectError::ReorderMismatch {
+            expected: total_usize,
+            got: ids.len(),
+        });
+    }
+
+    for (idx, id) in ids.iter().enumerate() {
+        let result = sqlx::query("UPDATE projects SET position = ? WHERE id = ?")
+            .bind(idx as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if result.rows_affected() == 0 {
+            // tx drops here, rolling back the partial UPDATEs above.
+            return Err(ProjectError::NotFound(id.clone()));
+        }
+    }
+
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Hard-delete a project. Sessions cascade via the FK on
@@ -675,6 +728,75 @@ mod tests {
             a.path, b.path,
             "both rows resolve to the same canonical path"
         );
+    }
+
+    #[tokio::test]
+    async fn reorder_persists_new_positions_and_survives_listing() {
+        let pool = migrated_pool().await;
+        let a = create(&pool, sample("a", &make_dir())).await.expect("a");
+        let b = create(&pool, sample("b", &make_dir())).await.expect("b");
+        let c = create(&pool, sample("c", &make_dir())).await.expect("c");
+
+        // Reverse the order: c, b, a
+        reorder(&pool, &[c.id.clone(), b.id.clone(), a.id.clone()])
+            .await
+            .expect("reorder");
+
+        let listed = list(&pool).await.expect("list");
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0].id, c.id);
+        assert_eq!(listed[1].id, b.id);
+        assert_eq!(listed[2].id, a.id);
+        assert_eq!(listed[0].position, 0);
+        assert_eq!(listed[1].position, 1);
+        assert_eq!(listed[2].position, 2);
+    }
+
+    #[tokio::test]
+    async fn reorder_rejects_size_mismatch() {
+        let pool = migrated_pool().await;
+        let a = create(&pool, sample("a", &make_dir())).await.expect("a");
+        let _b = create(&pool, sample("b", &make_dir())).await.expect("b");
+
+        let err = reorder(&pool, &[a.id]).await.expect_err("mismatch");
+        assert!(matches!(
+            err,
+            ProjectError::ReorderMismatch {
+                expected: 2,
+                got: 1
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn reorder_rejects_duplicate_id() {
+        let pool = migrated_pool().await;
+        let a = create(&pool, sample("a", &make_dir())).await.expect("a");
+        let b = create(&pool, sample("b", &make_dir())).await.expect("b");
+
+        let err = reorder(&pool, &[a.id.clone(), a.id.clone(), b.id])
+            .await
+            .expect_err("dup");
+        assert!(matches!(err, ProjectError::ReorderDuplicate(_)));
+    }
+
+    #[tokio::test]
+    async fn reorder_rejects_unknown_id() {
+        let pool = migrated_pool().await;
+        let a = create(&pool, sample("a", &make_dir())).await.expect("a");
+        let b = create(&pool, sample("b", &make_dir())).await.expect("b");
+
+        let err = reorder(&pool, &[a.id.clone(), "ghost".to_string()])
+            .await
+            .expect_err("ghost");
+        // Same count → passes mismatch gate, then UPDATE finds zero rows.
+        assert!(matches!(err, ProjectError::NotFound(id) if id == "ghost"));
+
+        // Transaction rolled back: original order survives.
+        let listed = list(&pool).await.expect("list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, a.id);
+        assert_eq!(listed[1].id, b.id);
     }
 
     #[tokio::test]
