@@ -297,8 +297,12 @@ pub async fn reorder(pool: &SqlitePool, ids: &[String]) -> Result<(), ProjectErr
     }
 
     for (idx, id) in ids.iter().enumerate() {
+        let position = i64::try_from(idx).map_err(|_| ProjectError::ReorderMismatch {
+            expected: total_usize,
+            got: ids.len(),
+        })?;
         let result = sqlx::query("UPDATE projects SET position = ? WHERE id = ?")
-            .bind(idx as i64)
+            .bind(position)
             .bind(id)
             .execute(&mut *tx)
             .await?;
