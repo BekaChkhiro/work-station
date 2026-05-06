@@ -526,3 +526,285 @@ button {
   outline: 1px solid var(--border-focus);
   outline-offset: -2px;
 }
+
+/* T6.1 — Sidebar. Right-side, collapsible project list. Mirrors the
+ * prototype's `.sidebar` rules in work-station-design/styles.css with the
+ * `ws-sb__*` prefix. Width is driven by the `--ws-sb-width` custom prop
+ * exposed at the root so callers can override per layout if needed.
+ *
+ * Collapse strategy: every label/badge stays mounted; the panel narrows
+ * via a `width` transition while inner labels fade with `opacity`. Keeping
+ * DOM stable means the active-row accent rail and project icons don't
+ * jump at the start of the animation.
+ */
+.ws-sb {
+  --ws-sb-width: 232px;
+  --ws-sb-width-collapsed: 52px;
+  width: var(--ws-sb-width);
+  flex-shrink: 0;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  transition:
+    width var(--dur-base, 150ms) var(--ease, ease),
+    background var(--dur-base, 150ms) var(--ease, ease);
+}
+.ws-sb[data-collapsed="true"] {
+  width: var(--ws-sb-width-collapsed);
+}
+.ws-sb__section {
+  padding: 12px 10px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+}
+.ws-sb__section-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 1;
+  transition: opacity var(--dur-base, 150ms) var(--ease, ease);
+}
+.ws-sb[data-collapsed="true"] .ws-sb__section-label {
+  opacity: 0;
+}
+.ws-sb__list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.ws-sb__list::-webkit-scrollbar {
+  width: 8px;
+}
+.ws-sb__list::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+.ws-sb__row {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  height: var(--density-row);
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: var(--r-md);
+  color: var(--text-primary);
+  cursor: default;
+  position: relative;
+  text-align: left;
+  font: inherit;
+  letter-spacing: inherit;
+  overflow: hidden;
+  transition: background var(--dur-fast, 100ms) var(--ease, ease);
+}
+.ws-sb__row:hover {
+  background: var(--bg-hover);
+}
+.ws-sb__row:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: -1px;
+}
+.ws-sb__row[data-active="true"] {
+  background: var(--bg-active);
+}
+.ws-sb__row[data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+.ws-sb__icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  position: relative;
+  flex-shrink: 0;
+}
+.ws-sb__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 450;
+  min-width: 0;
+  opacity: 1;
+  transition: opacity var(--dur-base, 150ms) var(--ease, ease);
+}
+.ws-sb__meta {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  opacity: 1;
+  transition: opacity var(--dur-base, 150ms) var(--ease, ease);
+}
+.ws-sb[data-collapsed="true"] .ws-sb__name,
+.ws-sb[data-collapsed="true"] .ws-sb__meta {
+  opacity: 0;
+}
+.ws-sb__live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--success);
+}
+/* Corner dot lives inside the project icon; only shown in collapsed state
+ * when the project has live sessions, so the rail still surfaces activity
+ * after the side meta column has faded out. */
+.ws-sb__live-dot--corner {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  box-shadow: 0 0 0 1.5px var(--bg-surface);
+  opacity: 0;
+  transition: opacity var(--dur-base, 150ms) var(--ease, ease);
+}
+.ws-sb[data-collapsed="true"] .ws-sb__live-dot--corner[data-on="true"] {
+  opacity: 1;
+}
+.ws-sb__badge {
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.ws-sb__badge--idle {
+  opacity: 0.5;
+}
+.ws-sb__row[data-active="true"] .ws-sb__badge {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.ws-sb__footer {
+  border-top: 1px solid var(--border-subtle);
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ws-sb__add {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--r-md);
+  color: var(--text-secondary);
+  font: inherit;
+  letter-spacing: inherit;
+  font-size: 12px;
+  cursor: default;
+  text-align: left;
+  overflow: hidden;
+  transition:
+    border-color 150ms var(--ease, ease),
+    color 150ms var(--ease, ease),
+    background 150ms var(--ease, ease);
+}
+.ws-sb__add:hover {
+  border-color: var(--accent-muted);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.ws-sb__add:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: -2px;
+}
+.ws-sb__add-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.ws-sb__add-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 1;
+  transition: opacity var(--dur-base, 150ms) var(--ease, ease);
+}
+.ws-sb[data-collapsed="true"] .ws-sb__add-label,
+.ws-sb[data-collapsed="true"] .ws-sb__kbd {
+  opacity: 0;
+}
+.ws-sb__kbd {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  background: var(--bg-active);
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0;
+  white-space: nowrap;
+  transition: opacity var(--dur-base, 150ms) var(--ease, ease);
+}
+.ws-sb__icon-btn {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  border-radius: var(--r-md);
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  flex-shrink: 0;
+  padding: 0;
+}
+.ws-sb__icon-btn--sm {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  color: var(--text-tertiary);
+}
+.ws-sb__icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-sb__icon-btn:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: -1px;
+}
