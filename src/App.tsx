@@ -11,6 +11,7 @@ import SidebarLiveHarness from "./components/Sidebar/Sidebar.live.dev";
 import AppShellLiveHarness from "./components/AppShell/AppShell.live.dev";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
+import { QuickSwitcher } from "./components/QuickSwitcher";
 import "./styles/globals.css";
 
 type DebugMode =
@@ -43,19 +44,32 @@ const debugMode = (): DebugMode => {
 
 export default function App() {
   const [crossSearchOpen, setCrossSearchOpen] = createSignal(false);
+  const [switcherOpen, setSwitcherOpen] = createSignal(false);
 
   // T4.13: Cmd/Ctrl+Shift+F opens cross-session search. Bound at the
   // document level so any focused pane (xterm steals key events via its
   // textarea) can still trigger it. The Terminal's customKeyEventHandler
   // returns false for shift+f so xterm doesn't send `^F` to the shell;
   // the event still bubbles to here and we handle it.
+  //
+  // T6.4: Cmd/Ctrl+K opens the quick switcher. Same document-level binding
+  // for the same reason — xterm consumes keystrokes from a hidden textarea
+  // and we need the modifier combo to win even while a terminal pane has
+  // focus.
   onMount(() => {
     const handler = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      if (!mod || e.altKey || !e.shiftKey) return;
-      if (e.key.toLowerCase() !== "f") return;
-      e.preventDefault();
-      setCrossSearchOpen(true);
+      if (!mod || e.altKey) return;
+      if (e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setCrossSearchOpen(true);
+        return;
+      }
+      if (!e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSwitcherOpen((open) => !open);
+        return;
+      }
     };
     document.addEventListener("keydown", handler);
     onCleanup(() => document.removeEventListener("keydown", handler));
@@ -95,6 +109,7 @@ export default function App() {
         </Switch>
       </PanelErrorBoundary>
       <CrossSessionSearch open={crossSearchOpen()} onClose={() => setCrossSearchOpen(false)} />
+      <QuickSwitcher open={switcherOpen()} onClose={() => setSwitcherOpen(false)} />
     </AppErrorBoundary>
   );
 }
