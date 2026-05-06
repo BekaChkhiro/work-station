@@ -47,11 +47,29 @@ pub struct CliBinary {
     pub path: PathBuf,
 }
 
+/// T7.2: a detected CLI plus its best-effort version banner. This is the
+/// shape the `cli_list_available` IPC command returns, and the shape the
+/// frontend renders directly. `version` is `None` when the probe failed,
+/// timed out, or the CLI doesn't support `--version` — the UI surfaces
+/// this as a blank version label per the T7.2 acceptance criterion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliInfo {
+    pub name: String,
+    pub path: PathBuf,
+    pub version: Option<String>,
+}
+
 /// App-scoped CLI registry — held by Tauri's `.manage()` so the cached
 /// list is shared across windows and survives webview reloads.
 #[derive(Debug, Default)]
 pub struct CliRegistry {
     detected: OnceLock<Vec<CliBinary>>,
+    /// Cached version-probed view — populated lazily on the first
+    /// `cli_list_available` call and reused for the rest of the session.
+    /// Keyed off `tokio::sync::OnceCell` rather than the std variant so
+    /// the `get_or_init` future can `.await` the per-CLI probes.
+    info_cache: tokio::sync::OnceCell<Vec<CliInfo>>,
 }
 
 impl CliRegistry {
@@ -87,7 +105,29 @@ impl CliRegistry {
     pub fn from_seed(binaries: Vec<CliBinary>) -> Self {
         let cell = OnceLock::new();
         let _ = cell.set(binaries);
-        Self { detected: cell }
+        Self {
+            detected: cell,
+            info_cache: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// T7.2: return the cached binary list with `--version` metadata
+    /// attached. Probes `--version` once on first call and caches the
+    /// result for the rest of the session. Probe failures collapse to
+    /// `version = None` so the list itself is always returned in full.
+    pub async fn binaries_with_versions(&self) -> &[CliInfo] {
+        self.info_cache
+            .get_or_init(|| async {
+                // `populate_default` is a OnceLock cache hit on every
+                // call after the boot scan, so this is effectively free
+                // unless the IPC command races boot — in which case we
+                // want to populate inline rather than return an empty
+                // list to the frontend.
+                let binaries = self.populate_default().to_vec();
+                super::version::probe_all(&binaries).await
+            })
+            .await
+            .as_slice()
     }
 }
 
@@ -358,6 +398,38 @@ mod tests {
         let first = registry.populate_default().to_vec();
         let second = registry.populate_default().to_vec();
         assert_eq!(first, second, "second call must hit the cache");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn binaries_with_versions_caches_and_preserves_order() {
+        // Seed two synthetic CLIs that won't actually exist on the host
+        // (so version probing returns `None` for both quickly) and
+        // confirm the order plus cache behaviour.
+        let registry = CliRegistry::from_seed(vec![
+            CliBinary {
+                id: "claude".into(),
+                path: PathBuf::from("/nonexistent/claude"),
+            },
+            CliBinary {
+                id: "kimi".into(),
+                path: PathBuf::from("/nonexistent/kimi"),
+            },
+        ]);
+
+        let first = registry.binaries_with_versions().await.to_vec();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].name, "claude");
+        assert_eq!(first[1].name, "kimi");
+        assert!(
+            first.iter().all(|info| info.version.is_none()),
+            "nonexistent binaries should produce version=None, got {first:?}"
+        );
+
+        // Second call must hit the cache — equality on the full vec is
+        // sufficient since `CliInfo` derives PartialEq.
+        let second = registry.binaries_with_versions().await.to_vec();
+        assert_eq!(first, second);
     }
 
     #[test]
