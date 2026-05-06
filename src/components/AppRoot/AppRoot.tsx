@@ -70,10 +70,20 @@ const defaultShell = (): string => {
   return isMac ? "/bin/zsh" : "/bin/bash";
 };
 
+// Run shells as a login shell on Unix so `~/.zprofile` / `~/.bash_profile`
+// load (Homebrew PATH, asdf, nvm, mise, etc.). When the .app is launched
+// from Finder, the parent process gets a minimal PATH and PATH-discovered
+// tools (claude, planflow-mcp, node, ...) wouldn't otherwise be reachable.
+// Windows PowerShell handles its own profile chain, no flag needed.
+const defaultShellArgs = (): string[] => {
+  if (isWindows) return [];
+  return ["-l"];
+};
+
 const spawnDefaultShell = async (projectId: string, cwd: string): Promise<string> => {
   const resp = await ptySpawn({
     command: defaultShell(),
-    args: [],
+    args: defaultShellArgs(),
     cwd: cwd.length > 0 ? cwd : undefined,
     env: { WS_PROJECT_ID: projectId },
     cols: 80,
@@ -113,6 +123,7 @@ export function AppRoot(): JSX.Element {
   usePaneHotkeys({
     resolveCwd: (id) => projectPaths[id] ?? null,
     shellCommand: defaultShell,
+    shellArgs: defaultShellArgs,
     onAddProject: () => {
       setActionError(null);
       setAddOpen(true);

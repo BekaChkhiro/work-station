@@ -32,6 +32,10 @@ export interface PaneHotkeyHandlers {
   resolveCwd: (projectId: string) => string | null;
   /** Default shell command (e.g. "/bin/zsh", "powershell.exe"). */
   shellCommand: () => string;
+  /** Args for the shell — typically `["-l"]` on Unix to source profile
+   *  files (Homebrew PATH, asdf, etc.) so split shells can find brew-
+   *  installed tools when the app was launched from Finder. */
+  shellArgs?: () => string[];
   /** Open the Add Project modal. */
   onAddProject: () => void;
   /** Surface a user-visible error from one of the IPC calls. */
@@ -51,7 +55,7 @@ const handleSplit = async (
   try {
     const resp = await ptySpawn({
       command: handlers.shellCommand(),
-      args: [],
+      args: handlers.shellArgs?.() ?? [],
       cwd: cwd ?? undefined,
       env: { WS_PROJECT_ID: projectId },
       cols: 80,
