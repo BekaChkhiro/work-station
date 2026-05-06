@@ -20,6 +20,7 @@
 import { For, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { LayoutTree } from "../LayoutTree";
+import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
 import { Sidebar } from "../Sidebar";
 import type { LayoutPath } from "../../types/layout";
@@ -56,6 +57,14 @@ export interface AppShellProps {
    *  the next render reflects the change. */
   onReorderProjects?: (nextIds: string[]) => void;
   onOpenSettings?: () => void;
+  clis?: readonly PaneCliOption[];
+  onLaunchCli?: (
+    projectId: string,
+    sessionId: string,
+    cli: PaneCliOption,
+    mode: PaneCliLaunchMode,
+  ) => void;
+  onLaunchFirstCli?: (projectId: string, cli: PaneCliOption) => void;
   /** Placeholder rendered when a project has no layout (no panes). The
    *  caller can return a "spawn first pane" CTA, an empty illustration,
    *  whatever. Defaults to a quiet hint. */
@@ -95,6 +104,9 @@ export function AppShell(props: AppShellProps): JSX.Element {
                   projectId={project.id}
                   renderPane={props.renderPane}
                   renderEmpty={props.renderEmptyWorkspace ?? defaultEmptyWorkspace}
+                  clis={props.clis}
+                  onLaunchCli={props.onLaunchCli}
+                  onLaunchFirstCli={props.onLaunchFirstCli}
                 />
               </div>
             );
@@ -129,6 +141,14 @@ interface ProjectWorkspaceViewProps {
   projectId: string;
   renderPane: (projectId: string, sessionId: string) => JSX.Element;
   renderEmpty: (projectId: string) => JSX.Element;
+  clis?: readonly PaneCliOption[];
+  onLaunchCli?: (
+    projectId: string,
+    sessionId: string,
+    cli: PaneCliOption,
+    mode: PaneCliLaunchMode,
+  ) => void;
+  onLaunchFirstCli?: (projectId: string, cli: PaneCliOption) => void;
 }
 
 function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
@@ -158,7 +178,19 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
 
   return (
     <div class="ws-appshell__pane-host relative flex min-h-0 flex-1 flex-col">
-      <Show when={layout()} fallback={props.renderEmpty(props.projectId)}>
+      <Show
+        when={layout()}
+        fallback={
+          props.onLaunchFirstCli ? (
+            <ProjectTerminalEmptyState
+              clis={props.clis ?? []}
+              onLaunch={(cli) => props.onLaunchFirstCli?.(props.projectId, cli)}
+            />
+          ) : (
+            props.renderEmpty(props.projectId)
+          )
+        }
+      >
         {(node) => (
           <div class="min-h-0 flex-1">
             <LayoutTree
@@ -167,10 +199,56 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
               onRatioChange={handleRatio}
               focusedSessionId={focusedSessionId()}
               onFocusPane={handleFocus}
+              clis={props.clis}
+              onLaunchCli={(sessionId, cli, mode) =>
+                props.onLaunchCli?.(props.projectId, sessionId, cli, mode)
+              }
             />
           </div>
         )}
       </Show>
+    </div>
+  );
+}
+
+interface ProjectTerminalEmptyStateProps {
+  clis: readonly PaneCliOption[];
+  onLaunch: (cli: PaneCliOption) => void;
+}
+
+function ProjectTerminalEmptyState(props: ProjectTerminalEmptyStateProps): JSX.Element {
+  return (
+    <div class="ws-project-empty" role="region" aria-label="No terminals in this project">
+      <div class="ws-project-empty__panel">
+        <div class="ws-project-empty__title">No terminals open</div>
+        <div class="ws-project-empty__subtitle">Start a new terminal for this project.</div>
+        <Show
+          when={props.clis.length > 0}
+          fallback={<div class="ws-project-empty__note">No detected CLIs are available.</div>}
+        >
+          <div class="ws-project-empty__grid" role="list">
+            <For each={props.clis}>
+              {(cli) => (
+                <button
+                  type="button"
+                  class="ws-project-empty__cli"
+                  role="listitem"
+                  onClick={() => props.onLaunch(cli)}
+                >
+                  <span class="ws-project-empty__dot" aria-hidden="true" />
+                  <span class="ws-project-empty__cli-main">
+                    <span class="ws-project-empty__cli-name">{cli.name}</span>
+                    <span class="ws-project-empty__cli-path">{cli.path}</span>
+                  </span>
+                  <Show when={cli.version}>
+                    {(version) => <span class="ws-project-empty__version">{version()}</span>}
+                  </Show>
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+      </div>
     </div>
   );
 }

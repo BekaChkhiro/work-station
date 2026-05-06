@@ -21,8 +21,16 @@
 //     navigation that lands focus on the xterm textarea directly without
 //     a pointer event ever firing.
 
-import { children } from "solid-js";
+import { For, Show, children, createEffect, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
+
+export interface PaneCliOption {
+  name: string;
+  path: string;
+  version: string | null;
+}
+
+export type PaneCliLaunchMode = "replace" | "split";
 
 export interface PaneProps {
   /** Stable identifier for this pane (typically the PTY sessionId). Echoed
@@ -35,6 +43,8 @@ export interface PaneProps {
    *  may receive multiple events for the same activation; treat as
    *  "make this pane focused". */
   onFocus?: (sessionId: string) => void;
+  clis?: readonly PaneCliOption[];
+  onLaunchCli?: (sessionId: string, cli: PaneCliOption, mode: PaneCliLaunchMode) => void;
   /** The subtree mounted inside the pane (Terminal, placeholder, etc.). */
   children: JSX.Element;
 }
@@ -57,6 +67,22 @@ export function Pane(props: PaneProps): JSX.Element {
     props.onFocus?.(props.sessionId);
   };
 
+  const [menuOpen, setMenuOpen] = createSignal(false);
+
+  const quickLaunchEnabled = (): boolean =>
+    props.clis !== undefined && props.onLaunchCli !== undefined;
+
+  const pickCli = (cli: PaneCliOption, mode: PaneCliLaunchMode): void => {
+    props.onLaunchCli?.(props.sessionId, cli, mode);
+    setMenuOpen(false);
+  };
+
+  const toggleMenu: JSX.EventHandlerUnion<HTMLButtonElement, MouseEvent> = (event) => {
+    event.stopPropagation();
+    activate();
+    setMenuOpen((open) => !open);
+  };
+
   return (
     <div
       class="ws-pane"
@@ -67,9 +93,147 @@ export function Pane(props: PaneProps): JSX.Element {
       onPointerDown={activate}
       onFocusIn={activate}
     >
-      {resolved()}
+      <Show when={quickLaunchEnabled()}>
+        <div class="ws-pane__head">
+          <button
+            type="button"
+            class="ws-pane__launch"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen() ? "true" : "false"}
+            aria-label="New terminal"
+            title="New terminal"
+            onClick={toggleMenu}
+          >
+            <IconPlus />
+          </button>
+          <Show when={menuOpen()}>
+            <CliLaunchMenu
+              clis={props.clis ?? []}
+              onPick={pickCli}
+              onClose={() => setMenuOpen(false)}
+            />
+          </Show>
+        </div>
+      </Show>
+      <div class="ws-pane__body">{resolved()}</div>
     </div>
   );
 }
 
 export default Pane;
+
+interface CliLaunchMenuProps {
+  clis: readonly PaneCliOption[];
+  onPick: (cli: PaneCliOption, mode: PaneCliLaunchMode) => void;
+  onClose: () => void;
+}
+
+function CliLaunchMenu(props: CliLaunchMenuProps): JSX.Element {
+  let root: HTMLDivElement | undefined;
+  const [selected, setSelected] = createSignal(0);
+
+  createEffect(() => {
+    const max = Math.max(0, props.clis.length - 1);
+    if (selected() > max) setSelected(max);
+  });
+
+  const pickAt = (index: number, mode: PaneCliLaunchMode): void => {
+    const cli = props.clis[index];
+    if (!cli) return;
+    props.onPick(cli, mode);
+  };
+
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      props.onClose();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelected((i) => Math.min(i + 1, props.clis.length - 1));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelected((i) => Math.max(i - 1, 0));
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      pickAt(selected(), event.shiftKey ? "split" : "replace");
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && /^[1-9]$/.test(event.key)) {
+      event.preventDefault();
+      pickAt(Number.parseInt(event.key, 10) - 1, event.shiftKey ? "split" : "replace");
+    }
+  };
+
+  const onPointerDown = (event: PointerEvent): void => {
+    const target = event.target;
+    if (target instanceof Node && root?.contains(target)) return;
+    props.onClose();
+  };
+
+  window.addEventListener("keydown", onKey, true);
+  window.addEventListener("pointerdown", onPointerDown, true);
+  onCleanup(() => {
+    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("pointerdown", onPointerDown, true);
+  });
+
+  return (
+    <div ref={root} class="ws-cli-pop" role="menu" aria-label="New terminal">
+      <div class="ws-cli-pop__head">
+        <span>Spawn in pane</span>
+        <span class="ws-cli-pop__keys">
+          <Kbd>⌘</Kbd>
+          <Kbd>1</Kbd>
+        </span>
+      </div>
+      <Show
+        when={props.clis.length > 0}
+        fallback={<div class="ws-cli-pop__empty">No detected CLIs</div>}
+      >
+        <For each={props.clis}>
+          {(cli, index) => (
+            <button
+              type="button"
+              class="ws-cli-pop__row"
+              role="menuitem"
+              data-selected={selected() === index() ? "true" : undefined}
+              onMouseEnter={() => setSelected(index())}
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onPick(cli, event.shiftKey ? "split" : "replace");
+              }}
+            >
+              <span class="ws-cli-pop__dot" />
+              <span class="ws-cli-pop__name">{cli.name}</span>
+              <span class="ws-cli-pop__version">{cli.version ?? ""}</span>
+              <Show when={index() < 9}>
+                <span class="ws-cli-pop__keys">
+                  <Kbd>⌘</Kbd>
+                  <Kbd>{String(index() + 1)}</Kbd>
+                </span>
+              </Show>
+            </button>
+          )}
+        </For>
+      </Show>
+    </div>
+  );
+}
+
+function Kbd(props: { children: JSX.Element }): JSX.Element {
+  return <span class="ws-cli-pop__kbd">{props.children}</span>;
+}
+
+function IconPlus(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 3.5v9M3.5 8h9" />
+    </svg>
+  );
+}

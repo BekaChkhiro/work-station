@@ -193,6 +193,25 @@ export function splitPaneAt(
   return node;
 }
 
+/** T7.3 — swap the session carried by an existing pane without changing the
+ * surrounding split tree. Used when quick-launch replaces the current pane's
+ * CLI. Untouched siblings keep references so existing terminals do not remount. */
+export function replacePaneSessionAt(
+  node: LayoutNode,
+  targetSessionId: string,
+  newSessionId: string,
+): LayoutNode {
+  if (isPane(node)) {
+    return node.sessionId === targetSessionId ? paneNode(newSessionId) : node;
+  }
+  const [left, right] = node.children;
+  const nextLeft = replacePaneSessionAt(left, targetSessionId, newSessionId);
+  if (nextLeft !== left) return { ...node, children: [nextLeft, right] };
+  const nextRight = replacePaneSessionAt(right, targetSessionId, newSessionId);
+  if (nextRight !== right) return { ...node, children: [left, nextRight] };
+  return node;
+}
+
 export interface ClosePaneResult {
   /** The new tree, or `null` when the closed pane was the only one left. The
    *  caller maps `null` to `EMPTY_LAYOUT` (or "tab is empty") at the

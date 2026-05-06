@@ -23,8 +23,9 @@ import { Match, Switch, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AppShell } from "../AppShell";
+import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import { AddProjectModal } from "../AddProjectModal";
-import type { AddProjectFormValue } from "../AddProjectModal";
+import type { AddProjectFormValue, ProjectEnvVars } from "../AddProjectModal";
 import { DeleteProjectConfirm } from "../DeleteProjectConfirm";
 import { ProjectContextMenu } from "../ProjectContextMenu";
 import { Terminal } from "../Terminal/Terminal";
@@ -37,6 +38,7 @@ import {
   type Project,
 } from "../../db/projects";
 import { pickProjectFolder } from "../../ipc/picker";
+import { cliListAvailable } from "../../ipc/cli";
 import { ptyKill, ptySpawn } from "../../ipc/pty";
 import {
   activeProjectId,
@@ -45,8 +47,11 @@ import {
   projects,
   removeProject,
   reorderProjects as reorderProjectsLocal,
+  replacePane,
   setActiveProject,
+  setFocusedSession,
   setLayout,
+  splitPane,
   updateProjectMeta,
 } from "../../stores/workspace";
 import { collectPanes, paneNode } from "../../types/layout";
@@ -80,12 +85,16 @@ const defaultShellArgs = (): string[] => {
   return ["-l"];
 };
 
-const spawnDefaultShell = async (projectId: string, cwd: string): Promise<string> => {
+const spawnDefaultShell = async (
+  projectId: string,
+  cwd: string,
+  env: ProjectEnvVars,
+): Promise<string> => {
   const resp = await ptySpawn({
     command: defaultShell(),
     args: defaultShellArgs(),
     cwd: cwd.length > 0 ? cwd : undefined,
-    env: { WS_PROJECT_ID: projectId },
+    env: { ...env, WS_PROJECT_ID: projectId },
     cols: 80,
     rows: 24,
   });
@@ -100,11 +109,13 @@ export function AppRoot(): JSX.Element {
   const [deleteTarget, setDeleteTarget] = createSignal<EditTarget | null>(null);
   const [contextTarget, setContextTarget] = createSignal<ContextTarget | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
+  const [availableClis, setAvailableClis] = createSignal<PaneCliOption[]>([]);
 
   // Shadow maps for fields not promoted into ProjectMeta. Same pattern as
   // the harness — keeps the workspace store narrow.
   const projectPaths: Record<string, string> = {};
   const projectClis: Record<string, string | null> = {};
+  const projectEnvs: Record<string, ProjectEnvVars> = {};
 
   // Sessions we know about per project. The store's layout tree is the
   // authoritative source for "which sessions does this project have"; this
@@ -118,10 +129,17 @@ export function AppRoot(): JSX.Element {
     sessionsByProject[projectId] = list;
   };
 
+  const untrackSession = (projectId: string, sessionId: string): void => {
+    const list = sessionsByProject[projectId];
+    if (!list) return;
+    sessionsByProject[projectId] = list.filter((id) => id !== sessionId);
+  };
+
   // Pane / project hotkeys: Cmd+\, Cmd+Shift+\, Cmd+W, Cmd+N. Wire to the
   // shadow map for cwd lookup so split shells inherit the project's folder.
   usePaneHotkeys({
     resolveCwd: (id) => projectPaths[id] ?? null,
+    resolveEnv: (id) => projectEnvs[id] ?? {},
     shellCommand: defaultShell,
     shellArgs: defaultShellArgs,
     onAddProject: () => {
@@ -134,6 +152,7 @@ export function AppRoot(): JSX.Element {
   const registerProject = (persisted: Project, sessionId: string | null): void => {
     projectPaths[persisted.id] = persisted.path;
     projectClis[persisted.id] = persisted.defaultCli;
+    projectEnvs[persisted.id] = persisted.env;
     addProject(
       {
         id: persisted.id,
@@ -160,6 +179,11 @@ export function AppRoot(): JSX.Element {
 
     void (async () => {
       try {
+        try {
+          setAvailableClis(await cliListAvailable());
+        } catch (err) {
+          setActionError(err instanceof Error ? err.message : String(err));
+        }
         const persisted = await listProjects();
         for (const p of persisted) {
           // Best-effort — if the shell fails to spawn (e.g. /bin/zsh
@@ -167,7 +191,7 @@ export function AppRoot(): JSX.Element {
           // the user can re-spawn via T5.6 once that wires up.
           let sessionId: string | null = null;
           try {
-            sessionId = await spawnDefaultShell(p.id, p.path);
+            sessionId = await spawnDefaultShell(p.id, p.path, p.env);
             trackSession(p.id, sessionId);
           } catch (err) {
             // Surface once at boot but keep going so the rest of the list
@@ -208,10 +232,11 @@ export function AppRoot(): JSX.Element {
       color: value.color,
       icon: value.glyph,
       defaultCli: value.defaultCli,
+      env: value.env,
     });
     let sessionId: string | null = null;
     try {
-      sessionId = await spawnDefaultShell(created.id, created.path);
+      sessionId = await spawnDefaultShell(created.id, created.path, created.env);
       trackSession(created.id, sessionId);
     } catch (err) {
       // Project is created in the DB even if the shell fails — surface the
@@ -233,9 +258,11 @@ export function AppRoot(): JSX.Element {
       color: value.color,
       icon: value.glyph,
       defaultCli: value.defaultCli,
+      env: value.env,
     });
     projectPaths[target.id] = updated.path;
     projectClis[target.id] = updated.defaultCli;
+    projectEnvs[target.id] = updated.env;
     updateProjectMeta(target.id, {
       name: updated.name,
       color: updated.color ?? value.color,
@@ -256,6 +283,7 @@ export function AppRoot(): JSX.Element {
         color: meta.color,
         glyph: meta.glyph,
         defaultCli: projectClis[projectId] ?? null,
+        env: projectEnvs[projectId] ?? {},
       },
     });
   };
@@ -295,6 +323,7 @@ export function AppRoot(): JSX.Element {
     }
     projectPaths[target.id] = "";
     projectClis[target.id] = null;
+    projectEnvs[target.id] = {};
     setLayout(target.id, null);
     removeProject(target.id);
     setDeleteTarget(null);
@@ -327,6 +356,72 @@ export function AppRoot(): JSX.Element {
     }
     try {
       await revealItemInDir(path);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const spawnCli = async (projectId: string, cli: PaneCliOption): Promise<string> => {
+    const cwd = projectPaths[projectId];
+    const env = projectEnvs[projectId] ?? {};
+    const resp = await ptySpawn({
+      command: cli.path,
+      args: [],
+      cwd: cwd && cwd.length > 0 ? cwd : undefined,
+      env: { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: cli.name },
+      cols: 80,
+      rows: 24,
+    });
+    return resp.sessionId;
+  };
+
+  const handleLaunchCli = async (
+    projectId: string,
+    sessionId: string,
+    cli: PaneCliOption,
+    mode: PaneCliLaunchMode,
+  ): Promise<void> => {
+    setActionError(null);
+    try {
+      const nextSessionId = await spawnCli(projectId, cli);
+      trackSession(projectId, nextSessionId);
+      if (mode === "split") {
+        splitPane(projectId, sessionId, "h", nextSessionId);
+        const ws = getWorkspace(projectId);
+        const didAttach =
+          ws?.layout !== null &&
+          ws?.layout !== undefined &&
+          collectPanes(ws.layout).some((pane) => pane.sessionId === nextSessionId);
+        if (!didAttach) {
+          await ptyKill(nextSessionId);
+          untrackSession(projectId, nextSessionId);
+        }
+        return;
+      }
+      const replaced = replacePane(projectId, sessionId, nextSessionId);
+      if (replaced === null) {
+        await ptyKill(nextSessionId);
+        untrackSession(projectId, nextSessionId);
+        return;
+      }
+      untrackSession(projectId, replaced);
+      try {
+        await ptyKill(replaced);
+      } catch {
+        // Backend logs the failed cleanup; the replacement pane is already live.
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleLaunchFirstCli = async (projectId: string, cli: PaneCliOption): Promise<void> => {
+    setActionError(null);
+    try {
+      const sessionId = await spawnCli(projectId, cli);
+      trackSession(projectId, sessionId);
+      setLayout(projectId, paneNode(sessionId));
+      setFocusedSession(projectId, sessionId);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     }
@@ -368,6 +463,11 @@ export function AppRoot(): JSX.Element {
                 setContextTarget({ projectId: id, position: { x, y } })
               }
               onReorderProjects={(ids) => void handleReorder(ids)}
+              clis={availableClis()}
+              onLaunchCli={(projectId, sessionId, cli, mode) =>
+                void handleLaunchCli(projectId, sessionId, cli, mode)
+              }
+              onLaunchFirstCli={(projectId, cli) => void handleLaunchFirstCli(projectId, cli)}
             />
           </Match>
         </Switch>
@@ -429,6 +529,7 @@ export function AppRoot(): JSX.Element {
               color: meta.color,
               glyph: meta.glyph,
               defaultCli: projectClis[t.projectId] ?? null,
+              env: projectEnvs[t.projectId] ?? {},
             },
           });
         }}

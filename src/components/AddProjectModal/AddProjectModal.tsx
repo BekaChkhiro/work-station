@@ -35,6 +35,8 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "so
 import type { JSX } from "solid-js";
 import { PROJECT_CLI_OPTIONS } from "../../types/cli";
 
+export type ProjectEnvVars = Record<string, string>;
+
 export interface AddProjectFormValue {
   name: string;
   path: string;
@@ -44,6 +46,7 @@ export interface AddProjectFormValue {
    *  default (currently the system shell). Stored in `projects.default_cli`
    *  by the backend. */
   defaultCli: string | null;
+  env: ProjectEnvVars;
 }
 
 export type ProjectFormMode = "create" | "edit";
@@ -90,6 +93,43 @@ export const PROJECT_SWATCHES = [
   "var(--swatch-8)",
 ] as const;
 const DEFAULT_SWATCH = PROJECT_SWATCHES[0];
+const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
+
+interface EnvRow {
+  id: number;
+  key: string;
+  value: string;
+}
+
+let nextEnvRowId = 1;
+
+const toEnvRows = (env: ProjectEnvVars | undefined): EnvRow[] =>
+  Object.entries(env ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => ({
+      id: nextEnvRowId++,
+      key,
+      value,
+    }));
+
+const rowsToEnv = (rows: EnvRow[]): ProjectEnvVars => {
+  const env: ProjectEnvVars = {};
+  for (const row of rows) env[row.key.trim()] = row.value;
+  return env;
+};
+
+const envEqual = (a: ProjectEnvVars, b: ProjectEnvVars): boolean => {
+  const aKeys = Object.keys(a).sort();
+  const bKeys = Object.keys(b).sort();
+  if (aKeys.length !== bKeys.length) return false;
+  for (let i = 0; i < aKeys.length; i += 1) {
+    const key = aKeys[i];
+    const otherKey = bKeys[i];
+    if (key === undefined || otherKey === undefined) return false;
+    if (key !== otherKey || a[key] !== b[key]) return false;
+  }
+  return true;
+};
 
 // 12 two-letter glyph options — a reasonable, name-agnostic palette so the
 // user can pick something that reads better than auto-derived initials.
@@ -132,6 +172,8 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
   const [glyphOverride, setGlyphOverride] = createSignal<string | null>(null);
   // null = "use system default shell"; string = a CLI id from PROJECT_CLI_OPTIONS.
   const [defaultCli, setDefaultCli] = createSignal<string | null>(null);
+  const [envRows, setEnvRows] = createSignal<EnvRow[]>([]);
+  const [environmentOpen, setEnvironmentOpen] = createSignal(true);
   const [submitting, setSubmitting] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -150,13 +192,41 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       path().trim() !== init.path.trim() ||
       color() !== init.color ||
       effectiveGlyph() !== init.glyph ||
-      defaultCli() !== init.defaultCli
+      defaultCli() !== init.defaultCli ||
+      !envEqual(rowsToEnv(envRows()), init.env)
     );
   });
+
+  const envRowErrors = createMemo<Record<number, string>>(() => {
+    const errors: Record<number, string> = {};
+    const seen = new Map<string, number>();
+    for (const row of envRows()) {
+      const key = row.key.trim();
+      if (key.length === 0) {
+        errors[row.id] = "KEY is required.";
+        continue;
+      }
+      if (!ENV_KEY_RE.test(key)) {
+        errors[row.id] = "Use A-Z, 0-9, and _. Start with A-Z or _.";
+        continue;
+      }
+      const first = seen.get(key);
+      if (first !== undefined) {
+        errors[row.id] = "KEY is duplicated.";
+        errors[first] = "KEY is duplicated.";
+        continue;
+      }
+      seen.set(key, row.id);
+    }
+    return errors;
+  });
+
+  const envValid = createMemo<boolean>(() => Object.keys(envRowErrors()).length === 0);
 
   const valid = createMemo<boolean>(() => {
     if (submitting()) return false;
     if (name().trim().length === 0 || path().trim().length === 0) return false;
+    if (!envValid()) return false;
     if (isEdit() && !dirty()) return false;
     return true;
   });
@@ -174,12 +244,16 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       setColor(v.color);
       setGlyphOverride(v.glyph);
       setDefaultCli(v.defaultCli);
+      setEnvRows(toEnvRows(v.env));
+      setEnvironmentOpen(Object.keys(v.env).length > 0);
     } else {
       setName("");
       setPath(props.initialPath ?? "");
       setColor(DEFAULT_SWATCH);
       setGlyphOverride(null);
       setDefaultCli(null);
+      setEnvRows([]);
+      setEnvironmentOpen(false);
     }
     setSubmitting(false);
     setError(null);
@@ -223,6 +297,7 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
         color: color(),
         glyph: effectiveGlyph(),
         defaultCli: defaultCli(),
+        env: rowsToEnv(envRows()),
       });
       props.onClose();
     } catch (err) {
@@ -230,6 +305,19 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       setSubmitting(false);
       queueMicrotask(() => nameInput?.focus());
     }
+  };
+
+  const addEnvRow = (): void => {
+    setEnvRows((rows) => [...rows, { id: nextEnvRowId++, key: "", value: "" }]);
+    setEnvironmentOpen(true);
+  };
+
+  const updateEnvRow = (id: number, patch: Partial<Omit<EnvRow, "id">>): void => {
+    setEnvRows((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+  };
+
+  const deleteEnvRow = (id: number): void => {
+    setEnvRows((rows) => rows.filter((row) => row.id !== id));
   };
 
   return (
@@ -348,32 +436,6 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
             </div>
 
             <div class="ws-apm__field">
-              <span class="ws-apm__field-label">Icon glyph</span>
-              <div class="ws-apm__icon-grid" role="radiogroup" aria-label="Icon glyph">
-                <For each={PROJECT_GLYPHS}>
-                  {(g) => {
-                    const selected = (): boolean => g === effectiveGlyph();
-                    return (
-                      <button
-                        type="button"
-                        class="ws-apm__icon-pick"
-                        data-selected={selected() ? "true" : undefined}
-                        aria-label={`Glyph ${g}`}
-                        aria-pressed={selected()}
-                        role="radio"
-                        aria-checked={selected()}
-                        onClick={() => setGlyphOverride(g)}
-                        disabled={submitting()}
-                      >
-                        {g}
-                      </button>
-                    );
-                  }}
-                </For>
-              </div>
-            </div>
-
-            <div class="ws-apm__field">
               <span class="ws-apm__field-label">Default CLI</span>
               <div class="ws-apm__cli-grid" role="radiogroup" aria-label="Default CLI">
                 <button
@@ -403,6 +465,115 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
                       >
                         <span class="ws-apm__cli-name">{cli.name}</span>
                         <span class="ws-apm__cli-desc">{cli.description}</span>
+                      </button>
+                    );
+                  }}
+                </For>
+              </div>
+            </div>
+
+            <section class="ws-apm__section">
+              <button
+                type="button"
+                class="ws-apm__section-head"
+                aria-expanded={environmentOpen()}
+                onClick={() => setEnvironmentOpen((open) => !open)}
+                disabled={submitting()}
+              >
+                <span class="ws-apm__field-label">Environment</span>
+                <span class="ws-apm__section-chevron" aria-hidden="true">
+                  {environmentOpen() ? "−" : "+"}
+                </span>
+              </button>
+              <Show when={environmentOpen()}>
+                <div class="ws-apm__env-list">
+                  <Show
+                    when={envRows().length > 0}
+                    fallback={<div class="ws-apm__empty-note">No variables configured.</div>}
+                  >
+                    <For each={envRows()}>
+                      {(row) => {
+                        const rowError = (): string | undefined => envRowErrors()[row.id];
+                        return (
+                          <div class="ws-apm__env-row-wrap">
+                            <div class="ws-apm__env-row">
+                              <input
+                                class="ws-apm__input ws-apm__input--mono ws-apm__env-key"
+                                type="text"
+                                value={row.key}
+                                onInput={(e) =>
+                                  updateEnvRow(row.id, {
+                                    key: e.currentTarget.value.toUpperCase(),
+                                  })
+                                }
+                                placeholder="NODE_ENV"
+                                spellcheck={false}
+                                autocomplete="off"
+                                aria-invalid={rowError() ? "true" : "false"}
+                                disabled={submitting()}
+                              />
+                              <span class="ws-apm__env-equals">=</span>
+                              <input
+                                class="ws-apm__input ws-apm__input--mono ws-apm__env-value"
+                                type="text"
+                                value={row.value}
+                                onInput={(e) =>
+                                  updateEnvRow(row.id, { value: e.currentTarget.value })
+                                }
+                                placeholder="development"
+                                spellcheck={false}
+                                autocomplete="off"
+                                disabled={submitting()}
+                              />
+                              <button
+                                type="button"
+                                class="ws-apm__icon-btn ws-apm__env-delete"
+                                aria-label={`Delete ${row.key.trim() || "environment variable"}`}
+                                onClick={() => deleteEnvRow(row.id)}
+                                disabled={submitting()}
+                              >
+                                <IconX />
+                              </button>
+                            </div>
+                            <Show when={rowError()}>
+                              <div class="ws-apm__field-error">{rowError()}</div>
+                            </Show>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </Show>
+                  <button
+                    type="button"
+                    class="ws-apm__btn ws-apm__btn--ghost ws-apm__btn--sm ws-apm__env-add"
+                    onClick={addEnvRow}
+                    disabled={submitting()}
+                  >
+                    + Add variable
+                  </button>
+                </div>
+              </Show>
+            </section>
+
+            <div class="ws-apm__field">
+              <span class="ws-apm__field-label">Icon glyph</span>
+              <div class="ws-apm__icon-grid" role="radiogroup" aria-label="Icon glyph">
+                <For each={PROJECT_GLYPHS}>
+                  {(g) => {
+                    const selected = (): boolean => g === effectiveGlyph();
+                    return (
+                      <button
+                        type="button"
+                        class="ws-apm__icon-pick"
+                        data-selected={selected() ? "true" : undefined}
+                        aria-label={`Glyph ${g}`}
+                        aria-pressed={selected()}
+                        role="radio"
+                        aria-checked={selected()}
+                        onClick={() => setGlyphOverride(g)}
+                        disabled={submitting()}
+                      >
+                        {g}
                       </button>
                     );
                   }}

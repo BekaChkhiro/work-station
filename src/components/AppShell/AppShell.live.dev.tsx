@@ -22,7 +22,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AppShell } from "./AppShell";
 import { Terminal } from "../Terminal/Terminal";
 import { AddProjectModal } from "../AddProjectModal";
-import type { AddProjectFormValue } from "../AddProjectModal";
+import type { AddProjectFormValue, ProjectEnvVars } from "../AddProjectModal";
 import { DeleteProjectConfirm } from "../DeleteProjectConfirm";
 import { ProjectContextMenu } from "../ProjectContextMenu";
 import { ptyKill, ptySpawn } from "../../ipc/pty";
@@ -88,11 +88,16 @@ const defaultShell = (): string => {
   return isMac ? "/bin/zsh" : "/bin/bash";
 };
 
-const spawnShell = async (projectId: string, startupCommands: string[]): Promise<string> => {
+const spawnShell = async (
+  projectId: string,
+  startupCommands: string[],
+  env: ProjectEnvVars = {},
+): Promise<string> => {
   const resp = await ptySpawn({
     command: defaultShell(),
     args: [],
     env: {
+      ...env,
       WS_LIVE_HARNESS: "appshell",
       WS_PROJECT_ID: projectId,
     },
@@ -130,6 +135,7 @@ export function AppShellLiveHarness(): JSX.Element {
   const projectPaths: Record<string, string> = {};
   // T6.5 default CLI shadow — same rationale as projectPaths.
   const projectClis: Record<string, string | null> = {};
+  const projectEnvs: Record<string, ProjectEnvVars> = {};
   // Sessions we own per project. We register one shell per project at
   // start; opening more (T5.6) would extend this list.
   const sessionsByProject: Record<string, string[]> = {};
@@ -155,10 +161,11 @@ export function AppShellLiveHarness(): JSX.Element {
           color: demo.color,
           icon: demo.glyph,
         }));
-      const sessionId = await spawnShell(persisted.id, demo.startupCommands);
+      const sessionId = await spawnShell(persisted.id, demo.startupCommands, persisted.env);
       trackSession(persisted.id, sessionId);
       projectPaths[persisted.id] = persisted.path;
       projectClis[persisted.id] = persisted.defaultCli;
+      projectEnvs[persisted.id] = persisted.env;
       addProject(
         {
           id: persisted.id,
@@ -221,13 +228,17 @@ export function AppShellLiveHarness(): JSX.Element {
       color: value.color,
       icon: value.glyph,
       defaultCli: value.defaultCli,
+      env: value.env,
     });
-    const sessionId = await spawnShell(created.id, [
-      `echo "${created.name} — fresh project. Try ls."`,
-    ]);
+    const sessionId = await spawnShell(
+      created.id,
+      [`echo "${created.name} — fresh project. Try ls."`],
+      created.env,
+    );
     trackSession(created.id, sessionId);
     projectPaths[created.id] = created.path;
     projectClis[created.id] = created.defaultCli;
+    projectEnvs[created.id] = created.env;
     addProject(
       {
         id: created.id,
@@ -250,9 +261,11 @@ export function AppShellLiveHarness(): JSX.Element {
       color: value.color,
       icon: value.glyph,
       defaultCli: value.defaultCli,
+      env: value.env,
     });
     projectPaths[target.id] = updated.path;
     projectClis[target.id] = updated.defaultCli;
+    projectEnvs[target.id] = updated.env;
     updateProjectMeta(target.id, {
       name: updated.name,
       color: updated.color ?? value.color,
@@ -273,6 +286,7 @@ export function AppShellLiveHarness(): JSX.Element {
         color: meta.color,
         glyph: meta.glyph,
         defaultCli: projectClis[projectId] ?? null,
+        env: projectEnvs[projectId] ?? {},
       },
     });
   };
@@ -316,6 +330,7 @@ export function AppShellLiveHarness(): JSX.Element {
     }
     projectPaths[target.id] = "";
     projectClis[target.id] = null;
+    projectEnvs[target.id] = {};
     removeProject(target.id);
     setDeleteTarget(null);
     setEditTarget(null);
@@ -472,6 +487,7 @@ export function AppShellLiveHarness(): JSX.Element {
                 color: meta.color,
                 glyph: meta.glyph,
                 defaultCli: projectClis[t.projectId] ?? null,
+                env: projectEnvs[t.projectId] ?? {},
               },
             });
           }

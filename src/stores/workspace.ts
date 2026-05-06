@@ -29,6 +29,7 @@ import {
   closePaneAt,
   collectPanes,
   findPane,
+  replacePaneSessionAt,
   splitPaneAt,
   updateSplitRatio,
 } from "../types/layout";
@@ -235,6 +236,30 @@ export function splitPane(
       w.focusedSessionId = newSessionId;
     }),
   );
+}
+
+/** Replace the pane carrying `targetSessionId` with `newSessionId`, preserving
+ * the surrounding layout shape. Returns the replaced session id so callers can
+ * kill the old PTY after the new one is visible. */
+export function replacePane(
+  projectId: string,
+  targetSessionId: string,
+  newSessionId: string,
+): string | null {
+  const ws = state.workspacesByProjectId[projectId];
+  if (!ws || !ws.layout) return null;
+  if (!findPane(ws.layout, targetSessionId)) return null;
+  const next = replacePaneSessionAt(ws.layout, targetSessionId, newSessionId);
+  if (next === ws.layout) return null;
+  setState(
+    produce((s) => {
+      const w = s.workspacesByProjectId[projectId];
+      if (!w) return;
+      w.layout = next;
+      w.focusedSessionId = newSessionId;
+    }),
+  );
+  return targetSessionId;
 }
 
 /** Remove the pane carrying `targetSessionId` from `projectId`'s layout.

@@ -502,7 +502,7 @@ button {
   width: 100%;
   border: 1px solid var(--border-default);
   border-radius: var(--r-md);
-  overflow: hidden;
+  overflow: visible;
   background: var(--bg-terminal);
   outline: none;
   transition:
@@ -514,6 +514,210 @@ button {
   box-shadow:
     0 0 0 1px var(--accent-ring) inset,
     0 0 0 1px var(--accent-soft);
+}
+.ws-pane__head {
+  position: absolute;
+  top: var(--sp-1);
+  right: var(--sp-1);
+  z-index: 20;
+}
+.ws-pane__launch {
+  display: inline-flex;
+  height: 24px;
+  width: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-popover);
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+.ws-pane__launch:hover,
+.ws-pane__launch[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-pane__launch svg {
+  height: 14px;
+  width: 14px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+.ws-pane__body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+/* T7.3 — per-pane CLI quick-launch menu. Mirrors the Phase 2 prototype's
+ * `.cli-pop` shape under the production namespace. */
+.ws-cli-pop {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  right: 0;
+  z-index: 80;
+  width: 280px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+  padding: var(--sp-1);
+}
+.ws-cli-pop__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px 4px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.ws-cli-pop__row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto auto;
+  width: 100%;
+  align-items: center;
+  gap: var(--sp-2);
+  border-radius: var(--r-sm);
+  padding: 6px var(--sp-2);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  text-align: left;
+}
+.ws-cli-pop__row:hover,
+.ws-cli-pop__row[data-selected="true"] {
+  background: var(--accent-soft);
+}
+.ws-cli-pop__dot {
+  height: var(--sp-2);
+  width: var(--sp-2);
+  border-radius: 999px;
+  background: var(--accent-muted);
+}
+.ws-cli-pop__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-cli-pop__version {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.ws-cli-pop__keys {
+  display: inline-flex;
+  gap: 2px;
+}
+.ws-cli-pop__kbd {
+  min-width: 15px;
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  background: var(--bg-active);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+.ws-cli-pop__empty {
+  padding: var(--sp-3) 10px;
+  color: var(--text-tertiary);
+  font-size: var(--fs-12);
+}
+
+/* Project-level terminal empty state shown after the last pane closes. */
+.ws-project-empty {
+  display: grid;
+  height: 100%;
+  width: 100%;
+  place-items: center;
+  padding: var(--sp-6);
+  background: var(--bg-terminal);
+}
+.ws-project-empty__panel {
+  width: min(460px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.ws-project-empty__title {
+  color: var(--text-primary);
+  font-size: var(--fs-16);
+  font-weight: 600;
+}
+.ws-project-empty__subtitle,
+.ws-project-empty__note {
+  color: var(--text-secondary);
+  font-size: var(--fs-12);
+}
+.ws-project-empty__grid {
+  display: grid;
+  gap: var(--sp-2);
+}
+.ws-project-empty__cli {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+.ws-project-empty__cli:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.ws-project-empty__cli:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+.ws-project-empty__dot {
+  height: var(--sp-2);
+  width: var(--sp-2);
+  border-radius: 999px;
+  background: var(--accent-muted);
+}
+.ws-project-empty__cli-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ws-project-empty__cli-name {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.ws-project-empty__cli-path {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-project-empty__version {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
 }
 
 /* T5.3 — TabStrip. Mirrors the prototype's `.tabstrip` rules in
@@ -1092,6 +1296,10 @@ button {
   opacity: 0.6;
   cursor: not-allowed;
 }
+.ws-apm__input--mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
 .ws-apm__input-wrap {
   position: relative;
 }
@@ -1259,6 +1467,92 @@ button {
 .ws-apm__cli-desc {
   font-size: 11px;
   color: var(--text-tertiary);
+}
+.ws-apm__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ws-apm__section-head {
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: default;
+}
+.ws-apm__section-head:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: 2px;
+}
+.ws-apm__section-head:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.ws-apm__section-chevron {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.ws-apm__env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ws-apm__env-row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ws-apm__env-row {
+  display: grid;
+  grid-template-columns: minmax(116px, 0.75fr) auto minmax(150px, 1fr) 24px;
+  align-items: center;
+  gap: 6px;
+}
+.ws-apm__env-key,
+.ws-apm__env-value {
+  min-width: 0;
+  width: 100%;
+}
+.ws-apm__env-key[aria-invalid="true"] {
+  border-color: var(--error);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 12%, transparent);
+}
+.ws-apm__env-equals {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ws-apm__env-delete {
+  width: 24px;
+  height: 24px;
+  color: var(--text-tertiary);
+}
+.ws-apm__env-add {
+  align-self: flex-start;
+}
+.ws-apm__empty-note {
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--r-sm);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  padding: 8px 10px;
+}
+.ws-apm__field-error {
+  color: var(--error);
+  font-size: 11px;
+  line-height: 1.35;
 }
 .ws-apm__error {
   font-size: 12px;

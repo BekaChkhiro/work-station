@@ -24,6 +24,7 @@ export function ProjectsEmptyStateLiveHarness(): JSX.Element {
       color: value.color,
       icon: value.glyph,
       defaultCli: value.defaultCli,
+      env: value.env,
     });
     setLastCreated(created.name);
   };

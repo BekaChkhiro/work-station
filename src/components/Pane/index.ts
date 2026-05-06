@@ -1,2 +1,2 @@
 export { Pane, default } from "./Pane";
-export type { PaneProps } from "./Pane";
+export type { PaneCliLaunchMode, PaneCliOption, PaneProps } from "./Pane";

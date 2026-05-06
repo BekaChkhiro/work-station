@@ -21,6 +21,7 @@ interface MockRow {
   color: string;
   glyph: string;
   defaultCli: string | null;
+  env: Record<string, string>;
   sessions: number;
 }
 
@@ -32,6 +33,7 @@ const SEED: MockRow[] = [
     color: "var(--swatch-4)",
     glyph: "AR",
     defaultCli: "claude",
+    env: { NODE_ENV: "development" },
     sessions: 4,
   },
   {
@@ -41,6 +43,7 @@ const SEED: MockRow[] = [
     color: "var(--swatch-6)",
     glyph: "KE",
     defaultCli: null,
+    env: {},
     sessions: 0,
   },
   {
@@ -50,6 +53,7 @@ const SEED: MockRow[] = [
     color: "var(--swatch-3)",
     glyph: "BO",
     defaultCli: "codex",
+    env: { RUST_LOG: "debug" },
     sessions: 1,
   },
 ];
@@ -104,6 +108,7 @@ export function EditProjectFlowLiveHarness(): JSX.Element {
       color: t.color,
       glyph: t.glyph,
       defaultCli: t.defaultCli,
+      env: t.env,
     };
   };
 
@@ -124,12 +129,13 @@ export function EditProjectFlowLiveHarness(): JSX.Element {
               color: value.color,
               glyph: value.glyph,
               defaultCli: value.defaultCli,
+              env: value.env,
             }
           : r,
       ),
     );
     append(
-      `edit(${id}) → ${value.name} · ${value.glyph} · ${value.color} · ${value.defaultCli ?? "—"}`,
+      `edit(${id}) → ${value.name} · ${value.glyph} · ${value.color} · ${value.defaultCli ?? "—"} · env=${Object.keys(value.env).length}`,
     );
   };
 

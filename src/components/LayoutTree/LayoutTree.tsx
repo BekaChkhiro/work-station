@@ -27,6 +27,7 @@ import { Match, Show, Switch } from "solid-js";
 import type { JSX } from "solid-js";
 import { SplitPane } from "../SplitPane";
 import { Pane } from "../Pane";
+import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import {
   isPane,
   isSplit,
@@ -54,6 +55,10 @@ export interface LayoutTreeProps {
   /** T5.5 — fired when a pane is clicked or receives keyboard focus
    *  (focusin from any descendant). Reduce these into `focusedSessionId`. */
   onFocusPane?: (sessionId: string) => void;
+  /** T7.3 — detected CLIs shown by each pane's quick-launch button. */
+  clis?: readonly PaneCliOption[];
+  /** T7.3 — parent-owned launch action for replace vs. split semantics. */
+  onLaunchCli?: (sessionId: string, cli: PaneCliOption, mode: PaneCliLaunchMode) => void;
   /** Internal — accumulates "L"/"R" chars on the recursive descent. The
    *  root call defaults to "". Callers should leave this unset. */
   path?: LayoutPath;
@@ -79,6 +84,8 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
         sessionId={sessionId}
         focused={props.focusedSessionId === sessionId}
         onFocus={props.onFocusPane}
+        clis={props.clis}
+        onLaunchCli={props.onLaunchCli}
       >
         {props.renderPane(sessionId)}
       </Pane>
@@ -107,6 +114,8 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
                 onRatioChange={props.onRatioChange}
                 focusedSessionId={props.focusedSessionId}
                 onFocusPane={props.onFocusPane}
+                clis={props.clis}
+                onLaunchCli={props.onLaunchCli}
                 path={path() + "L"}
               />
             }
@@ -117,6 +126,8 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
                 onRatioChange={props.onRatioChange}
                 focusedSessionId={props.focusedSessionId}
                 onFocusPane={props.onFocusPane}
+                clis={props.clis}
+                onLaunchCli={props.onLaunchCli}
                 path={path() + "R"}
               />
             }

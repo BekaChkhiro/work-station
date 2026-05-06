@@ -30,6 +30,8 @@ export interface PaneHotkeyHandlers {
    *  has the path map; we keep this module decoupled by going through a
    *  callback. */
   resolveCwd: (projectId: string) => string | null;
+  /** Extra environment variables saved on the project row. */
+  resolveEnv?: (projectId: string) => Record<string, string>;
   /** Default shell command (e.g. "/bin/zsh", "powershell.exe"). */
   shellCommand: () => string;
   /** Args for the shell — typically `["-l"]` on Unix to source profile
@@ -52,12 +54,13 @@ const handleSplit = async (
   if (!ws || !ws.focusedSessionId) return;
   const target = ws.focusedSessionId;
   const cwd = handlers.resolveCwd(projectId);
+  const env = handlers.resolveEnv?.(projectId) ?? {};
   try {
     const resp = await ptySpawn({
       command: handlers.shellCommand(),
       args: handlers.shellArgs?.() ?? [],
       cwd: cwd ?? undefined,
-      env: { WS_PROJECT_ID: projectId },
+      env: { ...env, WS_PROJECT_ID: projectId },
       cols: 80,
       rows: 24,
     });
