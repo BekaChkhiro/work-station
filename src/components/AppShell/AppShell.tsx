@@ -81,6 +81,9 @@ export interface AppShellProps {
   onDismissCliWarning?: (projectId: string) => void;
   /** T7.8 — open install docs for the given CLI name in the default browser. */
   onInstallHint?: (cliName: string) => void;
+  /** T7.8 — return true when a known install URL exists for `cliName`.
+   *  Controls whether the "Install instructions" button is rendered at all. */
+  hasInstallUrl?: (cliName: string) => boolean;
   /** Placeholder rendered when a project has no layout (no panes). The
    *  caller can return a "spawn first pane" CTA, an empty illustration,
    *  whatever. Defaults to a quiet hint. */
@@ -157,6 +160,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
                   cliWarning={props.resolveCliWarning?.(project.id) ?? null}
                   onDismissCliWarning={() => props.onDismissCliWarning?.(project.id)}
                   onInstallHint={props.onInstallHint}
+                  hasInstallUrl={props.hasInstallUrl}
                 />
               </div>
             );
@@ -212,6 +216,7 @@ interface ProjectWorkspaceViewProps {
   cliWarning?: string | null;
   onDismissCliWarning?: () => void;
   onInstallHint?: (cliName: string) => void;
+  hasInstallUrl?: (cliName: string) => boolean;
 }
 
 function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
@@ -250,7 +255,7 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
             <span class="ws-cli-warning__text">
               <strong class="ws-cli-warning__name">{missingCli()}</strong>
               {" was not found on PATH. Launched fallback shell instead."}
-              <Show when={props.onInstallHint}>
+              <Show when={props.hasInstallUrl?.(missingCli())}>
                 {" "}
                 <button
                   type="button"

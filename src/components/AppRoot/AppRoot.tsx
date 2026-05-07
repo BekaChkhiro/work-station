@@ -20,6 +20,12 @@
 import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+
+const CLI_INSTALL_URLS: Readonly<Record<string, string>> = {
+  claude: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
+  codex: "https://github.com/openai/codex?tab=readme-ov-file#quickstart",
+  kimi: "https://github.com/MoonshotAI/moonshot-cli",
+};
 import { AppShell } from "../AppShell";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import { cliMetaForId } from "../../types/cli";
@@ -179,14 +185,6 @@ export function AppRoot(): JSX.Element {
       void _drop;
       return rest;
     });
-  };
-
-  // Install URLs for known CLIs — opened in the default browser when the
-  // user clicks "Install instructions" in the warning banner.
-  const CLI_INSTALL_URLS: Record<string, string> = {
-    claude: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
-    codex: "https://github.com/openai/codex?tab=readme-ov-file#quickstart",
-    kimi: "https://github.com/MoonshotAI/moonshot-cli",
   };
 
   const handleInstallHint = (missingCli: string): void => {
@@ -570,6 +568,7 @@ export function AppRoot(): JSX.Element {
               resolveCliWarning={(projectId) => cliNotFoundWarnings()[projectId] ?? null}
               onDismissCliWarning={dismissCliWarning}
               onInstallHint={handleInstallHint}
+              hasInstallUrl={(cliName) => cliName in CLI_INSTALL_URLS}
             />
           </Match>
         </Switch>
