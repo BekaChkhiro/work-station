@@ -47,6 +47,10 @@ export interface AddProjectFormValue {
    *  by the backend. */
   defaultCli: string | null;
   env: ProjectEnvVars;
+  /** T7.6 — optional shell lines run before the main CLI in the same shell
+   *  (e.g. `nvm use 20`, `source .env.local`). Order is preserved; empty/
+   *  whitespace-only entries are dropped on submit. */
+  startupCommands: string[];
 }
 
 export type ProjectFormMode = "create" | "edit";
@@ -101,7 +105,13 @@ interface EnvRow {
   value: string;
 }
 
+interface StartupRow {
+  id: number;
+  value: string;
+}
+
 let nextEnvRowId = 1;
+let nextStartupRowId = 1;
 
 const toEnvRows = (env: ProjectEnvVars | undefined): EnvRow[] =>
   Object.entries(env ?? {})
@@ -127,6 +137,26 @@ const envEqual = (a: ProjectEnvVars, b: ProjectEnvVars): boolean => {
     const otherKey = bKeys[i];
     if (key === undefined || otherKey === undefined) return false;
     if (key !== otherKey || a[key] !== b[key]) return false;
+  }
+  return true;
+};
+
+const toStartupRows = (commands: readonly string[] | undefined): StartupRow[] =>
+  (commands ?? []).map((value) => ({
+    id: nextStartupRowId++,
+    value,
+  }));
+
+// Drop whitespace-only entries — the backend treats them as no-ops anyway,
+// and we want the dirty check to ignore an empty placeholder row the user
+// added but didn't fill in.
+const rowsToStartupCommands = (rows: readonly StartupRow[]): string[] =>
+  rows.map((row) => row.value).filter((line) => line.trim().length > 0);
+
+const startupCommandsEqual = (a: readonly string[], b: readonly string[]): boolean => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
   }
   return true;
 };
@@ -174,6 +204,9 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
   const [defaultCli, setDefaultCli] = createSignal<string | null>(null);
   const [envRows, setEnvRows] = createSignal<EnvRow[]>([]);
   const [environmentOpen, setEnvironmentOpen] = createSignal(true);
+  const [startupRows, setStartupRows] = createSignal<StartupRow[]>([]);
+  const [startupOpen, setStartupOpen] = createSignal(true);
+  const [draggingStartupId, setDraggingStartupId] = createSignal<number | null>(null);
   const [submitting, setSubmitting] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -193,7 +226,8 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       color() !== init.color ||
       effectiveGlyph() !== init.glyph ||
       defaultCli() !== init.defaultCli ||
-      !envEqual(rowsToEnv(envRows()), init.env)
+      !envEqual(rowsToEnv(envRows()), init.env) ||
+      !startupCommandsEqual(rowsToStartupCommands(startupRows()), init.startupCommands)
     );
   });
 
@@ -246,6 +280,8 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       setDefaultCli(v.defaultCli);
       setEnvRows(toEnvRows(v.env));
       setEnvironmentOpen(Object.keys(v.env).length > 0);
+      setStartupRows(toStartupRows(v.startupCommands));
+      setStartupOpen(v.startupCommands.length > 0);
     } else {
       setName("");
       setPath(props.initialPath ?? "");
@@ -254,7 +290,10 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
       setDefaultCli(null);
       setEnvRows([]);
       setEnvironmentOpen(false);
+      setStartupRows([]);
+      setStartupOpen(false);
     }
+    setDraggingStartupId(null);
     setSubmitting(false);
     setError(null);
     queueMicrotask(() => nameInput?.focus());
@@ -298,6 +337,7 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
         glyph: effectiveGlyph(),
         defaultCli: defaultCli(),
         env: rowsToEnv(envRows()),
+        startupCommands: rowsToStartupCommands(startupRows()),
       });
       props.onClose();
     } catch (err) {
@@ -318,6 +358,56 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
 
   const deleteEnvRow = (id: number): void => {
     setEnvRows((rows) => rows.filter((row) => row.id !== id));
+  };
+
+  const addStartupRow = (): void => {
+    setStartupRows((rows) => [...rows, { id: nextStartupRowId++, value: "" }]);
+    setStartupOpen(true);
+  };
+
+  const updateStartupRow = (id: number, value: string): void => {
+    setStartupRows((rows) => rows.map((row) => (row.id === id ? { ...row, value } : row)));
+  };
+
+  const deleteStartupRow = (id: number): void => {
+    setStartupRows((rows) => rows.filter((row) => row.id !== id));
+  };
+
+  const moveStartupRow = (id: number, delta: -1 | 1): void => {
+    setStartupRows((rows) => {
+      const idx = rows.findIndex((row) => row.id === id);
+      if (idx === -1) return rows;
+      const target = idx + delta;
+      if (target < 0 || target >= rows.length) return rows;
+      const next = rows.slice();
+      const [moved] = next.splice(idx, 1);
+      if (!moved) return rows;
+      next.splice(target, 0, moved);
+      return next;
+    });
+  };
+
+  // Native HTML5 drag-and-drop is plenty for a small modal list; the
+  // pointer-capture dance the Sidebar uses (T6.7) only matters because the
+  // grip lives next to a clickable row that can't itself be `draggable`.
+  // Here the entire row participates so dataTransfer can stay bare.
+  const handleStartupDrop = (targetId: number): void => {
+    const sourceId = draggingStartupId();
+    if (sourceId === null || sourceId === targetId) {
+      setDraggingStartupId(null);
+      return;
+    }
+    setStartupRows((rows) => {
+      const fromIdx = rows.findIndex((row) => row.id === sourceId);
+      const toIdx = rows.findIndex((row) => row.id === targetId);
+      if (fromIdx === -1 || toIdx === -1) return rows;
+      const next = rows.slice();
+      const [moved] = next.splice(fromIdx, 1);
+      if (!moved) return rows;
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+    setDraggingStartupId(null);
   };
 
   return (
@@ -555,6 +645,115 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
               </Show>
             </section>
 
+            <section class="ws-apm__section">
+              <button
+                type="button"
+                class="ws-apm__section-head"
+                aria-expanded={startupOpen()}
+                onClick={() => setStartupOpen((open) => !open)}
+                disabled={submitting()}
+              >
+                <span class="ws-apm__field-label">Startup commands</span>
+                <span class="ws-apm__section-chevron" aria-hidden="true">
+                  {startupOpen() ? "−" : "+"}
+                </span>
+              </button>
+              <Show when={startupOpen()}>
+                <div class="ws-apm__startup-list">
+                  <Show
+                    when={startupRows().length > 0}
+                    fallback={
+                      <div class="ws-apm__empty-note">
+                        Run before the main CLI in the same shell (e.g. <code>nvm use 20</code>).
+                      </div>
+                    }
+                  >
+                    <For each={startupRows()}>
+                      {(row, index) => {
+                        const isFirst = (): boolean => index() === 0;
+                        const isLast = (): boolean => index() === startupRows().length - 1;
+                        const dragging = (): boolean => draggingStartupId() === row.id;
+                        return (
+                          <div
+                            class="ws-apm__startup-row"
+                            data-dragging={dragging() ? "true" : undefined}
+                            onDragOver={(e) => {
+                              if (draggingStartupId() === null) return;
+                              e.preventDefault();
+                            }}
+                            onDrop={(e) => {
+                              if (draggingStartupId() === null) return;
+                              e.preventDefault();
+                              handleStartupDrop(row.id);
+                            }}
+                          >
+                            <span
+                              class="ws-apm__startup-grip"
+                              draggable={!submitting()}
+                              role="button"
+                              aria-label={`Reorder command ${index() + 1}`}
+                              tabIndex={0}
+                              onDragStart={(e) => {
+                                if (submitting()) {
+                                  e.preventDefault();
+                                  return;
+                                }
+                                setDraggingStartupId(row.id);
+                                if (e.dataTransfer) {
+                                  e.dataTransfer.effectAllowed = "move";
+                                  // Required by Firefox for drag to fire.
+                                  e.dataTransfer.setData("text/plain", String(row.id));
+                                }
+                              }}
+                              onDragEnd={() => setDraggingStartupId(null)}
+                              onKeyDown={(e) => {
+                                if (e.key === "ArrowUp") {
+                                  e.preventDefault();
+                                  if (!isFirst()) moveStartupRow(row.id, -1);
+                                } else if (e.key === "ArrowDown") {
+                                  e.preventDefault();
+                                  if (!isLast()) moveStartupRow(row.id, 1);
+                                }
+                              }}
+                            >
+                              <GripDots />
+                            </span>
+                            <input
+                              class="ws-apm__input ws-apm__input--mono ws-apm__startup-input"
+                              type="text"
+                              value={row.value}
+                              onInput={(e) => updateStartupRow(row.id, e.currentTarget.value)}
+                              placeholder="nvm use 20"
+                              spellcheck={false}
+                              autocomplete="off"
+                              disabled={submitting()}
+                            />
+                            <button
+                              type="button"
+                              class="ws-apm__icon-btn ws-apm__startup-delete"
+                              aria-label={`Delete command ${index() + 1}`}
+                              onClick={() => deleteStartupRow(row.id)}
+                              disabled={submitting()}
+                            >
+                              <IconX />
+                            </button>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </Show>
+                  <button
+                    type="button"
+                    class="ws-apm__btn ws-apm__btn--ghost ws-apm__btn--sm ws-apm__startup-add"
+                    onClick={addStartupRow}
+                    disabled={submitting()}
+                  >
+                    + Add command
+                  </button>
+                </div>
+              </Show>
+            </section>
+
             <div class="ws-apm__field">
               <span class="ws-apm__field-label">Icon glyph</span>
               <div class="ws-apm__icon-grid" role="radiogroup" aria-label="Icon glyph">
@@ -637,6 +836,22 @@ function IconX(): JSX.Element {
         stroke-width="1.4"
         stroke-linecap="round"
       />
+    </svg>
+  );
+}
+
+// 6×6 grip-dots — same visual treatment as the Sidebar drag handle (T6.7).
+function GripDots(): JSX.Element {
+  return (
+    <svg width="8" height="12" viewBox="0 0 8 12" aria-hidden="true">
+      <g fill="currentColor">
+        <circle cx="2" cy="2" r="1" />
+        <circle cx="6" cy="2" r="1" />
+        <circle cx="2" cy="6" r="1" />
+        <circle cx="6" cy="6" r="1" />
+        <circle cx="2" cy="10" r="1" />
+        <circle cx="6" cy="10" r="1" />
+      </g>
     </svg>
   );
 }
