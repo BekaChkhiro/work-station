@@ -619,6 +619,41 @@ button {
   display: inline-flex;
   gap: 2px;
 }
+.ws-cli-pop__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ws-cli-pop__action {
+  display: inline-flex;
+  height: 22px;
+  width: 22px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+.ws-cli-pop__action:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+.ws-cli-pop__action:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: 1px;
+}
+.ws-cli-pop__action svg {
+  height: 14px;
+  width: 14px;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  fill: none;
+}
 .ws-cli-pop__kbd {
   min-width: 15px;
   border: 1px solid var(--border-default);
@@ -634,6 +669,56 @@ button {
   padding: var(--sp-3) 10px;
   color: var(--text-tertiary);
   font-size: var(--fs-12);
+}
+
+/* Settings popover anchored to the sidebar footer cog. Positioned in
+ * viewport coordinates by `SettingsMenu`; the rule below provides shell
+ * styling only. */
+.ws-settings {
+  position: fixed;
+  z-index: 90;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.ws-settings__head {
+  padding: 6px 10px 4px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.ws-settings__group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-surface);
+}
+.ws-settings__opt {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: calc(var(--r-sm) - 1px);
+  color: var(--text-secondary);
+  font-size: var(--fs-12);
+  text-align: center;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.ws-settings__opt:hover {
+  color: var(--text-primary);
+}
+.ws-settings__opt[data-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 /* Project-level terminal empty state shown after the last pane closes. */

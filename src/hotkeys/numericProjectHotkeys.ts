@@ -2,10 +2,12 @@
 //
 // Listens at the document level so any pane (including xterm, which
 // captures keystrokes via a hidden textarea) can still bubble the
-// keystroke up. The hotkey is intentionally suppressed when focus is
-// inside an editable surface — text inputs, textareas, contenteditable
-// regions, or an xterm pane — so a user typing `Cmd+1` in a shell or
-// form field gets the host's native behavior, not a project switch.
+// keystroke up. The hotkey deliberately fires even when focus is
+// inside an xterm pane — switching projects is a global navigation
+// action that must beat the shell's native Cmd+digit behavior.
+// Plain text inputs / textareas / contenteditable surfaces still
+// suppress it so typing `Cmd+1` inside a form field doesn't yank
+// the user away from what they're filling in.
 //
 // Centralized here (rather than inside AppShell) so future surfaces
 // — e.g. a hotkey-registry settings page (T8.1) or a standalone window
@@ -16,7 +18,18 @@
 
 import { onCleanup, onMount } from "solid-js";
 import { projects, setActiveProject } from "../stores/workspace";
-import { isEditableTarget, isMac } from "../utils/platform";
+import { isMac } from "../utils/platform";
+
+const isPlainTextEditable = (el: Element | null): boolean => {
+  if (!el) return false;
+  // xterm's input surface is a real <textarea> nested under `.xterm`. We
+  // explicitly want the hotkey to fire there, so let it through before
+  // the generic input/textarea check below.
+  if (el.closest(".xterm")) return false;
+  if (el instanceof HTMLElement && el.isContentEditable) return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+};
 
 /** Install document-level Cmd/Ctrl+1..9 → switch active project by
  *  sidebar position. Returns a cleanup that removes the listener. */
@@ -25,7 +38,9 @@ export function installNumericProjectHotkeys(): () => void {
     const mod = isMac ? e.metaKey : e.ctrlKey;
     if (!mod || e.altKey || e.shiftKey) return;
     if (e.key < "1" || e.key > "9") return;
-    if (isEditableTarget(document.activeElement)) return;
+    // Skip plain text-editing surfaces but DO fire when focus is in an
+    // xterm pane — Cmd+digit must navigate projects from the terminal.
+    if (isPlainTextEditable(document.activeElement)) return;
     const idx = Number.parseInt(e.key, 10) - 1;
     const target = projects()[idx];
     if (!target) return;

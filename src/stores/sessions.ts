@@ -19,6 +19,10 @@ export interface SessionEntry {
   getScrollback: () => string[];
   /** Reveal the given (0-based) buffer line in the owning pane and focus it. */
   focusLine: (line: number) => void;
+  /** Move keyboard focus to this terminal's input surface. Used by the
+   *  project-switch flow so the last-focused pane keeps the cursor without
+   *  the user having to click. */
+  focus: () => void;
 }
 
 interface SessionStore {

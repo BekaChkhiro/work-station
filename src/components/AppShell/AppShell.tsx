@@ -17,11 +17,12 @@
 // scoped search metadata, etc.) stays out of this file — it just deals
 // in layout trees and sessionIds.
 
-import { For, Show } from "solid-js";
+import { For, Show, createEffect, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 import { LayoutTree } from "../LayoutTree";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
+import { SettingsMenu } from "../SettingsMenu";
 import { Sidebar } from "../Sidebar";
 import type { LayoutPath } from "../../types/layout";
 import {
@@ -33,7 +34,9 @@ import {
   updateLayoutRatio,
   getWorkspace,
 } from "../../stores/workspace";
+import { sessionList } from "../../stores/sessions";
 import { useNumericProjectHotkeys } from "../../hotkeys/numericProjectHotkeys";
+import { usePaneNavHotkeys } from "../../hotkeys/paneNavHotkeys";
 
 export interface AppShellProps {
   /** Render the contents of a single pane leaf for `projectId` / `sessionId`.
@@ -79,9 +82,39 @@ const defaultEmptyWorkspace = (): JSX.Element => (
 
 export function AppShell(props: AppShellProps): JSX.Element {
   // T6.3: Cmd/Ctrl+1..9 jumps to project N by sidebar position. Suppressed
-  // when focus is inside a terminal pane or text input — see hotkeys/
-  // numericProjectHotkeys.ts.
+  // only inside plain text inputs — terminal panes pass it through. See
+  // hotkeys/numericProjectHotkeys.ts.
   useNumericProjectHotkeys();
+
+  // Cmd/Ctrl+Alt+Arrow → move focus between panes inside the active
+  // project. Geometry-based; see hotkeys/paneNavHotkeys.ts.
+  usePaneNavHotkeys();
+
+  // Settings popover anchored to the sidebar's footer cog.
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [settingsAnchor, setSettingsAnchor] = createSignal<HTMLButtonElement | null>(null);
+
+  // Auto-focus the previously focused pane whenever the active project
+  // flips so the user can keep typing without an extra click. The display
+  // toggle in the workspace area happens synchronously in this same render
+  // pass; defer to the next microtask so xterm's hidden textarea has been
+  // re-parented into a visible ancestor before we ask it to take focus.
+  createEffect(() => {
+    const projectId = activeProjectId();
+    if (!projectId) return;
+    const ws = getWorkspace(projectId);
+    const sessionId = ws?.focusedSessionId;
+    if (!sessionId) return;
+    queueMicrotask(() => {
+      // Re-check: a fast project flip could have changed the target while
+      // we waited. Focus only if the resolved session is still current.
+      if (activeProjectId() !== projectId) return;
+      const live = getWorkspace(projectId);
+      if (live?.focusedSessionId !== sessionId) return;
+      const entry = sessionList().find((s) => s.id === sessionId);
+      entry?.focus();
+    });
+  });
 
   return (
     <div class="ws-appshell relative grid h-full w-full grid-cols-[1fr_auto] bg-canvas text-fg">
@@ -129,9 +162,18 @@ export function AppShell(props: AppShellProps): JSX.Element {
         onEdit={props.onEditProject}
         onContextMenu={props.onProjectContextMenu}
         onReorder={props.onReorderProjects}
-        onSettings={() => props.onOpenSettings?.()}
+        onSettings={() => {
+          setSettingsOpen((open) => !open);
+          props.onOpenSettings?.();
+        }}
+        onSettingsAnchor={setSettingsAnchor}
         onToggleCollapse={() => props.onToggleSidebar?.()}
         newProjectShortcut="⌘N"
+      />
+      <SettingsMenu
+        open={settingsOpen()}
+        anchor={settingsAnchor()}
+        onClose={() => setSettingsOpen(false)}
       />
     </div>
   );

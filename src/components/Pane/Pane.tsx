@@ -23,6 +23,7 @@
 
 import { For, Show, children, createEffect, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
+import type { SplitDirection } from "../../types/layout";
 
 export interface PaneCliOption {
   name: string;
@@ -30,7 +31,7 @@ export interface PaneCliOption {
   version: string | null;
 }
 
-export type PaneCliLaunchMode = "replace" | "split";
+export type PaneCliLaunchMode = "replace" | `split-${SplitDirection}`;
 
 export interface PaneProps {
   /** Stable identifier for this pane (typically the PTY sessionId). Echoed
@@ -161,12 +162,12 @@ function CliLaunchMenu(props: CliLaunchMenuProps): JSX.Element {
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      pickAt(selected(), event.shiftKey ? "split" : "replace");
+      pickAt(selected(), event.shiftKey ? "split-v" : "split-h");
       return;
     }
     if ((event.metaKey || event.ctrlKey) && /^[1-9]$/.test(event.key)) {
       event.preventDefault();
-      pickAt(Number.parseInt(event.key, 10) - 1, event.shiftKey ? "split" : "replace");
+      pickAt(Number.parseInt(event.key, 10) - 1, event.shiftKey ? "split-v" : "split-h");
     }
   };
 
@@ -198,27 +199,48 @@ function CliLaunchMenu(props: CliLaunchMenuProps): JSX.Element {
       >
         <For each={props.clis}>
           {(cli, index) => (
-            <button
-              type="button"
+            <div
               class="ws-cli-pop__row"
               role="menuitem"
               data-selected={selected() === index() ? "true" : undefined}
               onMouseEnter={() => setSelected(index())}
-              onClick={(event) => {
-                event.stopPropagation();
-                props.onPick(cli, event.shiftKey ? "split" : "replace");
-              }}
             >
               <span class="ws-cli-pop__dot" />
               <span class="ws-cli-pop__name">{cli.name}</span>
               <span class="ws-cli-pop__version">{cli.version ?? ""}</span>
-              <Show when={index() < 9}>
-                <span class="ws-cli-pop__keys">
-                  <Kbd>⌘</Kbd>
-                  <Kbd>{String(index() + 1)}</Kbd>
-                </span>
-              </Show>
-            </button>
+              <span class="ws-cli-pop__actions">
+                <button
+                  type="button"
+                  class="ws-cli-pop__action"
+                  aria-label={`Open ${cli.name} side by side`}
+                  title="Open side by side"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    props.onPick(cli, event.altKey ? "replace" : "split-h");
+                  }}
+                >
+                  <IconSplitRight />
+                </button>
+                <button
+                  type="button"
+                  class="ws-cli-pop__action"
+                  aria-label={`Open ${cli.name} stacked`}
+                  title="Open stacked"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    props.onPick(cli, event.altKey ? "replace" : "split-v");
+                  }}
+                >
+                  <IconSplitDown />
+                </button>
+                <Show when={index() < 9}>
+                  <span class="ws-cli-pop__keys">
+                    <Kbd>⌘</Kbd>
+                    <Kbd>{String(index() + 1)}</Kbd>
+                  </span>
+                </Show>
+              </span>
+            </div>
           )}
         </For>
       </Show>
@@ -234,6 +256,22 @@ function IconPlus(): JSX.Element {
   return (
     <svg viewBox="0 0 16 16" aria-hidden="true">
       <path d="M8 3.5v9M3.5 8h9" />
+    </svg>
+  );
+}
+
+function IconSplitRight(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3 3.5h10v9H3zM8 3.5v9" />
+    </svg>
+  );
+}
+
+function IconSplitDown(): JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3 3.5h10v9H3zM3 8h10" />
     </svg>
   );
 }

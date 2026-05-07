@@ -66,6 +66,9 @@ export interface SidebarProps {
   onAdd?(): void;
   /** Fires when the footer settings cog is pressed. */
   onSettings?(): void;
+  /** Hands the settings cog DOM node back to the parent. The parent uses
+   *  the rect of this element to anchor a popover (see `SettingsMenu`). */
+  onSettingsAnchor?(el: HTMLButtonElement | null): void;
   /** Fires when the collapse/expand control is pressed. */
   onToggleCollapse?(): void;
   /** Optional hint shown next to the "New project" button (e.g. "⌘N"). */
@@ -351,6 +354,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
           ) : null}
         </button>
         <button
+          ref={(el) => props.onSettingsAnchor?.(el)}
           type="button"
           class="ws-sb__icon-btn"
           aria-label="Settings"

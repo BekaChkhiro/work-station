@@ -25,6 +25,13 @@ import {
 import type { SplitDirection } from "../types/layout";
 import { isMac } from "../utils/platform";
 
+export interface PaneHotkeyDefaultCli {
+  /** Stable CLI id (e.g. "claude", "zsh"). Echoed into `WS_CLI_NAME`. */
+  name: string;
+  /** Absolute path to the executable as detected on PATH. */
+  path: string;
+}
+
 export interface PaneHotkeyHandlers {
   /** Resolves to the cwd to use for new shells in `projectId`. The AppRoot
    *  has the path map; we keep this module decoupled by going through a
@@ -38,6 +45,11 @@ export interface PaneHotkeyHandlers {
    *  files (Homebrew PATH, asdf, etc.) so split shells can find brew-
    *  installed tools when the app was launched from Finder. */
   shellArgs?: () => string[];
+  /** T7.4 — return the project's default CLI when one is configured AND
+   *  detected on PATH. Splits use this in preference to the system shell so
+   *  new panes inherit the project's CLI choice; the user can still swap a
+   *  pane via the per-pane CLI dropdown (T7.3). */
+  resolveDefaultCli?: (projectId: string) => PaneHotkeyDefaultCli | null;
   /** Open the Add Project modal. */
   onAddProject: () => void;
   /** Surface a user-visible error from one of the IPC calls. */
@@ -55,12 +67,15 @@ const handleSplit = async (
   const target = ws.focusedSessionId;
   const cwd = handlers.resolveCwd(projectId);
   const env = handlers.resolveEnv?.(projectId) ?? {};
+  const defaultCli = handlers.resolveDefaultCli?.(projectId) ?? null;
   try {
     const resp = await ptySpawn({
-      command: handlers.shellCommand(),
-      args: handlers.shellArgs?.() ?? [],
+      command: defaultCli ? defaultCli.path : handlers.shellCommand(),
+      args: defaultCli ? [] : (handlers.shellArgs?.() ?? []),
       cwd: cwd ?? undefined,
-      env: { ...env, WS_PROJECT_ID: projectId },
+      env: defaultCli
+        ? { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: defaultCli.name }
+        : { ...env, WS_PROJECT_ID: projectId },
       cols: 80,
       rows: 24,
     });

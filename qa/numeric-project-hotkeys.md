@@ -10,9 +10,9 @@ position N. Wired in `src/hotkeys/numericProjectHotkeys.ts`, installed by
 2. In the Tauri window, navigate to `?wsdebug=appshell`. Three demo
    projects spawn: `argon-web` (1), `kepler-cli` (2), `borealis-api` (3).
 
-## Acceptance — "hotkey works from anywhere except inside terminal/text input"
+## Acceptance — "hotkey works everywhere except plain text inputs"
 
-### Works
+### Works from the sidebar / empty workspace
 
 1. Click the **sidebar** (any project row) so focus leaves the terminal
    pane.
@@ -22,21 +22,24 @@ position N. Wired in `src/hotkeys/numericProjectHotkeys.ts`, installed by
    `Ctrl+3` → `borealis-api`. Press `Cmd+4` → no change (no project at
    index 4).
 
-### Suppressed inside a terminal pane
+### Works from inside a terminal pane
 
 1. Click into the active project's terminal so xterm has focus.
-2. Press `Cmd+2` / `Ctrl+2`. The active project must NOT change. xterm
-   handles the keystroke (no project switch is intentional — see
-   `isEditableTarget` in `numericProjectHotkeys.ts`).
-3. Click the sidebar; the same hotkey now switches projects.
+2. Press `Cmd+2` / `Ctrl+2`. The active project should switch to
+   `kepler-cli` and the keystroke must NOT reach the shell (no stray
+   `^B` / digit echo in the prompt). xterm's
+   `attachCustomKeyEventHandler` returns false for `Cmd+1..9` so the
+   document-level handler in `numericProjectHotkeys.ts` owns the event.
+3. Switching back to the prior project should immediately restore
+   focus to the last-active terminal — start typing without clicking.
 
-### Suppressed inside text inputs
+### Suppressed inside plain text inputs
 
-Once a future surface (settings page, add-project form, search box)
-exposes a focusable text input, the hotkey must stay inert while the
-caret is in that input. The hook tests for `INPUT`/`TEXTAREA`/`SELECT`
-elements and `contenteditable` regions, so any standard editable
-surface is covered automatically.
+Once a surface (settings page, add-project form, search box) exposes a
+focusable text input, the hotkey must stay inert while the caret is in
+that input. The hook tests for `INPUT`/`TEXTAREA`/`SELECT` elements and
+`contenteditable` regions; xterm panes are explicitly NOT treated as
+plain text inputs for this hotkey.
 
 ## Modifier rules
 

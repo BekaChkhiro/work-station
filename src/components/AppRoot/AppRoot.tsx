@@ -7,10 +7,8 @@
 //
 // Responsibilities:
 //   • Boot: load existing projects from SQLite, register them in the
-//     workspace store, and spawn one default shell per project so the
-//     T6.5 acceptance ("New project appears with one tab + one pane open")
-//     also holds for previously-created projects until T2.12 layout
-//     restore lands.
+//     workspace store with an empty layout. Terminals are intentionally
+//     user-launched through the per-project CLI launcher.
 //   • Render `AppShell` with `renderPane` returning a real `Terminal`.
 //   • Wire `AddProjectModal` (create), `AddProjectModal mode=edit`,
 //     `DeleteProjectConfirm`, `ProjectContextMenu`, and the empty-state
@@ -19,7 +17,7 @@
 //     store's layout tree (covers split panes from T5.6) so every PTY
 //     gets killed before the DB row is removed.
 
-import { Match, Switch, createSignal, onCleanup, onMount } from "solid-js";
+import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AppShell } from "../AppShell";
@@ -85,22 +83,6 @@ const defaultShellArgs = (): string[] => {
   return ["-l"];
 };
 
-const spawnDefaultShell = async (
-  projectId: string,
-  cwd: string,
-  env: ProjectEnvVars,
-): Promise<string> => {
-  const resp = await ptySpawn({
-    command: defaultShell(),
-    args: defaultShellArgs(),
-    cwd: cwd.length > 0 ? cwd : undefined,
-    env: { ...env, WS_PROJECT_ID: projectId },
-    cols: 80,
-    rows: 24,
-  });
-  return resp.sessionId;
-};
-
 export function AppRoot(): JSX.Element {
   const [boot, setBoot] = createSignal<BootState>({ kind: "loading" });
   const [collapsed, setCollapsed] = createSignal(false);
@@ -135,6 +117,17 @@ export function AppRoot(): JSX.Element {
     sessionsByProject[projectId] = list.filter((id) => id !== sessionId);
   };
 
+  // T7.4 — resolve a project's default CLI to a `PaneCliOption` if (and
+  // only if) the saved id is in the boot-detected list. Returns `null`
+  // when the project has no default, or when the configured CLI isn't on
+  // PATH right now (T7.8 will turn that case into an inline warning;
+  // until then the pane silently falls back to the system shell).
+  const resolveDefaultCli = (projectId: string): PaneCliOption | null => {
+    const id = projectClis[projectId];
+    if (!id) return null;
+    return availableClis().find((cli) => cli.name === id) ?? null;
+  };
+
   // Pane / project hotkeys: Cmd+\, Cmd+Shift+\, Cmd+W, Cmd+N. Wire to the
   // shadow map for cwd lookup so split shells inherit the project's folder.
   usePaneHotkeys({
@@ -142,6 +135,10 @@ export function AppRoot(): JSX.Element {
     resolveEnv: (id) => projectEnvs[id] ?? {},
     shellCommand: defaultShell,
     shellArgs: defaultShellArgs,
+    resolveDefaultCli: (id) => {
+      const cli = resolveDefaultCli(id);
+      return cli ? { name: cli.name, path: cli.path } : null;
+    },
     onAddProject: () => {
       setActionError(null);
       setAddOpen(true);
@@ -149,7 +146,7 @@ export function AppRoot(): JSX.Element {
     onError: (msg) => setActionError(msg),
   });
 
-  const registerProject = (persisted: Project, sessionId: string | null): void => {
+  const registerProject = (persisted: Project): void => {
     projectPaths[persisted.id] = persisted.path;
     projectClis[persisted.id] = persisted.defaultCli;
     projectEnvs[persisted.id] = persisted.env;
@@ -161,8 +158,8 @@ export function AppRoot(): JSX.Element {
         glyph: persisted.icon ?? persisted.name.slice(0, 2).toUpperCase(),
       },
       {
-        layout: sessionId !== null ? paneNode(sessionId) : null,
-        focusedSessionId: sessionId,
+        layout: null,
+        focusedSessionId: null,
       },
     );
   };
@@ -186,20 +183,7 @@ export function AppRoot(): JSX.Element {
         }
         const persisted = await listProjects();
         for (const p of persisted) {
-          // Best-effort — if the shell fails to spawn (e.g. /bin/zsh
-          // missing), the project still registers without a session and
-          // the user can re-spawn via T5.6 once that wires up.
-          let sessionId: string | null = null;
-          try {
-            sessionId = await spawnDefaultShell(p.id, p.path, p.env);
-            trackSession(p.id, sessionId);
-          } catch (err) {
-            // Surface once at boot but keep going so the rest of the list
-            // still loads.
-            const message = err instanceof Error ? err.message : String(err);
-            console.warn(`failed to spawn default shell for ${p.name}: ${message}`);
-          }
-          registerProject(p, sessionId);
+          registerProject(p);
         }
         setBoot({ kind: "ready" });
       } catch (err) {
@@ -234,17 +218,7 @@ export function AppRoot(): JSX.Element {
       defaultCli: value.defaultCli,
       env: value.env,
     });
-    let sessionId: string | null = null;
-    try {
-      sessionId = await spawnDefaultShell(created.id, created.path, created.env);
-      trackSession(created.id, sessionId);
-    } catch (err) {
-      // Project is created in the DB even if the shell fails — surface the
-      // shell error so the user knows why no pane appeared. They can
-      // re-spawn via T5.6.
-      setActionError(err instanceof Error ? err.message : String(err));
-    }
-    registerProject(created, sessionId);
+    registerProject(created);
     setActiveProject(created.id);
   };
 
@@ -385,8 +359,8 @@ export function AppRoot(): JSX.Element {
     try {
       const nextSessionId = await spawnCli(projectId, cli);
       trackSession(projectId, nextSessionId);
-      if (mode === "split") {
-        splitPane(projectId, sessionId, "h", nextSessionId);
+      if (mode === "split-h" || mode === "split-v") {
+        splitPane(projectId, sessionId, mode === "split-h" ? "h" : "v", nextSessionId);
         const ws = getWorkspace(projectId);
         const didAttach =
           ws?.layout !== null &&
@@ -426,6 +400,24 @@ export function AppRoot(): JSX.Element {
       setActionError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  // T7.4 — auto-launch the project's default CLI as the first pane when
+  // a project becomes active with no layout yet. Tracks per-id so we
+  // don't re-spawn after the user closes every pane (they'll see the
+  // empty-state CLI picker and choose explicitly).
+  const autoLaunchedProjects = new Set<string>();
+  createEffect(() => {
+    if (boot().kind !== "ready") return;
+    const projectId = activeProjectId();
+    if (projectId === null) return;
+    if (autoLaunchedProjects.has(projectId)) return;
+    const ws = getWorkspace(projectId);
+    if (!ws || ws.layout !== null) return;
+    const cli = resolveDefaultCli(projectId);
+    if (!cli) return;
+    autoLaunchedProjects.add(projectId);
+    void handleLaunchFirstCli(projectId, cli);
+  });
 
   return (
     <div class="flex h-full w-full flex-col">

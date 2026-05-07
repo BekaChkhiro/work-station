@@ -460,13 +460,32 @@ export function Terminal(props: TerminalProps) {
 
     term.attachCustomKeyEventHandler((event) => {
       if (!handleSearchHotkey(event)) return false;
-      // Pane / project hotkeys (Cmd+\, Cmd+W, Cmd+N) live on the document.
-      // Returning false here keeps xterm from forwarding the keystroke to
-      // the PTY (so the shell never sees ^\, ^W, ^N) while letting the
-      // event bubble up to the document-level installPaneHotkeys handler.
+      // Pane / project hotkeys (Cmd+\, Cmd+W, Cmd+N, Cmd+1..9) live on
+      // the document. Returning false here keeps xterm from forwarding
+      // the keystroke to the PTY while letting the event bubble up to
+      // the document-level installPaneHotkeys / numericProjectHotkeys.
       if (event.type === "keydown" && (event.metaKey || event.ctrlKey) && !event.altKey) {
         const k = event.key.toLowerCase();
         if (event.key === "\\" || k === "w" || k === "n") return false;
+        if (!event.shiftKey && event.key >= "1" && event.key <= "9") return false;
+      }
+      // Cmd/Ctrl+Alt+Arrow → directional pane focus. The shell would
+      // otherwise see ESC sequences for the arrow; suppress so the
+      // document-level installPaneNavHotkeys handler owns the event.
+      if (
+        event.type === "keydown" &&
+        (event.metaKey || event.ctrlKey) &&
+        event.altKey &&
+        !event.shiftKey
+      ) {
+        if (
+          event.key === "ArrowLeft" ||
+          event.key === "ArrowRight" ||
+          event.key === "ArrowUp" ||
+          event.key === "ArrowDown"
+        ) {
+          return false;
+        }
       }
       return handleCopyPasteKey(event);
     });
@@ -544,6 +563,9 @@ export function Terminal(props: TerminalProps) {
         t.select(0, target, t.cols);
         t.focus();
       },
+      focus: () => {
+        term?.focus();
+      },
     });
   });
 
@@ -582,6 +604,9 @@ export function Terminal(props: TerminalProps) {
         if (offset !== 0) t.scrollLines(offset);
         t.select(0, target, t.cols);
         t.focus();
+      },
+      focus: () => {
+        term?.focus();
       },
     });
   });
