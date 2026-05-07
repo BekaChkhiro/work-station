@@ -557,6 +557,35 @@ button {
   border-radius: inherit;
 }
 
+/* T7.7 — CLI badge. Sits in the top-left of every pane and uses the
+ * canonical CliMeta color so claude / kimi / codex are immediately
+ * distinguishable. Pure-shell sessions get the neutral surface tone via
+ * `currentColor` falling through to the badge text. */
+.ws-pane__cli-badge {
+  position: absolute;
+  top: var(--sp-1);
+  left: var(--sp-1);
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  min-width: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  pointer-events: none;
+  user-select: none;
+  box-shadow: var(--shadow-popover);
+}
+
 /* T7.3 — per-pane CLI quick-launch menu. Mirrors the Phase 2 prototype's
  * `.cli-pop` shape under the production namespace. */
 .ws-cli-pop {

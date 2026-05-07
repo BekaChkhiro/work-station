@@ -22,6 +22,8 @@ import type { JSX } from "solid-js";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AppShell } from "../AppShell";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
+import { cliMetaForId } from "../../types/cli";
+import type { CliMeta } from "../../types/tab";
 import { AddProjectModal } from "../AddProjectModal";
 import type { AddProjectFormValue, ProjectEnvVars } from "../AddProjectModal";
 import { DeleteProjectConfirm } from "../DeleteProjectConfirm";
@@ -106,6 +108,37 @@ export function AppRoot(): JSX.Element {
   // (e.g. immediately after spawn before the layout is set).
   const sessionsByProject: Record<string, string[]> = {};
 
+  // T7.7 — sessionId → CLI id captured at spawn time. The badge derived
+  // from this map is the canonical "what was launched in this pane",
+  // independent of whatever the user has typed since (e.g. running
+  // `python` inside a `claude` pane keeps the claude badge — matches the
+  // task's "derived from spawn command, not parse of running process"
+  // heuristic). Solid signal so Pane's `resolveCli` re-runs whenever a
+  // new spawn lands.
+  const [sessionCli, setSessionCli] = createSignal<Record<string, string>>({});
+  const recordSessionCli = (sessionId: string, cliId: string): void => {
+    setSessionCli((prev) => ({ ...prev, [sessionId]: cliId }));
+  };
+  const forgetSessionCli = (sessionId: string): void => {
+    setSessionCli((prev) => {
+      if (!(sessionId in prev)) return prev;
+      const { [sessionId]: _drop, ...rest } = prev;
+      void _drop;
+      return rest;
+    });
+  };
+
+  const resolveCliBadge = (
+    _projectId: string,
+    sessionId: string,
+  ): { meta: CliMeta; label: string } | null => {
+    const cliId = sessionCli()[sessionId];
+    if (!cliId) return null;
+    const meta = cliMetaForId(cliId);
+    if (!meta) return null;
+    return { meta, label: cliId };
+  };
+
   const trackSession = (projectId: string, sessionId: string): void => {
     const list = sessionsByProject[projectId] ?? [];
     list.push(sessionId);
@@ -116,6 +149,7 @@ export function AppRoot(): JSX.Element {
     const list = sessionsByProject[projectId];
     if (!list) return;
     sessionsByProject[projectId] = list.filter((id) => id !== sessionId);
+    forgetSessionCli(sessionId);
   };
 
   // T7.4 — resolve a project's default CLI to a `PaneCliOption` if (and
@@ -146,6 +180,14 @@ export function AppRoot(): JSX.Element {
       setAddOpen(true);
     },
     onError: (msg) => setActionError(msg),
+    // T7.7 — keep the badge map in sync with hotkey-driven split / close.
+    // The split path passes `null` when it falls back to the system shell;
+    // we skip recording in that case so the pane shows no badge (matches
+    // the "system default" radio in the project form).
+    onSessionSpawned: (sessionId, cliName) => {
+      if (cliName) recordSessionCli(sessionId, cliName);
+    },
+    onSessionClosed: (sessionId) => forgetSessionCli(sessionId),
   });
 
   const registerProject = (persisted: Project): void => {
@@ -294,6 +336,9 @@ export function AppRoot(): JSX.Element {
       } catch {
         // Backend already logs; nothing the user can act on.
       }
+      // T7.7 — drop badge entries for the about-to-be-removed sessions
+      // so the map doesn't accumulate dead ids over the app's lifetime.
+      forgetSessionCli(sessionId);
     }
     sessionsByProject[target.id] = [];
     try {
@@ -356,6 +401,10 @@ export function AppRoot(): JSX.Element {
       cols: 80,
       rows: 24,
     });
+    // T7.7 — capture the CLI id at spawn so Pane's badge tracks what was
+    // launched, not what's currently running. `cli.name` matches the
+    // canonical CliOption.id ("claude", "codex", "kimi", ...).
+    recordSessionCli(resp.sessionId, cli.name);
     return resp.sessionId;
   };
 
@@ -470,6 +519,7 @@ export function AppRoot(): JSX.Element {
                 void handleLaunchCli(projectId, sessionId, cli, mode)
               }
               onLaunchFirstCli={(projectId, cli) => void handleLaunchFirstCli(projectId, cli)}
+              resolveCli={resolveCliBadge}
             />
           </Match>
         </Switch>

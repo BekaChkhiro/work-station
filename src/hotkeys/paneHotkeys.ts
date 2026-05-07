@@ -58,6 +58,14 @@ export interface PaneHotkeyHandlers {
   onAddProject: () => void;
   /** Surface a user-visible error from one of the IPC calls. */
   onError?: (message: string) => void;
+  /** T7.7 — fired after a hotkey-driven split spawns a new PTY so the
+   *  parent can register the session→CLI mapping for the badge. The
+   *  `cliName` is the canonical CLI id when a default CLI was used,
+   *  or `null` when the spawn fell through to the system shell. */
+  onSessionSpawned?: (sessionId: string, cliName: string | null) => void;
+  /** T7.7 — fired after a hotkey-driven pane close so the parent can
+   *  forget the session→CLI mapping. */
+  onSessionClosed?: (sessionId: string) => void;
 }
 
 const handleSplit = async (
@@ -85,6 +93,7 @@ const handleSplit = async (
       cols: 80,
       rows: 24,
     });
+    handlers.onSessionSpawned?.(resp.sessionId, defaultCli ? defaultCli.name : null);
     splitPane(projectId, target, direction, resp.sessionId);
   } catch (err) {
     handlers.onError?.(err instanceof Error ? err.message : String(err));
@@ -98,6 +107,7 @@ const handleClose = async (handlers: PaneHotkeyHandlers): Promise<void> => {
   if (!ws || !ws.focusedSessionId) return;
   const closed = closePaneInStore(projectId, ws.focusedSessionId);
   if (closed === null) return;
+  handlers.onSessionClosed?.(closed);
   try {
     await ptyKill(closed);
   } catch (err) {

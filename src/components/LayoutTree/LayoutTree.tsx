@@ -28,6 +28,7 @@ import type { JSX } from "solid-js";
 import { SplitPane } from "../SplitPane";
 import { Pane } from "../Pane";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
+import type { CliMeta } from "../../types/tab";
 import {
   isPane,
   isSplit,
@@ -59,6 +60,10 @@ export interface LayoutTreeProps {
   clis?: readonly PaneCliOption[];
   /** T7.3 — parent-owned launch action for replace vs. split semantics. */
   onLaunchCli?: (sessionId: string, cli: PaneCliOption, mode: PaneCliLaunchMode) => void;
+  /** T7.7 — resolve the CLI badge for a pane's session. Returns the badge
+   *  metadata (and an optional human-readable name for the a11y label) or
+   *  `null` when the session has no known CLI (system-shell fallback). */
+  resolveCli?: (sessionId: string) => { meta: CliMeta; label: string } | null;
   /** Internal — accumulates "L"/"R" chars on the recursive descent. The
    *  root call defaults to "". Callers should leave this unset. */
   path?: LayoutPath;
@@ -79,6 +84,7 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
   // even when focus is being toggled in tandem.
   const renderLeaf = (sessionId: string): JSX.Element => {
     if (!focusEnabled()) return props.renderPane(sessionId);
+    const resolved = props.resolveCli?.(sessionId) ?? null;
     return (
       <Pane
         sessionId={sessionId}
@@ -86,6 +92,8 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
         onFocus={props.onFocusPane}
         clis={props.clis}
         onLaunchCli={props.onLaunchCli}
+        cli={resolved?.meta ?? null}
+        cliLabel={resolved?.label ?? null}
       >
         {props.renderPane(sessionId)}
       </Pane>
@@ -116,6 +124,7 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
                 onFocusPane={props.onFocusPane}
                 clis={props.clis}
                 onLaunchCli={props.onLaunchCli}
+                resolveCli={props.resolveCli}
                 path={path() + "L"}
               />
             }
@@ -128,6 +137,7 @@ export function LayoutTree(props: LayoutTreeProps): JSX.Element {
                 onFocusPane={props.onFocusPane}
                 clis={props.clis}
                 onLaunchCli={props.onLaunchCli}
+                resolveCli={props.resolveCli}
                 path={path() + "R"}
               />
             }

@@ -12,23 +12,23 @@
 
 import { createSignal } from "solid-js";
 import { TabStrip } from "./TabStrip";
-import type { CliMeta, Tab } from "../../types/tab";
+import type { Tab } from "../../types/tab";
+import { CLI_BADGE_MAP } from "../../types/cli";
 
-const cliMap: Record<string, CliMeta> = {
-  cc: { badge: "cc", color: "oklch(0.74 0.11 188)" },
-  km: { badge: "km", color: "oklch(0.78 0.13 90)" },
-  cx: { badge: "cx", color: "oklch(0.72 0.16 320)" },
-  zsh: { badge: "zs" },
-  bash: { badge: "ba" },
-};
+// T7.7 — uses the canonical badge map (keyed by CLI id from
+// PROJECT_CLI_OPTIONS) so the harness exercises the same lookup the
+// production AppRoot wires for pane badges. Acceptance demands
+// "Badges render distinct icons for claude / kimi / codex / shell" —
+// the seed tabs cover all four.
+const cliMap = CLI_BADGE_MAP;
 
-const cliRotation = ["cc", "km", "cx", "zsh", "bash"] as const;
+const cliRotation = ["claude", "kimi", "codex", "zsh", "bash"] as const;
 
 const seedTabs: Tab[] = [
-  { id: "t1", label: "claude code", cli: "cc", dirty: true },
-  { id: "t2", label: "pnpm dev", cli: "km" },
+  { id: "t1", label: "claude code", cli: "claude", dirty: true },
+  { id: "t2", label: "pnpm dev", cli: "kimi" },
   { id: "t3", label: "zsh ~/dev", cli: "zsh" },
-  { id: "t4", label: "kimi review", cli: "km", dirty: true },
+  { id: "t4", label: "codex review", cli: "codex", dirty: true },
 ];
 
 export function TabStripLiveHarness() {

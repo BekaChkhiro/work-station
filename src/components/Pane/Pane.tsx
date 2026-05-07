@@ -24,6 +24,7 @@
 import { For, Show, children, createEffect, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
 import type { SplitDirection } from "../../types/layout";
+import type { CliMeta } from "../../types/tab";
 
 export interface PaneCliOption {
   name: string;
@@ -46,6 +47,14 @@ export interface PaneProps {
   onFocus?: (sessionId: string) => void;
   clis?: readonly PaneCliOption[];
   onLaunchCli?: (sessionId: string, cli: PaneCliOption, mode: PaneCliLaunchMode) => void;
+  /** T7.7 — CLI badge metadata for the session inside this pane. The
+   *  parent resolves this from the spawn command (not by parsing process
+   *  state) so the badge is stable for the lifetime of the pane. Omitted
+   *  → no badge is drawn (e.g. the user-shell fallback case). */
+  cli?: CliMeta | null;
+  /** Optional human-readable CLI name used as the badge's accessible
+   *  label. Defaults to "CLI" when not provided. */
+  cliLabel?: string | null;
   /** The subtree mounted inside the pane (Terminal, placeholder, etc.). */
   children: JSX.Element;
 }
@@ -84,6 +93,13 @@ export function Pane(props: PaneProps): JSX.Element {
     setMenuOpen((open) => !open);
   };
 
+  // T7.7 — the CLI badge is its own absolutely-positioned anchor so it
+  // sits in the top-LEFT corner without colliding with the launch button
+  // in the top-RIGHT. Rendered independently of `quickLaunchEnabled` —
+  // a pane can have a CLI badge even when the launcher isn't wired
+  // (e.g. read-only contexts).
+  const cliBadge = (): CliMeta | null => props.cli ?? null;
+
   return (
     <div
       class="ws-pane"
@@ -94,6 +110,19 @@ export function Pane(props: PaneProps): JSX.Element {
       onPointerDown={activate}
       onFocusIn={activate}
     >
+      <Show when={cliBadge()}>
+        {(meta) => (
+          <span
+            class="ws-pane__cli-badge"
+            data-cli={props.cliLabel ?? undefined}
+            style={meta().color ? { color: meta().color } : undefined}
+            aria-label={`CLI: ${props.cliLabel ?? "unknown"}`}
+            title={props.cliLabel ?? "CLI"}
+          >
+            {meta().badge}
+          </span>
+        )}
+      </Show>
       <Show when={quickLaunchEnabled()}>
         <div class="ws-pane__head">
           <button

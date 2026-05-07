@@ -21,6 +21,7 @@ import { For, Show, createEffect, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 import { LayoutTree } from "../LayoutTree";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
+import type { CliMeta } from "../../types/tab";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
 import { SettingsMenu } from "../SettingsMenu";
 import { Sidebar } from "../Sidebar";
@@ -68,6 +69,11 @@ export interface AppShellProps {
     mode: PaneCliLaunchMode,
   ) => void;
   onLaunchFirstCli?: (projectId: string, cli: PaneCliOption) => void;
+  /** T7.7 — resolve a project pane's CLI badge from its sessionId. The
+   *  caller wires the spawn-time mapping (sessionId → CLI id) so the
+   *  badge tracks what was actually launched, not what's currently in
+   *  the pane's process tree. */
+  resolveCli?: (projectId: string, sessionId: string) => { meta: CliMeta; label: string } | null;
   /** Placeholder rendered when a project has no layout (no panes). The
    *  caller can return a "spawn first pane" CTA, an empty illustration,
    *  whatever. Defaults to a quiet hint. */
@@ -140,6 +146,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
                   clis={props.clis}
                   onLaunchCli={props.onLaunchCli}
                   onLaunchFirstCli={props.onLaunchFirstCli}
+                  resolveCli={props.resolveCli}
                 />
               </div>
             );
@@ -191,6 +198,7 @@ interface ProjectWorkspaceViewProps {
     mode: PaneCliLaunchMode,
   ) => void;
   onLaunchFirstCli?: (projectId: string, cli: PaneCliOption) => void;
+  resolveCli?: (projectId: string, sessionId: string) => { meta: CliMeta; label: string } | null;
 }
 
 function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
@@ -244,6 +252,11 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
               clis={props.clis}
               onLaunchCli={(sessionId, cli, mode) =>
                 props.onLaunchCli?.(props.projectId, sessionId, cli, mode)
+              }
+              resolveCli={
+                props.resolveCli
+                  ? (sessionId) => props.resolveCli?.(props.projectId, sessionId) ?? null
+                  : undefined
               }
             />
           </div>
