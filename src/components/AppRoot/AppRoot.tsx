@@ -19,7 +19,7 @@
 
 import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AppShell } from "../AppShell";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import { cliMetaForId } from "../../types/cli";
@@ -94,6 +94,10 @@ export function AppRoot(): JSX.Element {
   const [contextTarget, setContextTarget] = createSignal<ContextTarget | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [availableClis, setAvailableClis] = createSignal<PaneCliOption[]>([]);
+  // T7.8 — projectId → configured-but-missing CLI name. Set when a project's
+  // default CLI is saved in the DB but not found on PATH at launch time.
+  // Cleared when the user dismisses the banner.
+  const [cliNotFoundWarnings, setCliNotFoundWarnings] = createSignal<Record<string, string>>({});
 
   // Shadow maps for fields not promoted into ProjectMeta. Same pattern as
   // the harness — keeps the workspace store narrow.
@@ -155,12 +159,39 @@ export function AppRoot(): JSX.Element {
   // T7.4 — resolve a project's default CLI to a `PaneCliOption` if (and
   // only if) the saved id is in the boot-detected list. Returns `null`
   // when the project has no default, or when the configured CLI isn't on
-  // PATH right now (T7.8 will turn that case into an inline warning;
-  // until then the pane silently falls back to the system shell).
+  // PATH right now (T7.8 handles that case with a warning + fallback).
   const resolveDefaultCli = (projectId: string): PaneCliOption | null => {
     const id = projectClis[projectId];
     if (!id) return null;
     return availableClis().find((cli) => cli.name === id) ?? null;
+  };
+
+  // T7.8 — return the configured CLI id when it is set but absent from PATH.
+  const missingDefaultCli = (projectId: string): string | null => {
+    const id = projectClis[projectId];
+    if (!id) return null;
+    return availableClis().find((cli) => cli.name === id) ? null : id;
+  };
+
+  const dismissCliWarning = (projectId: string): void => {
+    setCliNotFoundWarnings((prev) => {
+      const { [projectId]: _drop, ...rest } = prev;
+      void _drop;
+      return rest;
+    });
+  };
+
+  // Install URLs for known CLIs — opened in the default browser when the
+  // user clicks "Install instructions" in the warning banner.
+  const CLI_INSTALL_URLS: Record<string, string> = {
+    claude: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
+    codex: "https://github.com/openai/codex?tab=readme-ov-file#quickstart",
+    kimi: "https://github.com/MoonshotAI/moonshot-cli",
+  };
+
+  const handleInstallHint = (missingCli: string): void => {
+    const url = CLI_INSTALL_URLS[missingCli];
+    if (url) void openUrl(url);
   };
 
   // Pane / project hotkeys: Cmd+\, Cmd+Shift+\, Cmd+W, Cmd+N. Wire to the
@@ -464,6 +495,8 @@ export function AppRoot(): JSX.Element {
   // a project becomes active with no layout yet. Tracks per-id so we
   // don't re-spawn after the user closes every pane (they'll see the
   // empty-state CLI picker and choose explicitly).
+  // T7.8 — when the configured CLI is not on PATH, fall back to the system
+  // shell and show an inline warning banner so the user knows what happened.
   const autoLaunchedProjects = new Set<string>();
   createEffect(() => {
     if (boot().kind !== "ready") return;
@@ -473,9 +506,23 @@ export function AppRoot(): JSX.Element {
     const ws = getWorkspace(projectId);
     if (!ws || ws.layout !== null) return;
     const cli = resolveDefaultCli(projectId);
-    if (!cli) return;
-    autoLaunchedProjects.add(projectId);
-    void handleLaunchFirstCli(projectId, cli);
+    if (cli) {
+      autoLaunchedProjects.add(projectId);
+      void handleLaunchFirstCli(projectId, cli);
+      return;
+    }
+    const missing = missingDefaultCli(projectId);
+    if (missing) {
+      autoLaunchedProjects.add(projectId);
+      setCliNotFoundWarnings((prev) => ({ ...prev, [projectId]: missing }));
+      const shell = defaultShell();
+      const fallback: PaneCliOption = {
+        name: shell.split("/").pop() ?? "shell",
+        path: shell,
+        version: null,
+      };
+      void handleLaunchFirstCli(projectId, fallback);
+    }
   });
 
   return (
@@ -520,6 +567,9 @@ export function AppRoot(): JSX.Element {
               }
               onLaunchFirstCli={(projectId, cli) => void handleLaunchFirstCli(projectId, cli)}
               resolveCli={resolveCliBadge}
+              resolveCliWarning={(projectId) => cliNotFoundWarnings()[projectId] ?? null}
+              onDismissCliWarning={dismissCliWarning}
+              onInstallHint={handleInstallHint}
             />
           </Match>
         </Switch>

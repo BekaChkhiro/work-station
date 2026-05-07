@@ -74,6 +74,13 @@ export interface AppShellProps {
    *  badge tracks what was actually launched, not what's currently in
    *  the pane's process tree. */
   resolveCli?: (projectId: string, sessionId: string) => { meta: CliMeta; label: string } | null;
+  /** T7.8 — return the configured-but-missing CLI name for a project, or
+   *  null when no warning is active. Drives the inline warning banner. */
+  resolveCliWarning?: (projectId: string) => string | null;
+  /** T7.8 — dismiss the CLI-not-found banner for a project. */
+  onDismissCliWarning?: (projectId: string) => void;
+  /** T7.8 — open install docs for the given CLI name in the default browser. */
+  onInstallHint?: (cliName: string) => void;
   /** Placeholder rendered when a project has no layout (no panes). The
    *  caller can return a "spawn first pane" CTA, an empty illustration,
    *  whatever. Defaults to a quiet hint. */
@@ -147,6 +154,9 @@ export function AppShell(props: AppShellProps): JSX.Element {
                   onLaunchCli={props.onLaunchCli}
                   onLaunchFirstCli={props.onLaunchFirstCli}
                   resolveCli={props.resolveCli}
+                  cliWarning={props.resolveCliWarning?.(project.id) ?? null}
+                  onDismissCliWarning={() => props.onDismissCliWarning?.(project.id)}
+                  onInstallHint={props.onInstallHint}
                 />
               </div>
             );
@@ -199,6 +209,9 @@ interface ProjectWorkspaceViewProps {
   ) => void;
   onLaunchFirstCli?: (projectId: string, cli: PaneCliOption) => void;
   resolveCli?: (projectId: string, sessionId: string) => { meta: CliMeta; label: string } | null;
+  cliWarning?: string | null;
+  onDismissCliWarning?: () => void;
+  onInstallHint?: (cliName: string) => void;
 }
 
 function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
@@ -228,6 +241,37 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
 
   return (
     <div class="ws-appshell__pane-host relative flex min-h-0 flex-1 flex-col">
+      <Show when={props.cliWarning}>
+        {(missingCli) => (
+          <div class="ws-cli-warning" role="alert" aria-live="polite">
+            <span class="ws-cli-warning__icon" aria-hidden="true">
+              ⚠
+            </span>
+            <span class="ws-cli-warning__text">
+              <strong class="ws-cli-warning__name">{missingCli()}</strong>
+              {" was not found on PATH. Launched fallback shell instead."}
+              <Show when={props.onInstallHint}>
+                {" "}
+                <button
+                  type="button"
+                  class="ws-cli-warning__link"
+                  onClick={() => props.onInstallHint?.(missingCli())}
+                >
+                  Install instructions
+                </button>
+              </Show>
+            </span>
+            <button
+              type="button"
+              class="ws-cli-warning__dismiss"
+              aria-label="Dismiss warning"
+              onClick={() => props.onDismissCliWarning?.()}
+            >
+              ×
+            </button>
+          </div>
+        )}
+      </Show>
       <Show
         when={layout()}
         fallback={

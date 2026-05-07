@@ -8,11 +8,20 @@ mod ipc;
 mod logging;
 mod menu;
 mod pty;
+mod shell_path;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     logging::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "work-station starting");
+
+    // macOS GUI launches inherit launchd's minimal PATH (~ `/usr/bin:/bin`),
+    // so user-installed CLIs like claude/kimi/codex (npm, brew, nvm) are
+    // invisible to the registry below and to PTY spawns. Hydrate from the
+    // user's interactive login shell before any thread that reads PATH —
+    // CLI detection (this `setup`) and pty::manager (later, on demand) —
+    // gets a chance to start. No-op on Windows.
+    shell_path::hydrate_from_login_shell();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
