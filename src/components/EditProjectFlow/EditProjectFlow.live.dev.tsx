@@ -22,6 +22,7 @@ interface MockRow {
   glyph: string;
   defaultCli: string | null;
   env: Record<string, string>;
+  startupCommands: string[];
   sessions: number;
 }
 
@@ -34,6 +35,7 @@ const SEED: MockRow[] = [
     glyph: "AR",
     defaultCli: "claude",
     env: { NODE_ENV: "development" },
+    startupCommands: ["nvm use 20"],
     sessions: 4,
   },
   {
@@ -44,6 +46,7 @@ const SEED: MockRow[] = [
     glyph: "KE",
     defaultCli: null,
     env: {},
+    startupCommands: [],
     sessions: 0,
   },
   {
@@ -54,6 +57,7 @@ const SEED: MockRow[] = [
     glyph: "BO",
     defaultCli: "codex",
     env: { RUST_LOG: "debug" },
+    startupCommands: ["source .env.local", "cargo build"],
     sessions: 1,
   },
 ];
@@ -109,6 +113,7 @@ export function EditProjectFlowLiveHarness(): JSX.Element {
       glyph: t.glyph,
       defaultCli: t.defaultCli,
       env: t.env,
+      startupCommands: t.startupCommands,
     };
   };
 
@@ -130,12 +135,13 @@ export function EditProjectFlowLiveHarness(): JSX.Element {
               glyph: value.glyph,
               defaultCli: value.defaultCli,
               env: value.env,
+              startupCommands: value.startupCommands,
             }
           : r,
       ),
     );
     append(
-      `edit(${id}) → ${value.name} · ${value.glyph} · ${value.color} · ${value.defaultCli ?? "—"} · env=${Object.keys(value.env).length}`,
+      `edit(${id}) → ${value.name} · ${value.glyph} · ${value.color} · ${value.defaultCli ?? "—"} · env=${Object.keys(value.env).length} · startup=${value.startupCommands.length}`,
     );
   };
 

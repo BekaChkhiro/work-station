@@ -39,6 +39,10 @@ export interface PaneHotkeyHandlers {
   resolveCwd: (projectId: string) => string | null;
   /** Extra environment variables saved on the project row. */
   resolveEnv?: (projectId: string) => Record<string, string>;
+  /** T7.6 — startup commands written to the freshly-spawned shell after
+   *  subscribers attach. Returned in the order they should run. Empty list
+   *  / undefined skips the feature. */
+  resolveStartupCommands?: (projectId: string) => readonly string[];
   /** Default shell command (e.g. "/bin/zsh", "powershell.exe"). */
   shellCommand: () => string;
   /** Args for the shell — typically `["-l"]` on Unix to source profile
@@ -67,6 +71,7 @@ const handleSplit = async (
   const target = ws.focusedSessionId;
   const cwd = handlers.resolveCwd(projectId);
   const env = handlers.resolveEnv?.(projectId) ?? {};
+  const startupCommands = handlers.resolveStartupCommands?.(projectId) ?? [];
   const defaultCli = handlers.resolveDefaultCli?.(projectId) ?? null;
   try {
     const resp = await ptySpawn({
@@ -76,6 +81,7 @@ const handleSplit = async (
       env: defaultCli
         ? { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: defaultCli.name }
         : { ...env, WS_PROJECT_ID: projectId },
+      startupCommands: startupCommands.length > 0 ? Array.from(startupCommands) : undefined,
       cols: 80,
       rows: 24,
     });

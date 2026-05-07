@@ -136,6 +136,7 @@ export function AppShellLiveHarness(): JSX.Element {
   // T6.5 default CLI shadow — same rationale as projectPaths.
   const projectClis: Record<string, string | null> = {};
   const projectEnvs: Record<string, ProjectEnvVars> = {};
+  const persistedStartupCommands: Record<string, string[]> = {};
   // Sessions we own per project. We register one shell per project at
   // start; opening more (T5.6) would extend this list.
   const sessionsByProject: Record<string, string[]> = {};
@@ -166,6 +167,7 @@ export function AppShellLiveHarness(): JSX.Element {
       projectPaths[persisted.id] = persisted.path;
       projectClis[persisted.id] = persisted.defaultCli;
       projectEnvs[persisted.id] = persisted.env;
+      persistedStartupCommands[persisted.id] = persisted.startupCommands;
       addProject(
         {
           id: persisted.id,
@@ -229,6 +231,7 @@ export function AppShellLiveHarness(): JSX.Element {
       icon: value.glyph,
       defaultCli: value.defaultCli,
       env: value.env,
+      startupCommands: value.startupCommands,
     });
     const sessionId = await spawnShell(
       created.id,
@@ -239,6 +242,7 @@ export function AppShellLiveHarness(): JSX.Element {
     projectPaths[created.id] = created.path;
     projectClis[created.id] = created.defaultCli;
     projectEnvs[created.id] = created.env;
+    persistedStartupCommands[created.id] = created.startupCommands;
     addProject(
       {
         id: created.id,
@@ -262,10 +266,12 @@ export function AppShellLiveHarness(): JSX.Element {
       icon: value.glyph,
       defaultCli: value.defaultCli,
       env: value.env,
+      startupCommands: value.startupCommands,
     });
     projectPaths[target.id] = updated.path;
     projectClis[target.id] = updated.defaultCli;
     projectEnvs[target.id] = updated.env;
+    persistedStartupCommands[target.id] = updated.startupCommands;
     updateProjectMeta(target.id, {
       name: updated.name,
       color: updated.color ?? value.color,
@@ -287,6 +293,7 @@ export function AppShellLiveHarness(): JSX.Element {
         glyph: meta.glyph,
         defaultCli: projectClis[projectId] ?? null,
         env: projectEnvs[projectId] ?? {},
+        startupCommands: persistedStartupCommands[projectId] ?? [],
       },
     });
   };
@@ -331,6 +338,7 @@ export function AppShellLiveHarness(): JSX.Element {
     projectPaths[target.id] = "";
     projectClis[target.id] = null;
     projectEnvs[target.id] = {};
+    persistedStartupCommands[target.id] = [];
     removeProject(target.id);
     setDeleteTarget(null);
     setEditTarget(null);
@@ -488,6 +496,7 @@ export function AppShellLiveHarness(): JSX.Element {
                 glyph: meta.glyph,
                 defaultCli: projectClis[t.projectId] ?? null,
                 env: projectEnvs[t.projectId] ?? {},
+                startupCommands: persistedStartupCommands[t.projectId] ?? [],
               },
             });
           }

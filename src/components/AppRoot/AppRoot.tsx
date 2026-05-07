@@ -98,6 +98,7 @@ export function AppRoot(): JSX.Element {
   const projectPaths: Record<string, string> = {};
   const projectClis: Record<string, string | null> = {};
   const projectEnvs: Record<string, ProjectEnvVars> = {};
+  const projectStartupCommands: Record<string, string[]> = {};
 
   // Sessions we know about per project. The store's layout tree is the
   // authoritative source for "which sessions does this project have"; this
@@ -133,6 +134,7 @@ export function AppRoot(): JSX.Element {
   usePaneHotkeys({
     resolveCwd: (id) => projectPaths[id] ?? null,
     resolveEnv: (id) => projectEnvs[id] ?? {},
+    resolveStartupCommands: (id) => projectStartupCommands[id] ?? [],
     shellCommand: defaultShell,
     shellArgs: defaultShellArgs,
     resolveDefaultCli: (id) => {
@@ -150,6 +152,7 @@ export function AppRoot(): JSX.Element {
     projectPaths[persisted.id] = persisted.path;
     projectClis[persisted.id] = persisted.defaultCli;
     projectEnvs[persisted.id] = persisted.env;
+    projectStartupCommands[persisted.id] = persisted.startupCommands;
     addProject(
       {
         id: persisted.id,
@@ -217,6 +220,7 @@ export function AppRoot(): JSX.Element {
       icon: value.glyph,
       defaultCli: value.defaultCli,
       env: value.env,
+      startupCommands: value.startupCommands,
     });
     registerProject(created);
     setActiveProject(created.id);
@@ -233,10 +237,12 @@ export function AppRoot(): JSX.Element {
       icon: value.glyph,
       defaultCli: value.defaultCli,
       env: value.env,
+      startupCommands: value.startupCommands,
     });
     projectPaths[target.id] = updated.path;
     projectClis[target.id] = updated.defaultCli;
     projectEnvs[target.id] = updated.env;
+    projectStartupCommands[target.id] = updated.startupCommands;
     updateProjectMeta(target.id, {
       name: updated.name,
       color: updated.color ?? value.color,
@@ -258,6 +264,7 @@ export function AppRoot(): JSX.Element {
         glyph: meta.glyph,
         defaultCli: projectClis[projectId] ?? null,
         env: projectEnvs[projectId] ?? {},
+        startupCommands: projectStartupCommands[projectId] ?? [],
       },
     });
   };
@@ -298,6 +305,7 @@ export function AppRoot(): JSX.Element {
     projectPaths[target.id] = "";
     projectClis[target.id] = null;
     projectEnvs[target.id] = {};
+    projectStartupCommands[target.id] = [];
     setLayout(target.id, null);
     removeProject(target.id);
     setDeleteTarget(null);
@@ -338,11 +346,13 @@ export function AppRoot(): JSX.Element {
   const spawnCli = async (projectId: string, cli: PaneCliOption): Promise<string> => {
     const cwd = projectPaths[projectId];
     const env = projectEnvs[projectId] ?? {};
+    const startupCommands = projectStartupCommands[projectId] ?? [];
     const resp = await ptySpawn({
       command: cli.path,
       args: [],
       cwd: cwd && cwd.length > 0 ? cwd : undefined,
       env: { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: cli.name },
+      startupCommands: startupCommands.length > 0 ? startupCommands : undefined,
       cols: 80,
       rows: 24,
     });
@@ -522,6 +532,7 @@ export function AppRoot(): JSX.Element {
               glyph: meta.glyph,
               defaultCli: projectClis[t.projectId] ?? null,
               env: projectEnvs[t.projectId] ?? {},
+              startupCommands: projectStartupCommands[t.projectId] ?? [],
             },
           });
         }}
