@@ -35,6 +35,8 @@ export interface TerminalProps {
   title?: string;
   /** Project this session belongs to — used to scope cross-session search. */
   projectId?: string;
+  /** Subtle background tint colour (CSS colour string, e.g. "#4caf50"). */
+  tintColor?: string;
 }
 
 export type TerminalRenderer = "webgl" | "dom";
@@ -779,6 +781,12 @@ export function Terminal(props: TerminalProps) {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      <Show when={props.tintColor}>
+        <div
+          class="pointer-events-none absolute inset-0"
+          style={{ background: props.tintColor, opacity: "0.07" }}
+        />
+      </Show>
       <div
         ref={hostEl}
         class="ws-terminal h-full w-full bg-terminal text-fg-terminal font-mono"

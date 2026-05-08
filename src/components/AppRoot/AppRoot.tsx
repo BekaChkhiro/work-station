@@ -362,13 +362,17 @@ export function AppRoot(): JSX.Element {
     });
   });
 
-  const renderPane = (projectId: string, sessionId: string): JSX.Element => (
-    <Terminal
-      sessionId={sessionId}
-      projectId={projectId}
-      title={`${projectId} · ${sessionId.slice(0, 6)}`}
-    />
-  );
+  const renderPane = (projectId: string, sessionId: string): JSX.Element => {
+    const color = projects().find((p) => p.id === projectId)?.color;
+    return (
+      <Terminal
+        sessionId={sessionId}
+        projectId={projectId}
+        title={`${projectId} · ${sessionId.slice(0, 6)}`}
+        tintColor={color}
+      />
+    );
+  };
 
   const handleCreateProject = async (value: AddProjectFormValue): Promise<void> => {
     const created = await createProject({
