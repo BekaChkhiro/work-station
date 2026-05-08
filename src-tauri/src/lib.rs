@@ -125,6 +125,7 @@ pub fn run() {
             commands::projects::project_reorder,
             commands::picker::pick_project_folder,
             commands::cli::cli_list_available,
+            commands::clipboard::save_clipboard_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

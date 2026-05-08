@@ -9,6 +9,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { saveClipboardImage } from "../../ipc/clipboard";
 import { TerminalSearch } from "./TerminalSearch";
 import { logger } from "../../utils/logger";
 import { registerSession } from "../../stores/sessions";
@@ -371,6 +372,27 @@ export function Terminal(props: TerminalProps) {
         });
       });
       return false;
+    }
+    if (key === "v") {
+      void navigator.clipboard
+        .read()
+        .then(async (items) => {
+          for (const item of items) {
+            const imageType = item.types.find((t) => t.startsWith("image/"));
+            if (!imageType) continue;
+            const blob = await item.getType(imageType);
+            const arrayBuffer = await blob.arrayBuffer();
+            const bytes = new Uint8Array(arrayBuffer);
+            let binary = "";
+            for (const b of bytes) binary += String.fromCharCode(b);
+            const base64 = btoa(binary);
+            const path = await saveClipboardImage(base64);
+            if (term) term.paste(path.includes(" ") ? `"${path}"` : path);
+            return;
+          }
+        })
+        .catch((_err: unknown) => void _err);
+      return true;
     }
     return true;
   };
