@@ -56,6 +56,7 @@ const fontFromTokens = (host: HTMLElement): string =>
 
 export function Terminal(props: TerminalProps) {
   let hostEl!: HTMLDivElement;
+  let frameEl!: HTMLDivElement;
   let term: Xterm | null = null;
   let unicodeAddon: Unicode11Addon | null = null;
   let webglAddon: WebglAddon | null = null;
@@ -63,6 +64,7 @@ export function Terminal(props: TerminalProps) {
   let searchAddon: SearchAddon | null = null;
   let webLinksAddon: WebLinksAddon | null = null;
   const [searchOpen, setSearchOpen] = createSignal(false);
+  const [isDragOver, setIsDragOver] = createSignal(false);
   let resizeObserver: ResizeObserver | null = null;
   // T4.6: rAF-coalesced resize. ResizeObserver can fire many times within
   // a single frame during drags; we collapse them to one fit() per frame
@@ -370,6 +372,54 @@ export function Terminal(props: TerminalProps) {
       return false;
     }
     return true;
+  };
+
+  const uriToPath = (uri: string): string => {
+    try {
+      const url = new URL(uri.trim());
+      const pathname = decodeURIComponent(url.pathname);
+      // Windows: /C:/path → C:/path
+      if (/^\/[A-Za-z]:/.test(pathname)) return pathname.slice(1);
+      return pathname;
+    } catch {
+      return uri.trim();
+    }
+  };
+
+  const handleDragOver = (e: DragEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleDragEnter = (e: DragEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: DragEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    const related = e.relatedTarget as Node | null;
+    if (related && frameEl.contains(related)) return;
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: DragEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    if (!term) return;
+    const uriList = e.dataTransfer?.getData("text/uri-list") ?? "";
+    const paths = uriList
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("file://"))
+      .map(uriToPath)
+      .filter(Boolean);
+    if (paths.length === 0) return;
+    const text = paths.map((p) => (p.includes(" ") ? `"${p}"` : p)).join(" ");
+    term.paste(text);
   };
 
   // T4.6: Compute the cell grid that fits the host element and forward it
@@ -693,12 +743,26 @@ export function Terminal(props: TerminalProps) {
   });
 
   return (
-    <div class="ws-terminal-frame relative h-full w-full">
+    <div
+      ref={frameEl}
+      class="ws-terminal-frame relative h-full w-full"
+      onDragOver={handleDragOver}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div
         ref={hostEl}
         class="ws-terminal h-full w-full bg-terminal text-fg-terminal font-mono"
         data-session-id={props.sessionId}
       />
+      <Show when={isDragOver()}>
+        <div class="pointer-events-none absolute inset-0 flex items-center justify-center rounded border-2 border-dashed border-[var(--accent)] bg-[var(--accent)]/10">
+          <span class="rounded bg-[var(--bg-terminal)]/80 px-3 py-1.5 text-sm text-[var(--accent)]">
+            Drop to paste path
+          </span>
+        </div>
+      </Show>
       <Show when={searchOpen() ? searchAddon : null}>
         {(addon) => <TerminalSearch addon={addon()} onClose={closeSearch} />}
       </Show>
