@@ -638,40 +638,6 @@ export function AppRoot(): JSX.Element {
 
   return (
     <div class="flex h-full w-full flex-col">
-      {updateVersion() ? (
-        <div class="flex items-center gap-2 border-b border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-accent">
-          <span>Update available — v{updateVersion()}</span>
-          <button
-            type="button"
-            class="ml-auto rounded bg-accent px-2 py-0.5 text-xs font-medium text-canvas disabled:opacity-50"
-            disabled={updateInstalling()}
-            onClick={() => {
-              setUpdateInstalling(true);
-              void checkUpdate()
-                .then(async (update) => {
-                  if (update?.available) {
-                    await update.downloadAndInstall();
-                    await relaunch();
-                  }
-                })
-                .catch((err: unknown) => {
-                  setUpdateInstalling(false);
-                  setActionError(err instanceof Error ? err.message : String(err));
-                });
-            }}
-          >
-            {updateInstalling() ? "Installing…" : "Install & Restart"}
-          </button>
-          <button
-            type="button"
-            class="text-accent/60 hover:text-accent"
-            aria-label="Dismiss update"
-            onClick={() => setUpdateVersion(null)}
-          >
-            ×
-          </button>
-        </div>
-      ) : null}
       {actionError() ? (
         <div class="border-b border-danger/40 bg-danger/10 px-3 py-1.5 text-xs text-danger">
           {actionError()}
@@ -783,6 +749,50 @@ export function AppRoot(): JSX.Element {
           });
         }}
       />
+
+      {updateVersion() ? (
+        <div class="pointer-events-none fixed inset-0 z-50 flex items-end justify-end p-4">
+          <div class="pointer-events-auto flex w-72 flex-col gap-3 rounded-xl border border-accent/20 bg-canvas p-4 shadow-2xl">
+            <div class="flex items-start justify-between gap-2">
+              <div class="flex flex-col gap-0.5">
+                <span class="text-sm font-semibold text-fg">Update available</span>
+                <span class="text-xs text-fg-secondary">
+                  Version {updateVersion()} is ready to install
+                </span>
+              </div>
+              <button
+                type="button"
+                class="mt-0.5 shrink-0 text-fg-secondary hover:text-fg"
+                aria-label="Dismiss update"
+                onClick={() => setUpdateVersion(null)}
+              >
+                ×
+              </button>
+            </div>
+            <button
+              type="button"
+              class="w-full rounded-lg bg-accent py-1.5 text-xs font-semibold text-canvas transition-opacity disabled:opacity-50"
+              disabled={updateInstalling()}
+              onClick={() => {
+                setUpdateInstalling(true);
+                void checkUpdate()
+                  .then(async (update) => {
+                    if (update?.available) {
+                      await update.downloadAndInstall();
+                      await relaunch();
+                    }
+                  })
+                  .catch((err: unknown) => {
+                    setUpdateInstalling(false);
+                    setActionError(err instanceof Error ? err.message : String(err));
+                  });
+              }}
+            >
+              {updateInstalling() ? "Installing…" : "Install & Restart"}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
