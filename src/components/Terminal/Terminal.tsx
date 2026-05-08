@@ -8,6 +8,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { TerminalSearch } from "./TerminalSearch";
 import { logger } from "../../utils/logger";
 import { registerSession } from "../../stores/sessions";
@@ -374,18 +375,6 @@ export function Terminal(props: TerminalProps) {
     return true;
   };
 
-  const uriToPath = (uri: string): string => {
-    try {
-      const url = new URL(uri.trim());
-      const pathname = decodeURIComponent(url.pathname);
-      // Windows: /C:/path → C:/path
-      if (/^\/[A-Za-z]:/.test(pathname)) return pathname.slice(1);
-      return pathname;
-    } catch {
-      return uri.trim();
-    }
-  };
-
   const handleDragOver = (e: DragEvent): void => {
     e.preventDefault();
     e.stopPropagation();
@@ -410,17 +399,34 @@ export function Terminal(props: TerminalProps) {
     e.preventDefault();
     e.stopPropagation();
     setIsDragOver(false);
-    if (!term) return;
-    const uriList = e.dataTransfer?.getData("text/uri-list") ?? "";
-    const paths = uriList
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("file://"))
-      .map(uriToPath)
-      .filter(Boolean);
-    if (paths.length === 0) return;
-    const text = paths.map((p) => (p.includes(" ") ? `"${p}"` : p)).join(" ");
-    term.paste(text);
   };
+
+  onMount(() => {
+    let unlistenDrop: (() => void) | null = null;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") {
+          setIsDragOver(event.payload.type === "over");
+          return;
+        }
+        setIsDragOver(false);
+        if (!term || !frameEl) return;
+        const rect = frameEl.getBoundingClientRect();
+        const { x, y } = event.payload.position;
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return;
+        const paths: string[] = event.payload.paths;
+        if (paths.length === 0) return;
+        const text = paths.map((p) => (p.includes(" ") ? `"${p}"` : p)).join(" ");
+        term.paste(text);
+      })
+      .then((unlisten) => {
+        unlistenDrop = unlisten;
+      })
+      .catch((_err: unknown) => void _err);
+    onCleanup(() => {
+      unlistenDrop?.();
+    });
+  });
 
   // T4.6: Compute the cell grid that fits the host element and forward it
   // to xterm + the backend PTY. Skips when dimensions haven't actually
