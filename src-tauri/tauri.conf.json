@@ -28,7 +28,7 @@
       "preload": ["sqlite:work-station.db"]
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyNEJDMzZFN0I3QTcwNkEKUldScWNIcDdic05MZ2lubFpLYS9vQTFaa1N2QjFUQi9sTFJBNU1ac01ETEM5T2Y4SUNoOFRMNGMK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhBQjQwMzE5Q0E0QkYzQ0MKUldUTTgwdktHUU8waWl1RFdIa2NDRjVBcXpsK1hDZWJYWTZMMmVoMHAwVHMrMGlWQjh4U3c4NDkK",
       "endpoints": [
         "https://github.com/BekaChkhiro/work-station/releases/latest/download/latest.json"
       ]
