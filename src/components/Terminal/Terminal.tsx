@@ -369,21 +369,6 @@ export function Terminal(props: TerminalProps) {
       });
       return false;
     }
-    if (key === "v") {
-      void navigator.clipboard
-        .readText()
-        .then((text) => {
-          if (text && term) term.paste(text);
-        })
-        .catch((error: unknown) => {
-          logger.warn("clipboard paste failed", {
-            scope: "terminal",
-            sessionId: currentSessionId,
-            error,
-          });
-        });
-      return false;
-    }
     return true;
   };
 
