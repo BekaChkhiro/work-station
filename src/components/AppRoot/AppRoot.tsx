@@ -20,6 +20,8 @@
 import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { check as checkUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 const CLI_INSTALL_URLS: Readonly<Record<string, string>> = {
   claude: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
@@ -107,6 +109,8 @@ export function AppRoot(): JSX.Element {
   const [deleteTarget, setDeleteTarget] = createSignal<EditTarget | null>(null);
   const [contextTarget, setContextTarget] = createSignal<ContextTarget | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
+  const [updateVersion, setUpdateVersion] = createSignal<string | null>(null);
+  const [updateInstalling, setUpdateInstalling] = createSignal(false);
   const [availableClis, setAvailableClis] = createSignal<PaneCliOption[]>([]);
   // T7.8 — projectId → configured-but-missing CLI name. Set when a project's
   // default CLI is saved in the DB but not found on PATH at launch time.
@@ -338,6 +342,11 @@ export function AppRoot(): JSX.Element {
           }
         }
         setBoot({ kind: "ready" });
+        void checkUpdate()
+          .then((update) => {
+            if (update?.available) setUpdateVersion(update.version ?? "new version");
+          })
+          .catch((_err: unknown) => void _err);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setBoot({ kind: "failed", message });
@@ -629,6 +638,40 @@ export function AppRoot(): JSX.Element {
 
   return (
     <div class="flex h-full w-full flex-col">
+      {updateVersion() ? (
+        <div class="flex items-center gap-2 border-b border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-accent">
+          <span>Update available — v{updateVersion()}</span>
+          <button
+            type="button"
+            class="ml-auto rounded bg-accent px-2 py-0.5 text-xs font-medium text-canvas disabled:opacity-50"
+            disabled={updateInstalling()}
+            onClick={() => {
+              setUpdateInstalling(true);
+              void checkUpdate()
+                .then(async (update) => {
+                  if (update?.available) {
+                    await update.downloadAndInstall();
+                    await relaunch();
+                  }
+                })
+                .catch((err: unknown) => {
+                  setUpdateInstalling(false);
+                  setActionError(err instanceof Error ? err.message : String(err));
+                });
+            }}
+          >
+            {updateInstalling() ? "Installing…" : "Install & Restart"}
+          </button>
+          <button
+            type="button"
+            class="text-accent/60 hover:text-accent"
+            aria-label="Dismiss update"
+            onClick={() => setUpdateVersion(null)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
       {actionError() ? (
         <div class="border-b border-danger/40 bg-danger/10 px-3 py-1.5 text-xs text-danger">
           {actionError()}

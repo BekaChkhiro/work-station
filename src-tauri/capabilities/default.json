@@ -9,6 +9,8 @@
     "sql:default",
     "sql:allow-execute",
     "store:default",
-    "dialog:default"
+    "dialog:default",
+    "updater:default",
+    "process:default"
   ]
 }

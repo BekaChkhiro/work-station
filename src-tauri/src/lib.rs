@@ -33,6 +33,8 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         // T3.7: native folder picker for project paths.
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         // PTY registry (T2.3) — app-scoped so sessions survive webview reloads.
         .manage(pty::PtyManager::new())
         // T7.1: detected-CLI registry, populated once at boot below. App-scoped
