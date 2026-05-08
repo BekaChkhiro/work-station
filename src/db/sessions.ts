@@ -16,7 +16,13 @@
 // one write per 500ms, and any in-flight write either lands wholly or not
 // at all.
 
-import { LayoutSchema, serializeLayout, type Layout } from "../types/layout";
+import {
+  EMPTY_LAYOUT,
+  LayoutSchema,
+  parseLayoutJson,
+  serializeLayout,
+  type Layout,
+} from "../types/layout";
 import { db } from "./index";
 
 export {
@@ -85,6 +91,42 @@ export interface LayoutPersisterOptions {
  * caller's update loop. `flush()` *does* throw, because callers waiting
  * on shutdown need to know whether the final write succeeded.
  */
+interface ProjectSessionRow {
+  id: string;
+  layout_json: string;
+}
+
+/**
+ * T2.12 — get or create the persistent session row for `projectId`.
+ *
+ * Returns the most recent session's id and its persisted layout. If no
+ * session row exists yet (first launch for this project), inserts a new row
+ * with an empty layout and returns that id + `EMPTY_LAYOUT`.
+ *
+ * Callers pass `cli` / `cwd` only so the newly-created row carries context
+ * that is useful for debugging; the actual layout restore uses the project's
+ * live metadata, not the stored cli/cwd strings.
+ */
+export async function getOrCreateProjectSession(
+  projectId: string,
+  cli: string | null,
+  cwd: string | null,
+): Promise<{ id: string; layout: Layout }> {
+  const handle = await db();
+  const rows = await handle.select<ProjectSessionRow[]>(
+    "SELECT id, layout_json FROM sessions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+    [projectId],
+  );
+  const row = rows[0];
+  if (row) return { id: row.id, layout: parseLayoutJson(row.layout_json) };
+  const id = crypto.randomUUID();
+  await handle.execute(
+    "INSERT INTO sessions (id, project_id, title, cli, cwd, layout_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [id, projectId, "main", cli, cwd, "{}", Math.floor(Date.now() / 1000)],
+  );
+  return { id, layout: EMPTY_LAYOUT };
+}
+
 export function createLayoutPersister(
   sessionId: string,
   options: LayoutPersisterOptions = {},

@@ -60,7 +60,15 @@ import {
   splitPane,
   updateProjectMeta,
 } from "../../stores/workspace";
-import { collectPanes, paneNode } from "../../types/layout";
+import {
+  collectPanes,
+  isEmptyLayout,
+  paneNode,
+  remapSessionIds,
+  type LayoutNode,
+} from "../../types/layout";
+import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "../../db/sessions";
+import type { LayoutPersister } from "../../db/sessions";
 import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
 import { isMac, isWindows } from "../../utils/platform";
 
@@ -117,6 +125,11 @@ export function AppRoot(): JSX.Element {
   // map is a fallback for any session that briefly lives outside a layout
   // (e.g. immediately after spawn before the layout is set).
   const sessionsByProject: Record<string, string[]> = {};
+
+  // T2.12 — per-project DB session id (the sessions table row that owns
+  // layout_json) and its debounced layout persister.
+  const dbSessionByProject: Record<string, string> = {};
+  const persisterByProject: Record<string, LayoutPersister> = {};
 
   // T7.7 — sessionId → CLI id captured at spawn time. The badge derived
   // from this map is the canonical "what was launched in this pane",
@@ -219,6 +232,47 @@ export function AppRoot(): JSX.Element {
     onSessionClosed: (sessionId) => forgetSessionCli(sessionId),
   });
 
+  // T2.12 — spawn a fresh PTY for every pane in `savedLayout`, replace the
+  // stale session ids from the previous run with the new ones, and put the
+  // restored tree into the workspace store. All panes use the project's live
+  // default CLI (or the system shell if the CLI is missing from PATH).
+  const restoreProjectLayout = async (
+    projectId: string,
+    savedLayout: LayoutNode,
+    cli: PaneCliOption | null,
+  ): Promise<void> => {
+    const panes = collectPanes(savedLayout);
+    if (panes.length === 0) return;
+
+    const effectiveCli: PaneCliOption = cli ?? {
+      name: defaultShell().split("/").pop() ?? "shell",
+      path: defaultShell(),
+      version: null,
+    };
+
+    const mapping = new Map<string, string>();
+    try {
+      for (const pane of panes) {
+        const newId = await spawnCli(projectId, effectiveCli);
+        trackSession(projectId, newId);
+        mapping.set(pane.sessionId, newId);
+      }
+    } catch (err) {
+      // Partial restore — kill what was already spawned and bail.
+      for (const newId of mapping.values()) {
+        void ptyKill(newId);
+        untrackSession(projectId, newId);
+      }
+      setActionError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+
+    const restoredLayout = remapSessionIds(savedLayout, mapping);
+    setLayout(projectId, restoredLayout);
+    const restoredPanes = collectPanes(restoredLayout);
+    if (restoredPanes[0]) setFocusedSession(projectId, restoredPanes[0].sessionId);
+  };
+
   const registerProject = (persisted: Project): void => {
     projectPaths[persisted.id] = persisted.path;
     projectClis[persisted.id] = persisted.defaultCli;
@@ -258,6 +312,30 @@ export function AppRoot(): JSX.Element {
         const persisted = await listProjects();
         for (const p of persisted) {
           registerProject(p);
+
+          // T2.12: load or create a persistent session row, then wire its
+          // debounced persister so future layout changes are saved to SQLite.
+          const { id: dbSessionId, layout: savedLayout } = await getOrCreateProjectSession(
+            p.id,
+            p.defaultCli,
+            p.path,
+          );
+          dbSessionByProject[p.id] = dbSessionId;
+          persisterByProject[p.id] = createLayoutPersister(dbSessionId, {
+            onError: (err) => console.error("[T2.12] layout persist failed:", err),
+          });
+
+          // Restore any non-empty layout from the previous session.
+          if (!isEmptyLayout(savedLayout)) {
+            const cli = resolveDefaultCli(p.id);
+            const missing = missingDefaultCli(p.id);
+            if (missing && !cli) {
+              setCliNotFoundWarnings((prev) => ({ ...prev, [p.id]: missing }));
+            }
+            await restoreProjectLayout(p.id, savedLayout, cli);
+            // Prevent auto-launch (T7.4) from spawning a duplicate first pane.
+            autoLaunchedProjects.add(p.id);
+          }
         }
         setBoot({ kind: "ready" });
       } catch (err) {
@@ -294,6 +372,16 @@ export function AppRoot(): JSX.Element {
       startupCommands: value.startupCommands,
     });
     registerProject(created);
+    // T2.12: create the session row and persister for the freshly added project.
+    const { id: dbSessionId } = await getOrCreateProjectSession(
+      created.id,
+      created.defaultCli,
+      created.path,
+    );
+    dbSessionByProject[created.id] = dbSessionId;
+    persisterByProject[created.id] = createLayoutPersister(dbSessionId, {
+      onError: (err) => console.error("[T2.12] layout persist failed:", err),
+    });
     setActiveProject(created.id);
   };
 
@@ -380,6 +468,9 @@ export function AppRoot(): JSX.Element {
     projectClis[target.id] = null;
     projectEnvs[target.id] = {};
     projectStartupCommands[target.id] = [];
+    // T2.12: cancel any pending layout write — the session row is already gone
+    // (ON DELETE CASCADE removed it when the project was deleted above).
+    persisterByProject[target.id]?.cancel();
     setLayout(target.id, null);
     removeProject(target.id);
     setDeleteTarget(null);
@@ -520,6 +611,19 @@ export function AppRoot(): JSX.Element {
         version: null,
       };
       void handleLaunchFirstCli(projectId, fallback);
+    }
+  });
+
+  // T2.12 / T5.8 wiring — persist each project's layout to SQLite whenever it
+  // changes. Debounced at 500ms so rapid split-handle drags coalesce into one
+  // write. Guarded by boot state so the restore phase doesn't overwrite the
+  // just-loaded layouts before boot completes.
+  createEffect(() => {
+    if (boot().kind !== "ready") return;
+    for (const project of projects()) {
+      const layout = getWorkspace(project.id)?.layout ?? null;
+      const persister = persisterByProject[project.id];
+      if (persister) persister.schedule(layout ?? EMPTY_LAYOUT);
     }
   });
 

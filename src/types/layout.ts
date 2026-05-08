@@ -278,6 +278,25 @@ export function closePaneAt(node: LayoutNode, targetSessionId: string): ClosePan
   return { tree: node, nextFocusSessionId: null };
 }
 
+/** T2.12 — rebuild a layout tree replacing each pane's sessionId according to
+ * `mapping`. Panes whose id has no entry in `mapping` are kept unchanged.
+ * Untouched subtrees keep their references so the renderer (T5.4) skips
+ * re-renders for unaffected panes. */
+export function remapSessionIds(
+  node: LayoutNode,
+  mapping: ReadonlyMap<string, string>,
+): LayoutNode {
+  if (isPane(node)) {
+    const next = mapping.get(node.sessionId);
+    return next !== undefined ? paneNode(next) : node;
+  }
+  const [left, right] = node.children;
+  const nextLeft = remapSessionIds(left, mapping);
+  const nextRight = remapSessionIds(right, mapping);
+  if (nextLeft === left && nextRight === right) return node;
+  return { ...node, children: [nextLeft, nextRight] };
+}
+
 /** Parse a `sessions.layout_json` value. Returns `EMPTY_LAYOUT` on any failure. */
 export function parseLayoutJson(raw: string | null | undefined): Layout {
   if (!raw) return EMPTY_LAYOUT;
