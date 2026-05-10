@@ -18,6 +18,7 @@
 
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { sessionList } from "../../stores/sessions";
+import { Tooltip } from "../Tooltip";
 
 export interface CrossSessionSearchProps {
   open: boolean;
@@ -254,37 +255,43 @@ export function CrossSessionSearch(props: CrossSessionSearchProps) {
               autocomplete="off"
             />
             <span class="ws-xsearch__count">{countLabel()}</span>
-            <button
-              type="button"
-              class="ws-xsearch__btn"
-              classList={{ "is-on": caseSensitive() }}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setCaseSensitive((v) => !v)}
-              aria-pressed={caseSensitive()}
-              aria-label="Match case"
-            >
-              Aa
-            </button>
-            <button
-              type="button"
-              class="ws-xsearch__btn"
-              classList={{ "is-on": regex() }}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setRegex((v) => !v)}
-              aria-pressed={regex()}
-              aria-label="Use regular expression"
-            >
-              .*
-            </button>
-            <button
-              type="button"
-              class="ws-xsearch__btn"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => props.onClose()}
-              aria-label="Close search"
-            >
-              ×
-            </button>
+            <Tooltip label="Match case">
+              <button
+                type="button"
+                class="ws-xsearch__btn"
+                classList={{ "is-on": caseSensitive() }}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setCaseSensitive((v) => !v)}
+                aria-pressed={caseSensitive()}
+                aria-label="Match case"
+              >
+                Aa
+              </button>
+            </Tooltip>
+            <Tooltip label="Use regular expression">
+              <button
+                type="button"
+                class="ws-xsearch__btn"
+                classList={{ "is-on": regex() }}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setRegex((v) => !v)}
+                aria-pressed={regex()}
+                aria-label="Use regular expression"
+              >
+                .*
+              </button>
+            </Tooltip>
+            <Tooltip label="Close" shortcut="Esc">
+              <button
+                type="button"
+                class="ws-xsearch__btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => props.onClose()}
+                aria-label="Close search"
+              >
+                ×
+              </button>
+            </Tooltip>
           </div>
           <Show
             when={results().length > 0}

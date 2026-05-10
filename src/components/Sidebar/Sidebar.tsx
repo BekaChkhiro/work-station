@@ -30,6 +30,7 @@
 
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
+import { Tooltip } from "../Tooltip";
 
 export interface SidebarProject {
   id: string;
@@ -233,16 +234,18 @@ export function Sidebar(props: SidebarProps): JSX.Element {
     >
       <div class="ws-sb__section">
         <span class="ws-sb__section-label">Projects</span>
-        <button
-          type="button"
-          class="ws-sb__icon-btn ws-sb__icon-btn--sm"
-          aria-label={isCollapsed() ? "Expand sidebar" : "Collapse sidebar"}
-          aria-controls={NAV_ID}
-          aria-expanded={isCollapsed() ? "false" : "true"}
-          onClick={() => props.onToggleCollapse?.()}
-        >
-          <IconCollapse size={12} collapsed={isCollapsed()} />
-        </button>
+        <Tooltip label={isCollapsed() ? "Expand sidebar" : "Collapse sidebar"}>
+          <button
+            type="button"
+            class="ws-sb__icon-btn ws-sb__icon-btn--sm"
+            aria-label={isCollapsed() ? "Expand sidebar" : "Collapse sidebar"}
+            aria-controls={NAV_ID}
+            aria-expanded={isCollapsed() ? "false" : "true"}
+            onClick={() => props.onToggleCollapse?.()}
+          >
+            <IconCollapse size={12} collapsed={isCollapsed()} />
+          </button>
+        </Tooltip>
       </div>
 
       <ul ref={listEl} class="ws-sb__list" role="list">
@@ -316,18 +319,19 @@ export function Sidebar(props: SidebarProps): JSX.Element {
                   </span>
                 </button>
                 <Show when={props.onEdit && !isCollapsed()}>
-                  <button
-                    type="button"
-                    class="ws-sb__row-edit"
-                    aria-label={`Edit ${p.name}`}
-                    title="Edit project"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onEdit?.(p.id);
-                    }}
-                  >
-                    <IconPencil size={12} />
-                  </button>
+                  <Tooltip label="Edit project">
+                    <button
+                      type="button"
+                      class="ws-sb__row-edit"
+                      aria-label={`Edit ${p.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onEdit?.(p.id);
+                      }}
+                    >
+                      <IconPencil size={12} />
+                    </button>
+                  </Tooltip>
                 </Show>
               </li>
             );
@@ -353,15 +357,17 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             <kbd class="ws-sb__kbd">{props.newProjectShortcut}</kbd>
           ) : null}
         </button>
-        <button
-          ref={(el) => props.onSettingsAnchor?.(el)}
-          type="button"
-          class="ws-sb__icon-btn"
-          aria-label="Settings"
-          onClick={() => props.onSettings?.()}
-        >
-          <IconCog size={14} />
-        </button>
+        <Tooltip label="Settings">
+          <button
+            ref={(el) => props.onSettingsAnchor?.(el)}
+            type="button"
+            class="ws-sb__icon-btn"
+            aria-label="Settings"
+            onClick={() => props.onSettings?.()}
+          >
+            <IconCog size={14} />
+          </button>
+        </Tooltip>
       </div>
     </nav>
   );

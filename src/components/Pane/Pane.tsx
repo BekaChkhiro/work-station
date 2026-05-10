@@ -25,6 +25,7 @@ import { For, Show, children, createEffect, createSignal, onCleanup } from "soli
 import type { JSX } from "solid-js";
 import type { SplitDirection } from "../../types/layout";
 import type { CliMeta } from "../../types/tab";
+import { Tooltip } from "../Tooltip";
 
 export interface PaneCliOption {
   name: string;
@@ -125,17 +126,18 @@ export function Pane(props: PaneProps): JSX.Element {
       </Show>
       <Show when={quickLaunchEnabled()}>
         <div class="ws-pane__head">
-          <button
-            type="button"
-            class="ws-pane__launch"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen() ? "true" : "false"}
-            aria-label="New terminal"
-            title="New terminal"
-            onClick={toggleMenu}
-          >
-            <IconPlus />
-          </button>
+          <Tooltip label="New terminal" disabled={menuOpen()}>
+            <button
+              type="button"
+              class="ws-pane__launch"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen() ? "true" : "false"}
+              aria-label="New terminal"
+              onClick={toggleMenu}
+            >
+              <IconPlus />
+            </button>
+          </Tooltip>
           <Show when={menuOpen()}>
             <CliLaunchMenu
               clis={props.clis ?? []}

@@ -683,8 +683,8 @@ button {
   background: var(--bg-terminal);
   outline: none;
   transition:
-    border-color 100ms var(--ease, ease),
-    box-shadow 100ms var(--ease, ease);
+    border-color var(--dur-modal, 200ms) var(--ease, ease),
+    box-shadow var(--dur-modal, 200ms) var(--ease, ease);
 }
 .ws-pane[data-focused="true"] {
   border-color: var(--accent-ring);
@@ -2388,4 +2388,160 @@ button {
 .ws-cli-warning__dismiss:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* T8.4 — Tooltip primitive. Rendered via Portal in viewport coordinates,
+ * so this rule set has no positioning context dependency. The 600ms
+ * hover delay lives in JS; the keyframes here only handle the fade-in
+ * and collapse to 0ms under prefers-reduced-motion (tokens.css §motion).
+ */
+.ws-tooltip-host {
+  display: inline-flex;
+}
+.ws-tooltip {
+  z-index: 100;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  padding: 5px 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.32);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--text-primary);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: wsTooltipIn 120ms var(--ease);
+}
+.ws-tooltip[data-placement="bottom"] {
+  animation-name: wsTooltipInDown;
+}
+.ws-tooltip__label {
+  font-weight: 500;
+}
+.ws-tooltip__kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.2;
+}
+
+/* T8.5 — Windows uses an in-window hamburger menu. macOS gets the same
+ * commands from the OS-level menu bar built by src-tauri/src/menu.
+ */
+.ws-win-menu-host {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 80;
+}
+.ws-win-menu-button {
+  display: grid;
+  width: 36px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+}
+.ws-win-menu-button:hover,
+.ws-win-menu-button[aria-expanded="true"] {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-win-menu {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  width: 240px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-popover);
+  animation: wsMenuIn 130ms var(--ease);
+}
+.ws-win-menu__heading {
+  padding: 10px 10px 4px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.ws-win-menu__item {
+  display: flex;
+  width: 100%;
+  height: 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  text-align: left;
+}
+.ws-win-menu__item:hover {
+  background: var(--bg-hover);
+}
+.ws-win-menu__item:active {
+  background: var(--bg-active);
+}
+.ws-win-menu__keys {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.ws-win-menu__divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-subtle);
+}
+@keyframes wsMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes wsTooltipIn {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes wsTooltipInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

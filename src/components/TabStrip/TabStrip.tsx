@@ -28,6 +28,7 @@
 
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
+import { Tooltip } from "../Tooltip";
 import type { CliMeta, Tab } from "../../types/tab";
 
 export interface TabStripProps {
@@ -237,25 +238,27 @@ export function TabStrip(props: TabStripProps) {
                   <span class="ws-tabstrip__dirty" aria-label="Process running" />
                 </Show>
                 <Show when={props.onClose}>
-                  <button
-                    type="button"
-                    class="ws-tabstrip__close"
-                    aria-label={`Close ${tab.label}`}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onClose?.(tab.id);
-                    }}
-                  >
-                    <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
-                      <path
-                        d="M1 1 L8 8 M8 1 L1 8"
-                        stroke="currentColor"
-                        stroke-width="1.5"
-                        stroke-linecap="round"
-                      />
-                    </svg>
-                  </button>
+                  <Tooltip label="Close tab">
+                    <button
+                      type="button"
+                      class="ws-tabstrip__close"
+                      aria-label={`Close ${tab.label}`}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onClose?.(tab.id);
+                      }}
+                    >
+                      <svg width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
+                        <path
+                          d="M1 1 L8 8 M8 1 L1 8"
+                          stroke="currentColor"
+                          stroke-width="1.5"
+                          stroke-linecap="round"
+                        />
+                      </svg>
+                    </button>
+                  </Tooltip>
                 </Show>
               </div>
             );
@@ -267,21 +270,23 @@ export function TabStrip(props: TabStripProps) {
       </div>
       <div class="ws-tabstrip__overflow-mask" aria-hidden="true" />
       <Show when={props.onAdd}>
-        <button
-          type="button"
-          class="ws-tabstrip__new"
-          aria-label={props.addAriaLabel ?? "New tab"}
-          onClick={() => props.onAdd?.()}
-        >
-          <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
-            <path
-              d="M6.5 2 V11 M2 6.5 H11"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-            />
-          </svg>
-        </button>
+        <Tooltip label={props.addAriaLabel ?? "New tab"}>
+          <button
+            type="button"
+            class="ws-tabstrip__new"
+            aria-label={props.addAriaLabel ?? "New tab"}
+            onClick={() => props.onAdd?.()}
+          >
+            <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden="true">
+              <path
+                d="M6.5 2 V11 M2 6.5 H11"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+        </Tooltip>
       </Show>
     </div>
   );
