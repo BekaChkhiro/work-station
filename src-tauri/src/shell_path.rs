@@ -92,7 +92,7 @@ fn probe_login_path() -> Result<(std::ffi::OsString, Duration), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("spawn {:?}: {e}", shell))?;
+        .map_err(|e| format!("spawn {shell:?}: {e}"))?;
 
     // Poll wait_timeout-style — std doesn't ship one, so we kill on
     // overrun and let `wait()` reap. The shell is well-behaved in the

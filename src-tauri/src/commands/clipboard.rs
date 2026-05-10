@@ -18,6 +18,6 @@ pub fn save_clipboard_image(data: String) -> Result<String, String> {
     std::fs::write(&path, &bytes).map_err(|e| format!("write failed: {e}"))?;
 
     path.to_str()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .ok_or_else(|| "invalid path".to_string())
 }
