@@ -23,7 +23,7 @@ import {
   splitPane,
 } from "../stores/workspace";
 import type { SplitDirection } from "../types/layout";
-import { isMac } from "../utils/platform";
+import { eventMatchesBinding, getBinding } from "./registry";
 
 export interface PaneHotkeyDefaultCli {
   /** Stable CLI id (e.g. "claude", "zsh"). Echoed into `WS_CLI_NAME`. */
@@ -117,26 +117,29 @@ const handleClose = async (handlers: PaneHotkeyHandlers): Promise<void> => {
 
 export function installPaneHotkeys(handlers: PaneHotkeyHandlers): () => void {
   const onKey = (e: KeyboardEvent): void => {
-    const mod = isMac ? e.metaKey : e.ctrlKey;
-    if (!mod || e.altKey) return;
-
-    // Cmd+N — new project. Independent of pane focus.
-    if (!e.shiftKey && e.key.toLowerCase() === "n") {
+    const addProject = getBinding("add-project");
+    if (addProject && eventMatchesBinding(e, addProject)) {
       e.preventDefault();
       handlers.onAddProject();
       return;
     }
 
-    // Cmd+\ / Cmd+Shift+\ — split focused pane.
-    // KeyboardEvent.key is "\\" both with and without Shift; check via key.
-    if (e.key === "\\") {
+    const splitH = getBinding("split-h");
+    if (splitH && eventMatchesBinding(e, splitH)) {
       e.preventDefault();
-      void handleSplit(e.shiftKey ? "v" : "h", handlers);
+      void handleSplit("h", handlers);
       return;
     }
 
-    // Cmd+W — close focused pane.
-    if (!e.shiftKey && e.key.toLowerCase() === "w") {
+    const splitV = getBinding("split-v");
+    if (splitV && eventMatchesBinding(e, splitV)) {
+      e.preventDefault();
+      void handleSplit("v", handlers);
+      return;
+    }
+
+    const closePane = getBinding("close-pane");
+    if (closePane && eventMatchesBinding(e, closePane)) {
       e.preventDefault();
       void handleClose(handlers);
       return;

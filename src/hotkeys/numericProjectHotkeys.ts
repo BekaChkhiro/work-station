@@ -18,7 +18,7 @@
 
 import { onCleanup, onMount } from "solid-js";
 import { projects, setActiveProject } from "../stores/workspace";
-import { isMac } from "../utils/platform";
+import { eventMatchesBinding, getBinding } from "./registry";
 
 const isPlainTextEditable = (el: Element | null): boolean => {
   if (!el) return false;
@@ -35,14 +35,19 @@ const isPlainTextEditable = (el: Element | null): boolean => {
  *  sidebar position. Returns a cleanup that removes the listener. */
 export function installNumericProjectHotkeys(): () => void {
   const onKey = (e: KeyboardEvent): void => {
-    const mod = isMac ? e.metaKey : e.ctrlKey;
-    if (!mod || e.altKey || e.shiftKey) return;
-    if (e.key < "1" || e.key > "9") return;
+    let matchedIdx = -1;
+    for (let n = 1; n <= 9; n++) {
+      const binding = getBinding(`project-${n}`);
+      if (binding && eventMatchesBinding(e, binding)) {
+        matchedIdx = n - 1;
+        break;
+      }
+    }
+    if (matchedIdx === -1) return;
     // Skip plain text-editing surfaces but DO fire when focus is in an
     // xterm pane — Cmd+digit must navigate projects from the terminal.
     if (isPlainTextEditable(document.activeElement)) return;
-    const idx = Number.parseInt(e.key, 10) - 1;
-    const target = projects()[idx];
+    const target = projects()[matchedIdx];
     if (!target) return;
     e.preventDefault();
     setActiveProject(target.id);

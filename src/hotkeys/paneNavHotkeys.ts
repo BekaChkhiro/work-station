@@ -14,9 +14,16 @@ import { onCleanup, onMount } from "solid-js";
 import { sessionList } from "../stores/sessions";
 import { activeProjectId, getWorkspace, setFocusedSession } from "../stores/workspace";
 import { collectPanes } from "../types/layout";
-import { isMac } from "../utils/platform";
+import { eventMatchesBinding, getBinding } from "./registry";
 
 type Dir = "left" | "right" | "up" | "down";
+
+const NAV_ACTION_IDS: readonly (readonly [Dir, string])[] = [
+  ["left", "pane-nav-left"],
+  ["right", "pane-nav-right"],
+  ["up", "pane-nav-up"],
+  ["down", "pane-nav-down"],
+];
 
 interface PaneRect {
   sessionId: string;
@@ -93,26 +100,17 @@ const pickNeighbor = (panes: PaneRect[], focusedId: string, dir: Dir): string | 
   return best?.id ?? null;
 };
 
-const dirFromKey = (key: string): Dir | null => {
-  switch (key) {
-    case "ArrowLeft":
-      return "left";
-    case "ArrowRight":
-      return "right";
-    case "ArrowUp":
-      return "up";
-    case "ArrowDown":
-      return "down";
-    default:
-      return null;
+const matchedDir = (e: KeyboardEvent): Dir | null => {
+  for (const [dir, id] of NAV_ACTION_IDS) {
+    const binding = getBinding(id);
+    if (binding && eventMatchesBinding(e, binding)) return dir;
   }
+  return null;
 };
 
 export function installPaneNavHotkeys(): () => void {
   const onKey = (e: KeyboardEvent): void => {
-    const mod = isMac ? e.metaKey : e.ctrlKey;
-    if (!mod || !e.altKey || e.shiftKey) return;
-    const dir = dirFromKey(e.key);
+    const dir = matchedDir(e);
     if (!dir) return;
     const projectId = activeProjectId();
     if (!projectId) return;

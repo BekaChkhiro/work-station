@@ -16,6 +16,7 @@ import { AppRoot } from "./components/AppRoot";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { QuickSwitcher } from "./components/QuickSwitcher";
+import { eventMatchesBinding, getBinding } from "./hotkeys";
 import { isEditableTarget } from "./utils/platform";
 import "./styles/globals.css";
 
@@ -71,14 +72,14 @@ export default function App() {
   // focus.
   onMount(() => {
     const handler = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
-      if (!mod || e.altKey) return;
-      if (e.shiftKey && e.key.toLowerCase() === "f") {
+      const crossFind = getBinding("find-cross-session");
+      if (crossFind && eventMatchesBinding(e, crossFind)) {
         e.preventDefault();
         setCrossSearchOpen(true);
         return;
       }
-      if (!e.shiftKey && e.key.toLowerCase() === "k") {
+      const switcher = getBinding("quick-switcher");
+      if (switcher && eventMatchesBinding(e, switcher)) {
         // Mirror T6.3's editable-target guard so Cmd+K doesn't steal focus
         // while the user is typing in a shell or input. The switcher itself
         // ignores this guard because its own input is already mounted by

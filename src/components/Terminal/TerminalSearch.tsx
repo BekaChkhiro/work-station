@@ -1,5 +1,6 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { ISearchOptions, SearchAddon } from "@xterm/addon-search";
+import { eventMatchesBinding, getBinding } from "../../hotkeys";
 
 export interface TerminalSearchProps {
   addon: SearchAddon;
@@ -77,8 +78,8 @@ export function TerminalSearch(props: TerminalSearchProps) {
       return;
     }
     // Cmd/Ctrl+F while focused → re-select so the user can quickly retype.
-    const mod = event.metaKey || event.ctrlKey;
-    if (mod && !event.altKey && event.key.toLowerCase() === "f") {
+    const find = getBinding("find-in-terminal");
+    if (find && eventMatchesBinding(event, find)) {
       event.preventDefault();
       inputEl.select();
     }

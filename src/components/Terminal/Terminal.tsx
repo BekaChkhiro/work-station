@@ -11,6 +11,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { saveClipboardImage } from "../../ipc/clipboard";
 import { TerminalSearch } from "./TerminalSearch";
+import { eventMatchesBinding, getBinding, listActions } from "../../hotkeys";
 import { logger } from "../../utils/logger";
 import { registerSession } from "../../stores/sessions";
 import {
@@ -321,14 +322,14 @@ export function Terminal(props: TerminalProps) {
   // never sees those keys.
   const handleSearchHotkey = (event: KeyboardEvent): boolean => {
     if (event.type !== "keydown") return true;
-    const mod = event.metaKey || event.ctrlKey;
-    if (!mod || event.altKey) return true;
-    if (event.key.toLowerCase() !== "f") return true;
     // Cmd/Ctrl+Shift+F is the cross-session search hotkey (T4.13). Don't open
     // the in-pane overlay or send `^F` to the shell — return false so xterm
     // skips it, while letting the event bubble to the document-level handler
     // that owns the cross-session modal.
-    if (event.shiftKey) return false;
+    const crossFind = getBinding("find-cross-session");
+    if (crossFind && eventMatchesBinding(event, crossFind)) return false;
+    const find = getBinding("find-in-terminal");
+    if (!find || !eventMatchesBinding(event, find)) return true;
     event.preventDefault();
     setSearchOpen(true);
     return false;
@@ -525,31 +526,15 @@ export function Terminal(props: TerminalProps) {
 
     term.attachCustomKeyEventHandler((event) => {
       if (!handleSearchHotkey(event)) return false;
-      // Pane / project hotkeys (Cmd+\, Cmd+W, Cmd+N, Cmd+1..9) live on
-      // the document. Returning false here keeps xterm from forwarding
-      // the keystroke to the PTY while letting the event bubble up to
-      // the document-level installPaneHotkeys / numericProjectHotkeys.
-      if (event.type === "keydown" && (event.metaKey || event.ctrlKey) && !event.altKey) {
-        const k = event.key.toLowerCase();
-        if (event.key === "\\" || k === "w" || k === "n") return false;
-        if (!event.shiftKey && event.key >= "1" && event.key <= "9") return false;
-      }
-      // Cmd/Ctrl+Alt+Arrow → directional pane focus. The shell would
-      // otherwise see ESC sequences for the arrow; suppress so the
-      // document-level installPaneNavHotkeys handler owns the event.
-      if (
-        event.type === "keydown" &&
-        (event.metaKey || event.ctrlKey) &&
-        event.altKey &&
-        !event.shiftKey
-      ) {
-        if (
-          event.key === "ArrowLeft" ||
-          event.key === "ArrowRight" ||
-          event.key === "ArrowUp" ||
-          event.key === "ArrowDown"
-        ) {
-          return false;
+      // Global hotkeys (split, close pane, project switch, pane nav…) live
+      // on the document. Returning false here keeps xterm from forwarding
+      // the keystroke to the PTY while letting the event bubble up to the
+      // document-level handlers. The registry is the source of truth, so
+      // adding a new global hotkey automatically suppresses xterm forwarding
+      // — no manual filter update needed.
+      if (event.type === "keydown") {
+        for (const action of listActions()) {
+          if (eventMatchesBinding(event, action.binding)) return false;
         }
       }
       return handleCopyPasteKey(event);
