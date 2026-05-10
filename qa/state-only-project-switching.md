@@ -54,8 +54,7 @@ path calls `term.reset()` and replays the full PTY scrollback snapshot).
 
 ## Out of scope (deferred)
 
-- Restoring layouts from SQLite on switch / launch — covered by T5.9 /
-  T2.12 (still TODO).
-- Persisting which project was last active across app restarts — same.
+- Restoring layouts from SQLite on switch / launch — covered by T2.12 +
+  T5.9. See `qa/layout-restore-on-switch-launch.md`.
 - The "project hot-pause" timer that closes long-idle backend PTYs —
   not in v0.1.

@@ -45,6 +45,7 @@ import {
   updateProject,
   type Project,
 } from "../../db/projects";
+import { getSetting, setSetting } from "../../db/settings";
 import { pickProjectFolder } from "../../ipc/picker";
 import { cliListAvailable } from "../../ipc/cli";
 import { ptyKill, ptySpawn } from "../../ipc/pty";
@@ -340,6 +341,16 @@ export function AppRoot(): JSX.Element {
             // Prevent auto-launch (T7.4) from spawning a duplicate first pane.
             autoLaunchedProjects.add(p.id);
           }
+        }
+        // T5.9 — restore the project that was active on the previous run.
+        // setActiveProject is a no-op if the saved id was deleted in a
+        // previous session, so the addProject default (first registered)
+        // remains the safe fallback.
+        try {
+          const savedActive = await getSetting("last_active_project");
+          if (savedActive) setActiveProject(savedActive);
+        } catch (err) {
+          console.error("[T5.9] last_active_project restore failed:", err);
         }
         setBoot({ kind: "ready" });
         void checkUpdate()
@@ -640,6 +651,17 @@ export function AppRoot(): JSX.Element {
     }
   });
 
+  // T5.9 — persist the active project id on every change so the next launch
+  // opens to the same project. Boot-gated so the restore step above isn't
+  // overwritten by the addProject default before we've read last_active_project.
+  createEffect(() => {
+    if (boot().kind !== "ready") return;
+    const id = activeProjectId();
+    void setSetting("last_active_project", id).catch((err: unknown) => {
+      console.error("[T5.9] last_active_project persist failed:", err);
+    });
+  });
+
   return (
     <div class="flex h-full w-full flex-col">
       {actionError() ? (
@@ -800,10 +822,5 @@ export function AppRoot(): JSX.Element {
     </div>
   );
 }
-
-// Note: `activeProjectId` is imported above for parity with the harness; not
-// referenced directly in this file but kept to keep the import set aligned
-// for future surface (e.g. window-title binding).
-void activeProjectId;
 
 export default AppRoot;
