@@ -4,6 +4,12 @@ use tauri::Manager;
 mod cli;
 mod commands;
 mod db;
+// T11.4: HTTP client + cache. The downstream consumers (T11.6 connection
+// test, T11.8 token refresh, T11.9 offline queue, T12+ integrations) land
+// in later tasks; until then the public surface is unused on the live
+// boot path and `dead_code` would noise up every build.
+#[allow(dead_code)]
+mod http;
 mod ipc;
 mod logging;
 mod menu;

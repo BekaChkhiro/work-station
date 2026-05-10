@@ -48,6 +48,12 @@ bytes = "=1.11.1"
 uuid = { version = "=1.23.1", features = ["v4", "serde"] }
 thiserror = "=2.0.18"
 
+# T11.4: generic HTTP client. rustls keeps the build OpenSSL-free on
+# every target OS; gzip/deflate let us reuse the same client for the bigger
+# integration responses (GitHub trees, Vercel deployment lists). No
+# `cookies`/`hickory-dns` features — we don't need either.
+reqwest = { version = "=0.13.3", default-features = false, features = ["rustls", "json", "gzip"] }
+
 # T2.8: SIGTERM for graceful PTY shutdown (Unix only — portable-pty's
 # `Child::kill` always sends SIGKILL).
 [target.'cfg(unix)'.dependencies]
@@ -62,6 +68,9 @@ base64 = "=0.22.1"
 # T7.1 — CLI detection tests build synthetic PATH entries from a tempdir so
 # they don't depend on the host's installed toolchain.
 tempfile = "=3.13.0"
+# T11.4 — HTTP client tests use wiremock to stub 5xx/429/cache scenarios
+# instead of dialling out to the real network.
+wiremock = "=0.6.5"
 
 [[bench]]
 name = "ipc_throughput"
