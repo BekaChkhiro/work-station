@@ -1314,7 +1314,645 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 ---
 
-## 10. Stretch / Phase 11 — Post-v0.1.0
+### Phase 11 — Integrations Foundation
+
+**Goal:** Shared infrastructure for all third-party service integrations — credential storage, settings UI, project linking, generic HTTP plumbing, tab system, offline/auth resilience.
+**Estimate:** 2 weeks (75h).
+
+#### T11.1: Project workspace tab system
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T6.2
+- **Description**:
+  - Each project workspace gains a tab strip: Terminal | Editor | (integration tabs).
+  - Tabs are user-configurable (show/hide per project based on what's linked).
+  - Persist active tab per project across launches.
+- **Acceptance**: Switch between Terminal and integration tabs; selection persists across project switch.
+
+#### T11.2: Encrypted credential store
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T3.4
+- **Description**:
+  - API tokens stored locally via OS keychain — macOS Keychain Services, Windows Credential Manager, Linux libsecret/SecretService.
+  - Decision: `tauri-plugin-stronghold` (cross-platform single-file vault) vs platform-native via `keyring` crate. Stronghold is simpler but adds a master-password ceremony.
+  - Cross-platform error matrix: locked keychain on macOS, libsecret missing on minimal Linux installs, etc.
+- **Acceptance**: Tokens persist across app restarts on all 3 OSes; not visible in the SQLite browser; keychain failures surface meaningful errors.
+
+#### T11.3: Settings → Integrations panel
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T11.2, T8.7
+- **Description**:
+  - New section in Settings: list of supported integrations.
+  - For each: paste API token, optional "Verify connection" button.
+  - Status indicators: connected / disconnected / error.
+- **Acceptance**: User pastes a token; verification call succeeds; subsequent app launches show "connected".
+
+#### T11.4: Generic HTTP client + cache layer
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T1.5
+- **Description**:
+  - Wrapper over `fetch` (or Tauri's `http` plugin) with auth header injection, retry on 5xx, timeouts.
+  - In-memory + disk cache (TTL per endpoint) so tab switches don't re-fetch the same data every time.
+  - Per-service rate-limit awareness via response headers.
+- **Acceptance**: A 503 response is retried 3× with backoff; 429 surfaces a typed rate-limit error; same endpoint within TTL returns cached result.
+
+#### T11.5: Project ↔ service linking model
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T3.6, T11.2
+- **Description**:
+  - DB schema: `project_links(project_id, service, external_id, metadata)`.
+  - Each project can link to PlanFlow project, GitHub repo, Vercel project, Neon DB, Railway service.
+- **Acceptance**: Linking and unlinking persists; multiple links per project supported.
+
+#### T11.6: Connection test flow
+
+- [ ] **Status**: TODO
+- **Complexity**: S
+- **Dependencies**: T11.3, T11.4
+- **Description**:
+  - "Verify" button on each integration in Settings does a minimal authenticated GET (e.g. `/user` for GitHub, `/projects` for PlanFlow).
+  - Failures show actionable error: bad token, scopes missing, network.
+- **Acceptance**: Bad token → "Invalid credentials"; good token → green check + user/account name.
+
+#### T11.7: Loading / empty / error states pattern
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T11.1, T8.9
+- **Description**:
+  - Reusable components for integration tabs: `<IntegrationLoading />`, `<IntegrationEmpty />`, `<IntegrationError />`.
+  - Standard "not connected" empty state with CTA to Settings.
+  - Standard error state for token-expired / rate-limited / network — each with a recovery action.
+- **Acceptance**: Every integration tab uses the shared components; bad-token tab shows "Reconnect" CTA, not a silent failure.
+
+#### T11.8: Token expiry / re-auth flow
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T11.4, T11.7
+- **Description**:
+  - Detect 401 / 403 from any integration call → mark service as `needs_reauth` in keychain.
+  - Surface a non-blocking banner in the affected integration tab: "Token expired — Reconnect".
+  - Settings → Integrations card switches to "Re-enter token" mode.
+  - Pending requests after re-auth are retried automatically (in-flight queue).
+- **Acceptance**: Revoke a token mid-session → user sees Reconnect within 30s; after re-auth, queued reads succeed without manual refresh.
+
+#### T11.9: Offline mode + retry queue
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T11.4
+- **Description**:
+  - Detect network down (navigator.onLine + transient errors) → show "Offline" badge in affected tabs.
+  - Read paths fall back to cached data with "(cached, X min ago)" annotation.
+  - Write paths queue locally; replay when network returns.
+  - Hard cap on queue size (50 ops) — drop oldest with toast warning.
+- **Acceptance**: Toggle wifi off → reads still work from cache; queued writes apply automatically when wifi returns.
+
+#### T11.10: First-run integrations onboarding
+
+- [ ] **Status**: TODO
+- **Complexity**: S
+- **Dependencies**: T11.3
+- **Description**:
+  - First time a user opens Settings → Integrations: short intro card explaining "Your tokens stay on this device — no servers, no middleman."
+  - Per-integration card: 1-line value prop + "Get token" external link to the right docs page.
+  - Dismissible after first read.
+- **Acceptance**: First-run experience is welcoming, not a wall of empty cards; help links point to the correct tokens-page for each service.
+
+---
+
+### Phase 12 — PlanFlow Integration
+
+**Goal:** First-class PlanFlow integration so Work Station becomes the operating layer for `planflow.tools` projects — task list + start/progress/done flows + active work + activity feed + notifications, with terminal-aware nudges (branch suggestions, commit messages).
+**Estimate:** 2.5 weeks (90h).
+
+#### T12.1: PlanFlow API client + Bearer auth
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T11.4
+- **Description**:
+  - Typed REST client over `https://api.planflow.tools` using user's API token.
+  - Coverage: projects, tasks (CRUD + work + reorder + bulk-status), changes (incremental polling), active-work, comments, notifications, knowledge.
+  - Zod-typed responses; mirrors the shape exposed by the PlanFlow MCP server today.
+  - Handle 401 (invalid token) with a typed `PlanFlowAuthError` so the UI can prompt re-auth.
+- **Acceptance**: Client lists user's projects + tasks for a project; bad token surfaces typed error.
+
+#### T12.2: Settings card + project linking
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T12.1, T11.3, T11.5
+- **Description**:
+  - Settings → Integrations → PlanFlow card.
+  - "Get token" link to `https://planflow.tools/settings/api-tokens`; paste field; verify → show user email + name on success.
+  - Per-project: link a Work Station project to a PlanFlow project (1-to-1 — autocomplete from `/projects`).
+  - Stored via T11.5's `project_links` model.
+- **Acceptance**: Token verified once; per-project link persists; tab activates only when linked.
+
+#### T12.3: Task list view (status groups + lock indicators)
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T12.2, T11.7
+- **Description**:
+  - Tasks grouped by status: TODO, IN_PROGRESS, BLOCKED, DONE (collapsible; DONE collapsed by default).
+  - Per task: ID badge, name, complexity dot, dependencies count, assignee avatar, lock indicator 🔒 (with locker name on hover).
+  - Filter: current phase only / all / search by name.
+  - Empty state: "No tasks yet — open the project on planflow.tools".
+- **Acceptance**: 90+ task projects render in <300ms; filters work; locked tasks visually distinct.
+
+#### T12.4: Start task — lock + IN_PROGRESS + branch + terminal nudge
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T12.3
+- **Description**:
+  - "Start working" button on a task. Disabled if locked by another user.
+  - Calls `POST /:id/tasks/:taskId/work` to acquire lock + set IN_PROGRESS.
+  - Fetches branch suggestion via `/branch-name` endpoint (PlanFlow has it built-in: e.g. `task/T5.9-layout-restore-on-switch-launch`).
+  - Switches the workspace's Terminal tab and pre-types `git checkout -b <name>` in the focused pane (user just hits Enter).
+  - Tab badge shows the active task ID while in progress.
+- **Acceptance**: Two users on the same task — only one acquires the lock; branch suggestion + terminal pre-fill works; tab badge updates live.
+
+#### T12.5: Progress + Done flows (comment + status + commit msg)
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T12.4
+- **Description**:
+  - "Mark progress" — textarea + optional `saveAsKnowledge` toggle; posts comment via `/tasks/:id/work` or `/comments`.
+  - "Mark done" — summary textarea; posts as comment, sets DONE, releases lock.
+  - Generates a Conventional Commits message: `feat: T5.9 — layout restore on switch / launch`.
+  - Pre-types the commit command in the focused terminal pane: `git commit -m "..."`.
+- **Acceptance**: Done-flow rewrites status, comment lands, lock released, commit message ready in terminal.
+
+#### T12.6: Active work panel
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T12.3
+- **Description**:
+  - Right rail listing users currently in IN_PROGRESS — avatar + name + task ID + duration.
+  - Backed by `GET /:id/active-work`; polled every 10s.
+  - Solo project (1 user) — collapses to a tiny "you · T5.9" indicator.
+  - Click a row → jumps to that task in the list.
+- **Acceptance**: Multi-user project shows everyone live; solo project doesn't waste space.
+
+#### T12.7: Activity feed (incremental polling)
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T12.3
+- **Description**:
+  - Bottom rail: project changes feed — task status changes, comments, knowledge added, member joined.
+  - Polls `GET /projects/:id/changes?since=<lastSeen>&limit=50` every 10s.
+  - Visual: similar to PlanFlow web's activity feed (icon + actor + verb + target).
+  - Click an entry → navigates to the relevant task / comment.
+- **Acceptance**: Activity arrives within 10s; pagination on initial load doesn't show duplicates.
+
+#### T12.8: Task detail — description + comments thread
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T12.3
+- **Description**:
+  - Click a task → side panel: full description, dependencies (with status icons), GitHub issue/PR badges if linked.
+  - Comments thread (chronological); post comment with @mentions.
+  - Optionally show typing indicators if WebSocket lands later (stretch).
+- **Acceptance**: Comment posts in <500ms; @mentions resolved against project members.
+
+#### T12.9: Notifications bell (cross-project)
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T12.1
+- **Description**:
+  - Top-right bell icon with unread badge — count from `GET /notifications/unread-count`.
+  - Click → dropdown of recent notifications across ALL linked PlanFlow projects.
+  - Click a notification → switches to the relevant Work Station project + opens the related task.
+  - Polls every 30s.
+- **Acceptance**: Mention in any PlanFlow project surfaces in Work Station within 30s; navigation works.
+
+---
+
+### Phase 13 — Code Editor (Monaco + file tree)
+
+**Goal:** Native code editor tab inside each project workspace. Edit files alongside the terminal without switching to VS Code.
+**Estimate:** 3–4 weeks (120–160h).
+
+#### T13.1: Monaco Editor base integration + Solid binding
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T1.5
+- **Description**:
+  - Install `monaco-editor` + bundle via Vite worker plugin.
+  - Hand-rolled Solid binding (no official wrapper exists) — mount/unmount, prop reactivity, dispose on cleanup.
+  - Verify webworker chunks load in Tauri's WebView (CSP, file:// origin).
+- **Acceptance**: Editor mounts in a tab, accepts text, no console errors on dispose.
+
+#### T13.2: File tree component
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T13.1
+- **Description**:
+  - Recursive folder navigator scoped to the project's path.
+  - Lazy expand on click; respect `.gitignore` for noise reduction.
+  - Virtualized when >500 entries to keep large monorepos snappy.
+- **Acceptance**: Clicking any file in the tree opens it in the editor.
+
+#### T13.3: File open + read via Tauri FS
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T13.1
+- **Description**:
+  - Tauri FS plugin permission scoped to project paths only.
+  - Read file → stream into Monaco model with charset detection (UTF-8 default, BOM-aware).
+  - Binary file detection — show "not a text file" placeholder instead of garbage.
+- **Acceptance**: Opens text files cleanly; PNG/binary shows placeholder.
+
+#### T13.4: File save with debounced writes
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T13.3
+- **Description**:
+  - Cmd/Ctrl+S writes via Tauri FS.
+  - Debounced auto-save (configurable, default off).
+  - Dirty indicator (dot in tab) when buffer differs from disk.
+- **Acceptance**: Edits persist; dirty state accurate.
+
+#### T13.5: External-change conflict detection
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T13.4
+- **Description**:
+  - Watch open files via Tauri's notify; on external change while dirty, prompt: reload / keep mine / diff.
+  - Hash-based dirty check, not mtime (mtime fires spuriously on some filesystems).
+- **Acceptance**: Edit in editor + edit on disk → user gets a meaningful conflict prompt.
+
+#### T13.6: Multi-file editor tabs
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T13.4
+- **Description**:
+  - Open multiple files simultaneously inside the Editor tab — sub-tabs.
+  - Cmd/Ctrl+W closes a sub-tab; prompts on unsaved changes.
+  - Persist open tab list per project across launches.
+- **Acceptance**: Open 5 files; switch between them without losing state; reopen project later → same tabs restored.
+
+#### T13.7: Language detection + theme integration
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T13.1, T8.3
+- **Description**:
+  - Map file extensions to Monaco language IDs (ts, tsx, rs, py, etc.).
+  - Editor theme follows app theme via Monaco's `defineTheme` — token colours pulled from design tokens.
+- **Acceptance**: TS, Rust, Python all syntax-highlighted; theme switches with app theme without remount.
+
+#### T13.8: In-file search & replace
+
+- [ ] **Status**: TODO
+- **Complexity**: S
+- **Dependencies**: T13.1
+- **Description**:
+  - Cmd/Ctrl+F opens Monaco's built-in find widget.
+  - Cmd/Ctrl+H toggles replace mode.
+  - Match-case, whole-word, regex toggles wired through.
+- **Acceptance**: Find next/prev cycles correctly; replace-all reports count.
+
+#### T13.9: Project-wide find in files
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T13.2
+- **Description**:
+  - Cmd/Ctrl+Shift+F: input + results pane.
+  - Backed by `ripgrep` shipped as Tauri sidecar (or `tauri-plugin-shell` calling system `rg`).
+  - Click result → open file at line.
+- **Acceptance**: Search 100k-line monorepo for a token — results in <1s; navigation works.
+
+---
+
+### Phase 14 — GitHub Integration
+
+**Goal:** Project workspace gets a GitHub tab — repo overview, commits, branches, PRs, Actions.
+**Estimate:** 1.5 weeks (55h).
+
+#### T14.1: GitHub API client wrapper
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T11.4
+- **Description**:
+  - Thin REST wrapper using the configured PAT.
+  - Methods: `getRepo`, `listCommits`, `listBranches`, `listPullRequests`, `listWorkflowRuns`.
+- **Acceptance**: Calls succeed for the user's own repo; typed responses.
+
+#### T14.2: Repo linking UI
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T14.1, T11.5
+- **Description**:
+  - In project edit modal: "GitHub repo" field with autocomplete from user's repos.
+  - Save → stored via T11.5's link model.
+- **Acceptance**: Type "work" → autocomplete shows `BekaChkhiro/work-station`; selection persists.
+
+#### T14.3: Repo overview view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T14.2
+- **Description**:
+  - Default branch, latest commit, stars/forks, open issues count.
+  - "Open on github.com" link.
+- **Acceptance**: Tab loads in <500ms after switch; data accurate.
+
+#### T14.4: Commits + branches view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T14.3
+- **Description**:
+  - Recent commits list (author, message, time).
+  - Branch dropdown to switch context.
+- **Acceptance**: Last 30 commits shown; switching branches updates the list.
+
+#### T14.5: Pull requests list
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T14.3
+- **Description**:
+  - PR list with status (open/merged/closed), author, reviewer count, CI check summary, age.
+  - Filter: open / closed / all; pagination for >30 PRs.
+- **Acceptance**: Last 30 PRs visible; filter narrows the list; large repos paginate cleanly.
+
+#### T14.6: Pull request detail
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T14.5
+- **Description**:
+  - Clicking a PR opens detail: description, files changed (just the list, not the diff), comments.
+  - Inline action: "Open on github.com" for the full review experience.
+- **Acceptance**: PR detail loads in <1s; comments rendered in chronological order.
+
+#### T14.7: GitHub Actions / workflow runs view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T14.3
+- **Description**:
+  - Recent workflow runs list — name, branch, status icon (✓ ✗ ⏳), duration, age.
+  - Click a failed run → link to logs on github.com.
+- **Acceptance**: Failing runs immediately distinguishable; click-through works.
+
+#### T14.8: GitHub-tab caching + manual refresh
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T14.3, T11.4
+- **Description**:
+  - Each view has its own TTL (60s for commits, 30s for PRs, 15s for Actions).
+  - Manual refresh button per view; loading state while refreshing.
+  - Background refresh on tab focus if data is older than TTL × 2.
+- **Acceptance**: Repeated tab switches don't burn API quota; manual refresh forces re-fetch.
+
+---
+
+### Phase 15 — Vercel Integration
+
+**Goal:** Per-project Vercel tab — deployments, build logs, domains, env vars, redeploy.
+**Estimate:** 1.5 weeks (60h).
+
+#### T15.1: Vercel API client
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T11.4
+- **Description**:
+  - Wrapper over Vercel REST API.
+  - Methods: `listProjects`, `listDeployments`, `getDeployment`, `triggerDeploy`, `listDomains`, `listEnvVars`.
+- **Acceptance**: Authenticated calls succeed; deployments list returns within 1s.
+
+#### T15.2: Project linking UI
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T15.1, T11.5
+- **Description**:
+  - Vercel project selector in the edit modal (autocomplete).
+- **Acceptance**: Selection persists; tab now shows live data.
+
+#### T15.3: Deployments list view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T15.2
+- **Description**:
+  - List with: status (READY/ERROR/BUILDING), commit SHA, branch, age.
+  - Filter by branch.
+- **Acceptance**: Last 30 deployments visible; filter narrows the list.
+
+#### T15.4: Deployment detail view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T15.3
+- **Description**:
+  - Click a deployment → side panel: status, commit, branch, URL, duration, creator.
+  - Copy-to-clipboard for the deployment URL.
+  - Link to view on vercel.com.
+- **Acceptance**: Detail panel loads in <500ms; data complete.
+
+#### T15.5: Build logs live streaming
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T15.4
+- **Description**:
+  - Stream Vercel build logs into the detail panel using their events endpoint (chunked HTTP).
+  - Auto-scroll-to-bottom unless user scrolls up.
+  - Reconnect on transient failures with backoff.
+- **Acceptance**: Live build shows logs within 1s of write; disconnect/reconnect doesn't duplicate lines.
+
+#### T15.6: Domains + env vars view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T15.3
+- **Description**:
+  - Domains list (production + preview); reveal/copy each.
+  - Env vars list (read-only); sensitive values masked behind a reveal toggle.
+- **Acceptance**: Domain status (assigned/pending) accurate; env keys all visible, values masked by default.
+
+#### T15.7: Trigger redeploy action
+
+- [ ] **Status**: TODO
+- **Complexity**: S
+- **Dependencies**: T15.3
+- **Description**:
+  - "Redeploy" button on the production deployment — confirmation modal first.
+  - On click: fire `POST /v13/deployments` redeploy; show pending state in list until new deployment appears.
+- **Acceptance**: Redeploy succeeds; new entry visible in deployments list within 5s.
+
+---
+
+### Phase 16 — Neon DB Integration
+
+**Goal:** Per-project Neon tab — branches, connection strings, query runner, basic admin.
+**Estimate:** 2 weeks (80h).
+
+#### T16.1: Neon API client
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T11.4
+- **Description**:
+  - Wrapper over Neon's Console API.
+  - Methods: `listProjects`, `listBranches`, `getConnectionUri`, `runSql`.
+- **Acceptance**: List branches returns within 1s; getting a connection string works.
+
+#### T16.2: Project linking UI
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T16.1, T11.5
+- **Description**:
+  - Neon project selector in the edit modal.
+- **Acceptance**: Selection persists; tab loads live data.
+
+#### T16.3: Branches view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T16.2
+- **Description**:
+  - List of branches with default/main markers, last activity, parent branch.
+  - Indicator for compute hours used (free-tier awareness).
+- **Acceptance**: Branch list accurate; parent relationships shown clearly.
+
+#### T16.4: Connection strings reveal/copy
+
+- [ ] **Status**: TODO
+- **Complexity**: S
+- **Dependencies**: T16.3
+- **Description**:
+  - Per-branch "Show connection string" toggle — pooled vs direct selectors.
+  - Copy button; never log the string.
+  - Optional: copy as `.env` line (`DATABASE_URL=...`).
+- **Acceptance**: Reveal/copy work; pooled/direct strings differ correctly.
+
+#### T16.5: SQL query runner — Monaco editor + execute
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T16.3, T13.7
+- **Description**:
+  - Monaco editor configured for SQL (syntax highlighting + keyword completion).
+  - Cmd/Ctrl+Enter executes via Neon's SQL-over-HTTP endpoint.
+  - Branch picker — choose which branch to run against.
+- **Acceptance**: SELECT round-trips within 2s; branch switch changes target.
+
+#### T16.6: SQL results — tabular display + export
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T16.5
+- **Description**:
+  - Virtualized table for results (handles 10k+ rows).
+  - Column type-aware rendering (timestamps, JSONB, NULLs).
+  - Export current result set as CSV / JSON.
+- **Acceptance**: 10k-row result scrolls smoothly; CSV export round-trips correctly.
+
+#### T16.7: Branch management — create/delete
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T16.3
+- **Description**:
+  - "New branch" modal — pick parent, name, optional `at` timestamp for point-in-time recovery.
+  - Delete confirms with branch name typed (destructive).
+- **Acceptance**: Create + delete reflected immediately in the branches list.
+
+---
+
+### Phase 17 — Railway Integration
+
+**Goal:** Per-project Railway tab — services, deployments, logs, env vars.
+**Estimate:** 1.5 weeks (60h).
+
+#### T17.1: Railway GraphQL client
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T11.4
+- **Description**:
+  - Wrapper over Railway's GraphQL API.
+  - Queries: `me`, `project`, `services`, `deployments`, `deploymentLogs`, `variables`.
+- **Acceptance**: GraphQL queries succeed with correct typing.
+
+#### T17.2: Project linking UI
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T17.1, T11.5
+- **Description**:
+  - Railway project selector in the edit modal.
+- **Acceptance**: Selection persists.
+
+#### T17.3: Services + deployments view
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T17.2
+- **Description**:
+  - List services in the project with status badges.
+  - Per-service deployments list with status, commit, age.
+- **Acceptance**: Multi-service projects render correctly.
+
+#### T17.4: Live deployment log streaming
+
+- [ ] **Status**: TODO
+- **Complexity**: L
+- **Dependencies**: T17.3
+- **Description**:
+  - Subscribe to Railway's GraphQL subscription for deployment logs (WebSocket).
+  - Auto-tail with scroll-lock; pause when user scrolls up.
+  - Reconnect on disconnect with backoff; deduplicate on reconnect.
+- **Acceptance**: Logs stream within 1s of write; reconnect doesn't duplicate lines.
+
+#### T17.5: Env vars CRUD
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T17.3
+- **Description**:
+  - Per-service env vars list; sensitive values masked.
+  - Add / update / remove via inline editing; "Apply changes" triggers a redeploy.
+- **Acceptance**: Edit a var → next deployment uses the new value.
+
+---
+
+## 10. Stretch / Phase 18 — Post-v0.1.0
 
 Explicitly out of v0.1 scope. Reconsider after dogfood data + user feedback.
 
