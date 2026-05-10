@@ -1,4 +1,4 @@
-import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import { Terminal as Xterm, type IDisposable, type ITheme } from "@xterm/xterm";
 import { resolvedTheme } from "../../stores/theme";
 import { FitAddon } from "@xterm/addon-fit";
@@ -12,6 +12,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { saveClipboardImage } from "../../ipc/clipboard";
 import { TerminalSearch } from "./TerminalSearch";
 import { eventMatchesBinding, getBinding, listActions } from "../../hotkeys";
+import { addMenuActionListener } from "../../menu";
+import { getWorkspace } from "../../stores/workspace";
 import { logger } from "../../utils/logger";
 import { registerSession } from "../../stores/sessions";
 import {
@@ -340,6 +342,21 @@ export function Terminal(props: TerminalProps) {
     searchAddon?.clearDecorations();
     term?.focus();
   };
+
+  onMount(() => {
+    const dispose = addMenuActionListener((id) =>
+      untrack(() => {
+        if (id !== "find-in-pane") return;
+        if (!props.projectId) return;
+        const isFocused = untrack(
+          () => getWorkspace(props.projectId ?? "")?.focusedSessionId === currentSessionId,
+        );
+        if (!isFocused) return;
+        setSearchOpen(true);
+      }),
+    );
+    onCleanup(dispose);
+  });
 
   // T4.11: Cmd/Ctrl+click follows the link via the OS default browser (the
   // Tauri opener plugin), instead of `window.open` which would either be

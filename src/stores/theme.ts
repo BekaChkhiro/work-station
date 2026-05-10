@@ -6,17 +6,26 @@ export type ResolvedTheme = "dark" | "light";
 const STORAGE_KEY = "ws.theme";
 
 const readStored = (): ThemeMode => {
-  if (typeof localStorage === "undefined") return "system";
+  if (typeof localStorage === "undefined") return "dark";
   const v = localStorage.getItem(STORAGE_KEY);
-  return v === "dark" || v === "light" || v === "system" ? v : "system";
+  return v === "dark" || v === "light" || v === "system" ? v : "dark";
 };
 
 const systemPrefersDark = () =>
   typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches;
 
+const resolveMode = (m: ThemeMode): ResolvedTheme =>
+  m === "system" ? (systemPrefersDark() ? "dark" : "light") : m;
+
+const stampTheme = (r: ResolvedTheme): void => {
+  setResolved(r);
+  if (typeof document !== "undefined") {
+    document.documentElement.dataset.theme = r;
+  }
+};
+
 const initialMode = readStored();
-const initialResolved: ResolvedTheme =
-  initialMode === "system" ? (systemPrefersDark() ? "dark" : "light") : initialMode;
+const initialResolved = resolveMode(initialMode);
 
 const [mode, setModeSignal] = createSignal<ThemeMode>(initialMode);
 const [resolved, setResolved] = createSignal<ResolvedTheme>(initialResolved);
@@ -29,11 +38,7 @@ if (typeof document !== "undefined") {
 
 createEffect(() => {
   const m = mode();
-  const r: ResolvedTheme = m === "system" ? (systemPrefersDark() ? "dark" : "light") : m;
-  setResolved(r);
-  if (typeof document !== "undefined") {
-    document.documentElement.dataset.theme = r;
-  }
+  stampTheme(resolveMode(m));
   if (typeof localStorage !== "undefined") {
     localStorage.setItem(STORAGE_KEY, m);
   }
@@ -46,7 +51,7 @@ createEffect(() => {
 if (typeof window !== "undefined") {
   const mql = window.matchMedia("(prefers-color-scheme: dark)");
   mql.addEventListener("change", () => {
-    if (mode() === "system") setResolved(mql.matches ? "dark" : "light");
+    if (mode() === "system") stampTheme(mql.matches ? "dark" : "light");
   });
 }
 

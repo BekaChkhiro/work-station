@@ -35,7 +35,7 @@ function def<T>(schema: z.ZodType<T>, defaultValue: T): SettingDef<T> {
 // default fallback CLI. Default-fallback-CLI stays nullable so the platform
 // default chosen at runtime (T2.x) doesn't get baked into storage.
 export const SETTINGS = {
-  theme: def(ThemeSchema, "system" as z.infer<typeof ThemeSchema>),
+  theme: def(ThemeSchema, "dark" as z.infer<typeof ThemeSchema>),
   hotkeys: def(HotkeysSchema, {} as z.infer<typeof HotkeysSchema>),
   last_active_project: def(ProjectIdSchema, null as z.infer<typeof ProjectIdSchema>),
   scrollback_size: def(ScrollbackSchema, 10_000),

@@ -1,4 +1,5 @@
 import { Match, Switch, createSignal, onCleanup, onMount } from "solid-js";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AppErrorBoundary, PanelErrorBoundary } from "./components/ErrorBoundary";
 import { ErrorThrower } from "./components/ErrorBoundary/ErrorThrower.dev";
 import TerminalLiveHarness from "./components/Terminal/Terminal.live.dev";
@@ -18,6 +19,7 @@ import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { HotkeyCheatsheet } from "./components/HotkeyCheatsheet";
 import { QuickSwitcher } from "./components/QuickSwitcher";
 import { eventMatchesBinding, getBinding } from "./hotkeys";
+import { addMenuActionListener, bridgeNativeMenuActions } from "./menu";
 import { isEditableTarget } from "./utils/platform";
 import "./styles/globals.css";
 
@@ -73,6 +75,29 @@ export default function App() {
   // and we need the modifier combo to win even while a terminal pane has
   // focus.
   onMount(() => {
+    let unlistenNative: (() => void) | undefined;
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      void bridgeNativeMenuActions().then((dispose) => {
+        unlistenNative = dispose;
+      });
+    }
+    const disposeMenu = addMenuActionListener((id) => {
+      if (id === "quick-switcher") {
+        setSwitcherOpen((open) => !open);
+        return;
+      }
+      if (id === "documentation") {
+        void openUrl("https://tauri.app/");
+        return;
+      }
+      if (id === "report-issue") {
+        void openUrl("https://github.com/");
+        return;
+      }
+      if (id === "about") {
+        window.alert("Work Station 0.1.0");
+      }
+    });
     const handler = (e: KeyboardEvent) => {
       const crossFind = getBinding("find-cross-session");
       if (crossFind && eventMatchesBinding(e, crossFind)) {
@@ -103,7 +128,11 @@ export default function App() {
       }
     };
     document.addEventListener("keydown", handler);
-    onCleanup(() => document.removeEventListener("keydown", handler));
+    onCleanup(() => {
+      document.removeEventListener("keydown", handler);
+      disposeMenu();
+      unlistenNative?.();
+    });
   });
 
   return (

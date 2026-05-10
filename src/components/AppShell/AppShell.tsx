@@ -17,7 +17,7 @@
 // scoped search metadata, etc.) stays out of this file — it just deals
 // in layout trees and sessionIds.
 
-import { For, Show, createEffect, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import type { JSX } from "solid-js";
 import { LayoutTree } from "../LayoutTree";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
@@ -25,6 +25,8 @@ import type { CliMeta } from "../../types/tab";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
 import { SettingsMenu } from "../SettingsMenu";
 import { Sidebar } from "../Sidebar";
+import { WindowsAppMenu } from "../WindowsAppMenu";
+import { addMenuActionListener } from "../../menu";
 import type { LayoutPath } from "../../types/layout";
 import {
   activeProjectId,
@@ -38,6 +40,7 @@ import {
 import { sessionList } from "../../stores/sessions";
 import { useNumericProjectHotkeys } from "../../hotkeys/numericProjectHotkeys";
 import { usePaneNavHotkeys } from "../../hotkeys/paneNavHotkeys";
+import { isWindows } from "../../utils/platform";
 
 export interface AppShellProps {
   /** Render the contents of a single pane leaf for `projectId` / `sessionId`.
@@ -110,6 +113,32 @@ export function AppShell(props: AppShellProps): JSX.Element {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsAnchor, setSettingsAnchor] = createSignal<HTMLButtonElement | null>(null);
 
+  onMount(() => {
+    const dispose = addMenuActionListener((id) =>
+      untrack(() => {
+        if (id === "new-project") {
+          props.onAddProject?.();
+          return;
+        }
+        if (id === "open-settings") {
+          setSettingsOpen(true);
+          props.onOpenSettings?.();
+          return;
+        }
+        if (id === "toggle-sidebar") {
+          props.onToggleSidebar?.();
+          return;
+        }
+        if (id.startsWith("switch-project-")) {
+          const index = Number(id.slice("switch-project-".length)) - 1;
+          const project = untrack(() => projects()[index]);
+          if (project) setActiveProject(project.id);
+        }
+      }),
+    );
+    onCleanup(dispose);
+  });
+
   // Auto-focus the previously focused pane whenever the active project
   // flips so the user can keep typing without an extra click. The display
   // toggle in the workspace area happens synchronously in this same render
@@ -134,6 +163,9 @@ export function AppShell(props: AppShellProps): JSX.Element {
 
   return (
     <div class="ws-appshell relative grid h-full w-full grid-cols-[1fr_auto] bg-canvas text-fg">
+      <Show when={isWindows}>
+        <WindowsAppMenu />
+      </Show>
       <div class="ws-appshell__workspace relative min-h-0">
         <Show when={projects().length === 0}>
           <ProjectsEmptyState onAddProject={() => props.onAddProject?.()} shortcut="⌘N" />

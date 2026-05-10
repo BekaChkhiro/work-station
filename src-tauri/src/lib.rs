@@ -47,6 +47,9 @@ pub fn run() {
         // so the frontend (T7.2) sees the same cached list across windows.
         .manage(cli::CliRegistry::new())
         .setup(|app| {
+            if let Err(error) = menu::install(app) {
+                tracing::error!(target: "menu", %error, "native menu install failed");
+            }
             let handle = app.handle().clone();
             // T7.1: kick off the PATH scan on a blocking pool — `metadata`
             // calls hit the disk and we don't want to share Tokio worker

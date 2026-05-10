@@ -29,6 +29,7 @@ const CLI_INSTALL_URLS: Readonly<Record<string, string>> = {
   kimi: "https://github.com/MoonshotAI/moonshot-cli",
 };
 import { AppShell } from "../AppShell";
+import { TitleBar } from "../TitleBar";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import { cliMetaForId } from "../../types/cli";
 import type { CliMeta } from "../../types/tab";
@@ -49,6 +50,7 @@ import { getSetting, setSetting } from "../../db/settings";
 import { pickProjectFolder } from "../../ipc/picker";
 import { cliListAvailable } from "../../ipc/cli";
 import { ptyKill, ptySpawn } from "../../ipc/pty";
+import { setThemeMode, themeMode, type ThemeMode } from "../../stores/theme";
 import {
   activeProjectId,
   addProject,
@@ -61,6 +63,7 @@ import {
   setFocusedSession,
   setLayout,
   splitPane,
+  closePane as closePaneInStore,
   updateProjectMeta,
 } from "../../stores/workspace";
 import {
@@ -73,6 +76,7 @@ import {
 import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "../../db/sessions";
 import type { LayoutPersister } from "../../db/sessions";
 import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
+import { addMenuActionListener } from "../../menu";
 import { isMac, isWindows } from "../../utils/platform";
 
 interface EditTarget {
@@ -237,6 +241,27 @@ export function AppRoot(): JSX.Element {
     onSessionClosed: (sessionId) => forgetSessionCli(sessionId),
   });
 
+  onMount(() => {
+    const dispose = addMenuActionListener((id) => {
+      if (id === "close-pane") {
+        void closeFocusedPane();
+        return;
+      }
+      if (id === "new-terminal") {
+        void launchMenuTerminal();
+        return;
+      }
+      if (id === "copy") {
+        document.execCommand("copy");
+        return;
+      }
+      if (id === "paste") {
+        document.execCommand("paste");
+      }
+    });
+    onCleanup(dispose);
+  });
+
   // T2.12 — spawn a fresh PTY for every pane in `savedLayout`, replace the
   // stale session ids from the previous run with the new ones, and put the
   // restored tree into the workspace store. All panes use the project's live
@@ -309,6 +334,11 @@ export function AppRoot(): JSX.Element {
 
     void (async () => {
       try {
+        try {
+          setThemeMode(await getSetting("theme"));
+        } catch (err) {
+          console.error("[T8.3] theme restore failed:", err);
+        }
         try {
           setAvailableClis(await cliListAvailable());
         } catch (err) {
@@ -604,6 +634,37 @@ export function AppRoot(): JSX.Element {
     }
   };
 
+  async function closeFocusedPane(): Promise<void> {
+    const projectId = activeProjectId();
+    if (!projectId) return;
+    const ws = getWorkspace(projectId);
+    if (!ws?.focusedSessionId) return;
+    const closed = closePaneInStore(projectId, ws.focusedSessionId);
+    if (closed === null) return;
+    untrackSession(projectId, closed);
+    try {
+      await ptyKill(closed);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function launchMenuTerminal(): Promise<void> {
+    const projectId = activeProjectId();
+    if (!projectId) return;
+    const ws = getWorkspace(projectId);
+    if (ws?.layout) {
+      setActionError("New terminal tabs land with the project workspace tab system.");
+      return;
+    }
+    const cli = resolveDefaultCli(projectId) ?? availableClis()[0];
+    if (!cli) {
+      setActionError("No CLI is available on PATH.");
+      return;
+    }
+    await handleLaunchFirstCli(projectId, cli);
+  }
+
   // T7.4 — auto-launch the project's default CLI as the first pane when
   // a project becomes active with no layout yet. Tracks per-id so we
   // don't re-spawn after the user closes every pane (they'll see the
@@ -662,8 +723,29 @@ export function AppRoot(): JSX.Element {
     });
   });
 
+  createEffect((prev: ThemeMode | undefined) => {
+    if (boot().kind !== "ready") return prev;
+    const current = themeMode();
+    if (prev !== current) {
+      void setSetting("theme", current).catch((err: unknown) => {
+        console.error("[T8.3] theme persist failed:", err);
+      });
+    }
+    return current;
+  });
+
+  // T8.6 — title bar reflects the active project name when one is selected,
+  // falling back to the app name during onboarding / empty state.
+  const titleBarLabel = (): string => {
+    const id = activeProjectId();
+    if (!id) return "Work Station";
+    const meta = projects().find((p) => p.id === id);
+    return meta ? `Work Station — ${meta.name}` : "Work Station";
+  };
+
   return (
     <div class="flex h-full w-full flex-col">
+      <TitleBar title={titleBarLabel()} />
       {actionError() ? (
         <div class="border-b border-danger/40 bg-danger/10 px-3 py-1.5 text-xs text-danger">
           {actionError()}
