@@ -491,6 +491,183 @@ button {
   margin-left: auto;
 }
 
+/* T8.2 — Hotkey cheatsheet modal. Reuses the QuickSwitcher visual language
+ * (centered, top-anchored, dimmed backdrop). Two-column rows: action label
+ * on the left, formatted binding chip on the right. */
+.ws-cheat__backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-canvas) 70%, transparent);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  z-index: 220;
+  animation: wsCheatFade 140ms var(--ease);
+}
+@keyframes wsCheatFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.ws-cheat {
+  width: min(560px, calc(100vw - 32px));
+  max-height: 76vh;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: wsCheatPop 160ms var(--ease);
+}
+@keyframes wsCheatPop {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ws-cheat__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+}
+.ws-cheat__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: -0.01em;
+}
+.ws-cheat__input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+.ws-cheat__input::placeholder {
+  color: var(--text-tertiary);
+}
+.ws-cheat__kbd {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.4;
+}
+.ws-cheat__conflicts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--warning, #d97706) 8%, transparent);
+}
+.ws-cheat__conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.ws-cheat__conflict-icon {
+  color: var(--warning, #d97706);
+}
+.ws-cheat__conflict-key {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.ws-cheat__conflict-text {
+  color: var(--text-tertiary);
+}
+.ws-cheat__list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+}
+.ws-cheat__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--r-md, 6px);
+  color: var(--text-secondary);
+}
+.ws-cheat__row:hover {
+  background: var(--bg-surface);
+}
+.ws-cheat__label {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-cheat__binding {
+  font-variant-numeric: tabular-nums;
+}
+.ws-cheat__chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 2px 6px;
+  letter-spacing: 0.02em;
+}
+.ws-cheat__empty {
+  padding: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.ws-cheat__foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.ws-cheat__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.ws-cheat__hint:last-child {
+  margin-left: auto;
+}
+.ws-cheat__muted {
+  color: var(--text-secondary);
+}
+
 /* T5.5 — Pane focus ring. Mirrors the prototype's `.pane` / `.pane.focused`
  * rules in work-station-design/styles.css under the `ws-pane` prefix.
  * Border-color + inset/outer ring transition together so the focus shift

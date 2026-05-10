@@ -1,10 +1,16 @@
 // Pane / project hotkeys for the production AppRoot.
 //
 // Bindings (Cmd on macOS, Ctrl elsewhere):
-//   • Cmd/Ctrl + \           → split focused pane vertically (side-by-side)
-//   • Cmd/Ctrl + Shift + \   → split focused pane horizontally (stacked)
+//   • Cmd/Ctrl + \           → split-v: panes side-by-side (vertical divider)
+//   • Cmd/Ctrl + Shift + \   → split-h: panes stacked (horizontal divider)
 //   • Cmd/Ctrl + W           → close focused pane (kills its PTY)
 //   • Cmd/Ctrl + N           → open the Add Project modal
+//
+// The action ids `split-v` / `split-h` describe what the user sees (which
+// way the divider runs). `SplitPane`'s `direction` parameter names the
+// layout axis instead — so `split-v` produces direction "h" and `split-h`
+// produces direction "v". The mapping happens here so the registry stays in
+// user-facing terms.
 //
 // Listens at the document level so it wins over xterm's hidden textarea —
 // xterm's `customKeyEventHandler` is configured (T4.5) to let the modifier
@@ -124,16 +130,18 @@ export function installPaneHotkeys(handlers: PaneHotkeyHandlers): () => void {
       return;
     }
 
-    const splitH = getBinding("split-h");
-    if (splitH && eventMatchesBinding(e, splitH)) {
+    const splitV = getBinding("split-v");
+    if (splitV && eventMatchesBinding(e, splitV)) {
       e.preventDefault();
+      // User-facing "vertical split" = SplitPane horizontal layout.
       void handleSplit("h", handlers);
       return;
     }
 
-    const splitV = getBinding("split-v");
-    if (splitV && eventMatchesBinding(e, splitV)) {
+    const splitH = getBinding("split-h");
+    if (splitH && eventMatchesBinding(e, splitH)) {
       e.preventDefault();
+      // User-facing "horizontal split" = SplitPane vertical layout.
       void handleSplit("v", handlers);
       return;
     }

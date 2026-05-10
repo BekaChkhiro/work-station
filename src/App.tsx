@@ -15,6 +15,7 @@ import ProjectsEmptyStateLiveHarness from "./components/ProjectsEmptyState/Proje
 import { AppRoot } from "./components/AppRoot";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
+import { HotkeyCheatsheet } from "./components/HotkeyCheatsheet";
 import { QuickSwitcher } from "./components/QuickSwitcher";
 import { eventMatchesBinding, getBinding } from "./hotkeys";
 import { isEditableTarget } from "./utils/platform";
@@ -59,6 +60,7 @@ const debugMode = (): DebugMode => {
 export default function App() {
   const [crossSearchOpen, setCrossSearchOpen] = createSignal(false);
   const [switcherOpen, setSwitcherOpen] = createSignal(false);
+  const [cheatsheetOpen, setCheatsheetOpen] = createSignal(false);
 
   // T4.13: Cmd/Ctrl+Shift+F opens cross-session search. Bound at the
   // document level so any focused pane (xterm steals key events via its
@@ -87,6 +89,16 @@ export default function App() {
         if (isEditableTarget(document.activeElement)) return;
         e.preventDefault();
         setSwitcherOpen((open) => !open);
+        return;
+      }
+      // T8.2 — Cmd+/ toggles the hotkey cheatsheet. Document-level so it
+      // wins over xterm; xterm's `customKeyEventHandler` already iterates
+      // listActions() and returns false for any registered binding, so the
+      // shell never sees the keystroke.
+      const cheatsheet = getBinding("show-cheatsheet");
+      if (cheatsheet && eventMatchesBinding(e, cheatsheet)) {
+        e.preventDefault();
+        setCheatsheetOpen((open) => !open);
         return;
       }
     };
@@ -141,6 +153,7 @@ export default function App() {
       </PanelErrorBoundary>
       <CrossSessionSearch open={crossSearchOpen()} onClose={() => setCrossSearchOpen(false)} />
       <QuickSwitcher open={switcherOpen()} onClose={() => setSwitcherOpen(false)} />
+      <HotkeyCheatsheet open={cheatsheetOpen()} onClose={() => setCheatsheetOpen(false)} />
     </AppErrorBoundary>
   );
 }

@@ -12,8 +12,8 @@ checks now call `eventMatchesBinding(e, getBinding(actionId))`:
 | Action id            | Binding (mac → other)        | Installed by                         |
 | -------------------- | ---------------------------- | ------------------------------------ |
 | `add-project`        | ⌘N → Ctrl+N                  | `paneHotkeys.ts`                     |
-| `split-h`            | ⌘\\ → Ctrl+\\                | `paneHotkeys.ts`                     |
-| `split-v`            | ⌘⇧\\ → Ctrl+Shift+\\         | `paneHotkeys.ts`                     |
+| `split-v`            | ⌘\\ → Ctrl+\\                | `paneHotkeys.ts`                     |
+| `split-h`            | ⌘⇧\\ → Ctrl+Shift+\\         | `paneHotkeys.ts`                     |
 | `close-pane`         | ⌘W → Ctrl+W                  | `paneHotkeys.ts`                     |
 | `quick-switcher`     | ⌘K → Ctrl+K                  | `App.tsx`                            |
 | `find-in-terminal`   | ⌘F → Ctrl+F                  | `Terminal.tsx`, `TerminalSearch.tsx` |
@@ -42,7 +42,9 @@ hotkeys and are out of scope for T8.1:
 ## Smoke test
 
 1. `pnpm tauri dev`. Spawn ≥2 projects, ≥2 panes in the active project.
-2. ⌘\\ → splits the focused pane horizontally; ⌘⇧\\ → vertically.
+2. ⌘\\ → splits the focused pane vertically (side-by-side); ⌘⇧\\ →
+   horizontally (stacked). The action ids name the visible divider; see
+   `qa/default-keybindings.md` for the post-T8.2 reconcile note.
 3. ⌘W → closes the focused pane.
 4. ⌘N → opens the Add Project modal.
 5. ⌘1, ⌘2, ⌘3 → switches between projects in sidebar order. Verify the

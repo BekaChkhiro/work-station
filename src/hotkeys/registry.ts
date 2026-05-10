@@ -1,4 +1,4 @@
-// T8.1: Centralized hotkey registry.
+// T8.1 / T8.2: Centralized hotkey registry.
 //
 // Every keyboard shortcut in the app is declared here once, with a stable
 // action id, a human label, and a `Binding` describing the modifiers + key.
@@ -6,11 +6,20 @@
 // the registry via `eventMatchesBinding(e, getBinding(id))` instead of
 // hand-rolling their own `metaKey` / `ctrlKey` checks. This keeps the
 // platform branch (Cmd vs Ctrl) in exactly one place and is the source of
-// truth for the future cheatsheet (T8.2) and rebinding UI (T8.7).
+// truth for the cheatsheet (T8.2) and the rebinding UI (T8.7).
 //
 // The registry is a Solid store so a rebinding setter (T8.7) can mutate
 // bindings at runtime and document-level handlers will pick up the new
 // value on the next keystroke without re-installation.
+//
+// Action id convention (user-facing, mirrors the prototype WS_HOTKEYS in
+// DESIGN_PROMPT_PHASE2.md):
+//   • `split-v` — vertical split: panes side-by-side (vertical divider).
+//     Maps to `SplitPane` direction "h" (horizontal layout) when dispatched.
+//   • `split-h` — horizontal split: panes stacked (horizontal divider).
+//     Maps to `SplitPane` direction "v" (vertical layout) when dispatched.
+// The id describes what the user sees; the SplitPane direction code names
+// the layout axis. Consumers (paneHotkeys.ts) flip between the two.
 
 import { createStore } from "solid-js/store";
 import { isMac } from "../utils/platform";
@@ -34,19 +43,28 @@ export interface HotkeyAction {
   binding: Binding;
 }
 
-// Default action set — every hotkey currently wired in the app. T8.2 will
-// extend this list (cheatsheet, conflict detection); T8.7 will let the user
-// override individual bindings.
+// Default action set — every hotkey shipped with the app. T8.7 will let the
+// user override individual bindings; until then the user-visible cheatsheet
+// renders this list verbatim.
 const DEFAULT_ACTIONS: HotkeyAction[] = [
   { id: "add-project", label: "New project", binding: { modifiers: ["mod"], key: "n" } },
-  // NB: current behavior is Cmd+\ → "h" (horizontal split) and Cmd+Shift+\
-  // → "v" (vertical). Labels match the in-code semantics; the prototype
-  // WS_HOTKEYS in DESIGN_PROMPT_PHASE2.md flips them, which T8.2 will
-  // reconcile.
-  { id: "split-h", label: "Split pane horizontally", binding: { modifiers: ["mod"], key: "\\" } },
+  // T8.2 — `new-tab` is registered so it appears in the cheatsheet and is
+  // suppressed by xterm's customKeyEventHandler. The actual tab-spawn flow
+  // lands with the project workspace tab system in T11.1; until then the
+  // binding is a no-op.
+  { id: "new-tab", label: "New terminal tab", binding: { modifiers: ["mod"], key: "t" } },
+  // T8.2 — vertical split (panes side-by-side) on Cmd+\, horizontal split
+  // (stacked) on Cmd+Shift+\. Matches the prototype WS_HOTKEYS naming. The
+  // SplitPane direction code is the inverse — paneHotkeys.ts handles the
+  // mapping.
   {
     id: "split-v",
     label: "Split pane vertically",
+    binding: { modifiers: ["mod"], key: "\\" },
+  },
+  {
+    id: "split-h",
+    label: "Split pane horizontally",
     binding: { modifiers: ["mod", "shift"], key: "\\" },
   },
   { id: "close-pane", label: "Close pane", binding: { modifiers: ["mod"], key: "w" } },
@@ -60,6 +78,16 @@ const DEFAULT_ACTIONS: HotkeyAction[] = [
     id: "find-cross-session",
     label: "Find across sessions",
     binding: { modifiers: ["mod", "shift"], key: "f" },
+  },
+  // T8.2 — registered for cheatsheet visibility; settings page (T8.7) and
+  // sidebar toggle wiring land later. Pressing them today is a no-op other
+  // than xterm suppressing the keystroke.
+  { id: "open-settings", label: "Open settings", binding: { modifiers: ["mod"], key: "," } },
+  { id: "toggle-sidebar", label: "Toggle sidebar", binding: { modifiers: ["mod"], key: "b" } },
+  {
+    id: "show-cheatsheet",
+    label: "Show keyboard shortcuts",
+    binding: { modifiers: ["mod"], key: "/" },
   },
   ...Array.from({ length: 9 }, (_, i): HotkeyAction => {
     const n = i + 1;
@@ -116,6 +144,43 @@ export function setBinding(id: string, binding: Binding): void {
 /** All registered actions, in declaration order. For T8.2 cheatsheet UI. */
 export function listActions(): readonly HotkeyAction[] {
   return actions;
+}
+
+/** Two bindings are equal when they share the same key (case-insensitive
+ *  for letters) and the same set of modifiers. Modifier order is ignored. */
+export function bindingsEqual(a: Binding, b: Binding): boolean {
+  if (normalizeKey(a.key) !== normalizeKey(b.key)) return false;
+  if (a.modifiers.length !== b.modifiers.length) return false;
+  for (const m of a.modifiers) {
+    if (!b.modifiers.includes(m)) return false;
+  }
+  return true;
+}
+
+export interface BindingConflict {
+  binding: Binding;
+  ids: string[];
+}
+
+/** Find every binding that's claimed by more than one action. Returns one
+ *  entry per conflicting binding, with the colliding action ids in
+ *  registration order. Empty array when the registry is conflict-free. The
+ *  cheatsheet renders this as a warning row; the rebinder (T8.7) uses it
+ *  to block a save that would introduce a clash. */
+export function findConflicts(): BindingConflict[] {
+  const groups: BindingConflict[] = [];
+  for (const action of actions) {
+    const existing = groups.find((g) => bindingsEqual(g.binding, action.binding));
+    if (existing) {
+      existing.ids.push(action.id);
+    } else {
+      groups.push({
+        binding: { ...action.binding, modifiers: [...action.binding.modifiers] },
+        ids: [action.id],
+      });
+    }
+  }
+  return groups.filter((g) => g.ids.length > 1);
 }
 
 const isLetter = (k: string): boolean => k.length === 1 && /^[a-zA-Z]$/.test(k);
