@@ -13,12 +13,17 @@ export type {
   CacheEntry,
   HttpMethod,
   IntegrationCacheStore,
+  IntegrationFetchResult,
+  IntegrationFetchSource,
   IntegrationHttpClientOptions,
   IntegrationRequestOptions,
+  OfflineHooks,
   RateLimitDetails,
   ResponseType,
   RetryOptions,
 } from "./httpClient";
+
+export { createOfflineAwareIntegrationClient } from "./createOfflineAwareClient";
 
 export {
   CredentialsError,
@@ -53,6 +58,26 @@ export {
   PlanFlowParseError,
   PLANFLOW_DEFAULT_BASE_URL,
 } from "./planflow";
+
+export {
+  installOfflineListeners,
+  isOffline,
+  offlineSnapshot,
+  onReconnect,
+  reportNetworkError,
+  reportNetworkSuccess,
+} from "./offline";
+export type { OfflineSnapshot, ServiceState } from "./offline";
+
+export {
+  clearServiceQueue,
+  enqueueWrite,
+  installAutoReplay,
+  listQueue,
+  registerReplayHandler,
+  replayQueue,
+} from "./writeQueue";
+export type { QueuedWrite, QueueEntry, ReplayContext } from "./writeQueue";
 
 export { IntegrationVerifyError, verifyIntegration } from "./verifiers";
 export type { VerifyFailureReason, VerifyOptions, VerifyResult } from "./verifiers";

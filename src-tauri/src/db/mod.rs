@@ -8,6 +8,7 @@
 //! the database before pending migrations run — see [`backup`].
 
 pub mod backup;
+pub mod integration_write_queue;
 pub mod migrations;
 pub mod project_links;
 pub mod projects;
