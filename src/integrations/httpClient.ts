@@ -1,4 +1,25 @@
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+/** Pick the right fetch implementation for the current runtime.
+ *
+ * The browser webview enforces CORS on cross-origin requests. Most of the
+ * services we integrate with (PlanFlow, GitHub, etc.) don't echo the Tauri
+ * origin in `Access-Control-Allow-Origin`, so a plain `fetch()` from the
+ * renderer fails with a `TypeError` and we report "Couldn't reach …".
+ *
+ * `@tauri-apps/plugin-http` proxies the request through the Rust backend,
+ * which doesn't observe CORS, and returns a `Response` shaped exactly like
+ * the browser one. We default to that in the packaged app and fall back to
+ * the platform `fetch` when running in a plain browser (vitest, vite preview)
+ * so unit tests can still inject their own mocks. */
+function defaultFetchImpl(): typeof fetch {
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    return tauriFetch as unknown as typeof fetch;
+  }
+  return fetch;
+}
 
 export type ResponseType = "json" | "text" | "arrayBuffer" | "void";
 
@@ -262,7 +283,7 @@ export class IntegrationHttpClient {
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? 15_000;
     this.#defaultRetry = normalizeRetry(options.defaultRetry);
     this.#getAuthToken = options.getAuthToken;
-    this.#fetchImpl = options.fetchImpl ?? fetch;
+    this.#fetchImpl = options.fetchImpl ?? defaultFetchImpl();
     this.#cacheStore =
       options.cacheStore ??
       new LayeredCacheStore(new MemoryCacheStore(), new LocalStorageCacheStore());

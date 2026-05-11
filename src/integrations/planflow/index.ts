@@ -1,4 +1,5 @@
 export { createPlanFlowClient, PlanFlowClient, PLANFLOW_DEFAULT_BASE_URL } from "./client";
+export type { BranchNameResponse, ActiveWorkUser } from "./client";
 export { createRendererPlanFlowClient, MissingPlanFlowTokenError } from "./clientFactory";
 export type { RendererPlanFlowClientOptions } from "./clientFactory";
 export {
@@ -19,15 +20,12 @@ export type {
   StartTaskResult,
 } from "./startTask";
 export type {
-  BulkStatusPayload,
   CreateCommentPayload,
   CreateKnowledgePayload,
   ListChangesOptions,
   ListTasksOptions,
   PlanFlowClientOptions,
-  ReorderTasksPayload,
-  TaskWorkPayload,
-  UpdateTaskPayload,
+  UpdateTaskStatusPayload,
 } from "./client";
 export {
   PlanFlowApiError,
@@ -37,14 +35,13 @@ export {
 } from "./errors";
 export type {
   ActiveWorkEntry,
-  BranchNameResponse,
   Change,
-  ChangesResponse,
   Comment,
   KnowledgeEntry,
   KnowledgeType,
   Me,
   Notification,
+  Organization,
   Project,
   Task,
   TaskComplexity,

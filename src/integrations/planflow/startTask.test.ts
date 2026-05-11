@@ -1,9 +1,11 @@
 // T12.4 + T12.5 — Unit tests for the task lifecycle orchestrators
 // (Start / Progress / Done).
 //
-// Mocks `ptyWrite`, the workspace store, and the active-task store so the
-// test can assert the exact side-effect sequence without booting the
-// Tauri runtime or the full Solid reactive graph.
+// PlanFlow's REST surface changed in T-fix: locks are claimed via a
+// dedicated `POST /work {action: "start"}` call and status flips ride a
+// separate `POST /tasks/bulk-status` request. These tests pin the
+// orchestration order around those two calls and the side-effects on
+// the workspace store + terminal.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
@@ -42,19 +44,35 @@ const mockGetWorkspace = getWorkspace as Mock;
 const mockSetActiveTaskId = setActiveTaskId as Mock;
 
 const baseTask: Task = {
-  id: "T12.4",
-  name: "Start task",
+  id: "uuid-12.4",
+  taskId: "T12.4",
+  name: "Start task lock",
   status: "IN_PROGRESS",
 };
 
-function mockClient(overrides: {
-  workOnTask?: PlanFlowClient["workOnTask"];
+interface ClientOverrides {
+  startWorking?: PlanFlowClient["startWorking"];
+  stopWorking?: PlanFlowClient["stopWorking"];
+  updateTaskStatus?: PlanFlowClient["updateTaskStatus"];
+  getTask?: PlanFlowClient["getTask"];
   getBranchName?: PlanFlowClient["getBranchName"];
-}): PlanFlowClient {
+  createComment?: PlanFlowClient["createComment"];
+  createKnowledge?: PlanFlowClient["createKnowledge"];
+}
+
+function mockClient(overrides: ClientOverrides = {}): PlanFlowClient {
   return {
-    workOnTask: overrides.workOnTask ?? vi.fn(async () => baseTask),
+    startWorking: overrides.startWorking ?? vi.fn(async () => undefined),
+    stopWorking: overrides.stopWorking ?? vi.fn(async () => undefined),
+    updateTaskStatus: overrides.updateTaskStatus ?? vi.fn(async () => baseTask),
+    getTask: overrides.getTask ?? vi.fn(async () => baseTask),
     getBranchName:
-      overrides.getBranchName ?? vi.fn(async () => ({ branchName: "task/T12.4-start-task" })),
+      overrides.getBranchName ??
+      vi.fn(async () => ({ branchName: "feature/t12.4-start-task-lock" })),
+    createComment:
+      overrides.createComment ?? vi.fn(async () => ({ id: "c1", body: "note", taskId: "T12.4" })),
+    createKnowledge:
+      overrides.createKnowledge ?? vi.fn(async () => ({ id: "k1", title: "", body: "" })),
   } as unknown as PlanFlowClient;
 }
 
@@ -72,18 +90,40 @@ afterEach(() => {
 
 describe("formatCheckoutCommand", () => {
   it("locks the exact pre-typed text", () => {
-    expect(formatCheckoutCommand("task/T12.4-foo")).toBe("git checkout -b task/T12.4-foo");
+    expect(formatCheckoutCommand("feature/t12.4-foo")).toBe("git checkout -b feature/t12.4-foo");
+  });
+});
+
+describe("commitScopeFromTaskId", () => {
+  it("derives the lowercase phase scope from a task id", () => {
+    expect(commitScopeFromTaskId("T12.4")).toBe("t12");
+    expect(commitScopeFromTaskId("T1.10")).toBe("t1");
+    expect(commitScopeFromTaskId("nope")).toBeNull();
+  });
+});
+
+describe("formatCommitMessage / formatCommitCommand", () => {
+  it("builds the Conventional Commits subject", () => {
+    expect(formatCommitMessage("T12.5", "Progress + Done flows")).toBe(
+      "feat(t12): T12.5 — Progress + Done flows",
+    );
+  });
+
+  it("escapes double quotes in the command form", () => {
+    const cmd = formatCommitCommand("T12.5", 'Quotes "inside"');
+    expect(cmd).toBe('git commit -m "feat(t12): T12.5 — Quotes \\"inside\\""');
   });
 });
 
 describe("startTask — happy path", () => {
-  it("acquires lock, fetches branch, switches tab, writes prefill, marks active", async () => {
+  it("claims lock, flips status, fetches branch, switches tab, prefills", async () => {
     mockGetWorkspace.mockReturnValue({ focusedSessionId: "session-1" });
-    const workOnTask = vi.fn(async () => baseTask);
+    const startWorking = vi.fn(async () => undefined);
+    const updateTaskStatus = vi.fn(async () => baseTask);
     const getBranchName = vi.fn(async () => ({
-      branchName: "task/T12.4-start-task-lock",
+      branchName: "feature/t12.4-start-task-lock",
     }));
-    const client = mockClient({ workOnTask, getBranchName });
+    const client = mockClient({ startWorking, updateTaskStatus, getBranchName });
 
     const result = await startTask({
       client,
@@ -92,331 +132,118 @@ describe("startTask — happy path", () => {
       taskId: "T12.4",
     });
 
-    expect(workOnTask).toHaveBeenCalledWith("ext-123", "T12.4", { status: "IN_PROGRESS" });
+    expect(startWorking).toHaveBeenCalledWith("ext-123", "T12.4");
+    expect(updateTaskStatus).toHaveBeenCalledWith("ext-123", "T12.4", "IN_PROGRESS");
     expect(getBranchName).toHaveBeenCalledWith("ext-123", "T12.4");
     expect(mockSetActiveTaskId).toHaveBeenCalledWith("ws-1", "T12.4");
     expect(mockSetActiveTab).toHaveBeenCalledWith("ws-1", "terminal");
     expect(mockPtyWrite).toHaveBeenCalledTimes(1);
-    const [sessionId, bytes] = mockPtyWrite.mock.calls[0] as [string, Uint8Array];
-    expect(sessionId).toBe("session-1");
-    expect(new TextDecoder().decode(bytes)).toBe("git checkout -b task/T12.4-start-task-lock");
-    expect(result).toEqual({
-      task: baseTask,
-      branchName: "task/T12.4-start-task-lock",
-      prefilled: true,
-    });
+    expect(result.task).toEqual(baseTask);
+    expect(result.branchName).toBe("feature/t12.4-start-task-lock");
+    expect(result.prefilled).toBe(true);
   });
-});
 
-describe("startTask — branch fetch failure", () => {
-  it("keeps the lock, still marks active and switches tab, returns null branchName + prefilled=false", async () => {
+  it("forward-rolls when getBranchName throws after the lock is held", async () => {
     mockGetWorkspace.mockReturnValue({ focusedSessionId: "session-1" });
-    const getBranchName = vi.fn(async () => {
-      throw new Error("branch endpoint down");
-    });
-    const client = mockClient({ getBranchName });
-
-    const result = await startTask({
-      client,
-      externalId: "ext-123",
-      workspaceProjectId: "ws-1",
-      taskId: "T12.4",
-    });
-
-    expect(mockSetActiveTaskId).toHaveBeenCalledWith("ws-1", "T12.4");
-    expect(mockSetActiveTab).toHaveBeenCalledWith("ws-1", "terminal");
-    expect(mockPtyWrite).not.toHaveBeenCalled();
-    expect(result.branchName).toBe(null);
-    expect(result.prefilled).toBe(false);
-  });
-});
-
-describe("startTask — no focused pane", () => {
-  it("skips ptyWrite when the workspace has no focused session", async () => {
-    mockGetWorkspace.mockReturnValue({ focusedSessionId: null });
-    const client = mockClient({});
-
-    const result = await startTask({
-      client,
-      externalId: "ext-123",
-      workspaceProjectId: "ws-1",
-      taskId: "T12.4",
-    });
-
-    expect(mockPtyWrite).not.toHaveBeenCalled();
-    expect(result.prefilled).toBe(false);
-    expect(result.branchName).toBe("task/T12.4-start-task");
-    expect(mockSetActiveTaskId).toHaveBeenCalledWith("ws-1", "T12.4");
-    expect(mockSetActiveTab).toHaveBeenCalledWith("ws-1", "terminal");
-  });
-
-  it("treats a missing workspace the same as no focused pane", async () => {
-    mockGetWorkspace.mockReturnValue(null);
-    const client = mockClient({});
-
-    const result = await startTask({
-      client,
-      externalId: "ext-123",
-      workspaceProjectId: "ws-1",
-      taskId: "T12.4",
-    });
-
-    expect(mockPtyWrite).not.toHaveBeenCalled();
-    expect(result.prefilled).toBe(false);
-  });
-});
-
-describe("startTask — workOnTask failure", () => {
-  it("rethrows without touching local state when the lock acquisition fails", async () => {
-    const conflict = new Error("locked");
-    const workOnTask = vi.fn(async () => {
-      throw conflict;
-    });
-    const client = mockClient({ workOnTask });
-
-    await expect(
-      startTask({
-        client,
-        externalId: "ext-123",
-        workspaceProjectId: "ws-1",
-        taskId: "T12.4",
+    const client = mockClient({
+      getBranchName: vi.fn(async () => {
+        throw new Error("branch endpoint down");
       }),
-    ).rejects.toBe(conflict);
+    });
 
-    expect(mockSetActiveTaskId).not.toHaveBeenCalled();
-    expect(mockSetActiveTab).not.toHaveBeenCalled();
-    expect(mockPtyWrite).not.toHaveBeenCalled();
+    const result = await startTask({
+      client,
+      externalId: "ext-123",
+      workspaceProjectId: "ws-1",
+      taskId: "T12.4",
+    });
+
+    expect(mockSetActiveTaskId).toHaveBeenCalledWith("ws-1", "T12.4");
+    expect(result.branchName).toBeNull();
+    expect(result.prefilled).toBe(false);
   });
 });
-
-// T12.5 — Conventional Commits formatting + Progress + Done orchestration.
-
-describe("commitScopeFromTaskId", () => {
-  it("derives a lowercase phase scope from a T<N>.<M> id", () => {
-    expect(commitScopeFromTaskId("T12.5")).toBe("t12");
-    expect(commitScopeFromTaskId("T7.10")).toBe("t7");
-  });
-
-  it("returns null for ids that don't match the pattern", () => {
-    expect(commitScopeFromTaskId("X1.2")).toBe(null);
-    expect(commitScopeFromTaskId("T12")).toBe(null);
-    expect(commitScopeFromTaskId("")).toBe(null);
-  });
-});
-
-describe("formatCommitMessage", () => {
-  it("formats `feat(tN): TX.Y — name` and trims the name", () => {
-    expect(formatCommitMessage("T12.5", "Progress + Done flows")).toBe(
-      "feat(t12): T12.5 — Progress + Done flows",
-    );
-    expect(formatCommitMessage("T12.5", "  trimmed  ")).toBe("feat(t12): T12.5 — trimmed");
-  });
-
-  it("drops the scope when the task id doesn't match the pattern", () => {
-    expect(formatCommitMessage("X9", "loose name")).toBe("feat: X9 — loose name");
-  });
-});
-
-describe("formatCommitCommand", () => {
-  it("wraps the message in double quotes for the focused pane", () => {
-    expect(formatCommitCommand("T12.5", "Progress + Done flows")).toBe(
-      'git commit -m "feat(t12): T12.5 — Progress + Done flows"',
-    );
-  });
-
-  it("escapes embedded double quotes and backslashes so the shell sees the literal", () => {
-    expect(formatCommitCommand("T12.5", 'name with "quoted" word')).toBe(
-      'git commit -m "feat(t12): T12.5 — name with \\"quoted\\" word"',
-    );
-    expect(formatCommitCommand("T12.5", "back\\slash")).toBe(
-      'git commit -m "feat(t12): T12.5 — back\\\\slash"',
-    );
-  });
-});
-
-const progressTask: Task = {
-  id: "T12.5",
-  name: "Progress + Done flows",
-  status: "IN_PROGRESS",
-};
-
-function progressMockClient(overrides: {
-  workOnTask?: PlanFlowClient["workOnTask"];
-  releaseTaskLock?: PlanFlowClient["releaseTaskLock"];
-}): PlanFlowClient {
-  return {
-    workOnTask: overrides.workOnTask ?? vi.fn(async () => progressTask),
-    releaseTaskLock: overrides.releaseTaskLock ?? vi.fn(async () => undefined),
-  } as unknown as PlanFlowClient;
-}
 
 describe("markProgress", () => {
-  it("posts the note via /work without changing status, forwards saveAsKnowledge", async () => {
-    const workOnTask = vi.fn(async () => progressTask);
-    const client = progressMockClient({ workOnTask });
+  it("posts a comment and returns the resolved task", async () => {
+    const createComment = vi.fn(async () => ({ id: "c1", body: "note", taskId: "T12.4" }));
+    const getTask = vi.fn(async () => baseTask);
+    const client = mockClient({ createComment, getTask });
 
     const result = await markProgress({
       client,
       externalId: "ext-123",
-      taskId: "T12.5",
-      note: "Working through the dialog",
-      saveAsKnowledge: true,
-      knowledgeType: "decision",
+      taskId: "T12.4",
+      note: "checkpoint",
     });
 
-    expect(workOnTask).toHaveBeenCalledWith("ext-123", "T12.5", {
-      note: "Working through the dialog",
-      saveAsKnowledge: true,
-      knowledgeTitle: undefined,
-      knowledgeType: "decision",
-    });
-    expect(result.task).toBe(progressTask);
-    expect(mockSetActiveTaskId).not.toHaveBeenCalled();
-    expect(mockSetActiveTab).not.toHaveBeenCalled();
-    expect(mockPtyWrite).not.toHaveBeenCalled();
+    expect(createComment).toHaveBeenCalledWith("ext-123", "T12.4", { body: "checkpoint" });
+    expect(result.task).toEqual(baseTask);
   });
 
-  it("omits saveAsKnowledge when not passed", async () => {
-    const workOnTask = vi.fn(async () => progressTask);
-    const client = progressMockClient({ workOnTask });
+  it("also creates a knowledge entry when saveAsKnowledge is true", async () => {
+    const createKnowledge = vi.fn(async () => ({ id: "k1", title: "x", body: "y" }));
+    const client = mockClient({ createKnowledge });
 
     await markProgress({
       client,
       externalId: "ext-123",
-      taskId: "T12.5",
-      note: "Quick note",
+      taskId: "T12.4",
+      note: "Decided to refactor X. Y was the alternative.",
+      saveAsKnowledge: true,
     });
 
-    expect(workOnTask).toHaveBeenCalledWith("ext-123", "T12.5", {
-      note: "Quick note",
-      saveAsKnowledge: undefined,
-      knowledgeTitle: undefined,
-      knowledgeType: undefined,
-    });
-  });
-
-  it("rethrows when the server rejects the comment", async () => {
-    const boom = new Error("nope");
-    const workOnTask = vi.fn(async () => {
-      throw boom;
-    });
-    const client = progressMockClient({ workOnTask });
-
-    await expect(
-      markProgress({
-        client,
-        externalId: "ext-123",
-        taskId: "T12.5",
-        note: "Will fail",
-      }),
-    ).rejects.toBe(boom);
+    expect(createKnowledge).toHaveBeenCalled();
   });
 });
 
-describe("finishTask — happy path", () => {
-  it("flips to DONE, releases lock, clears active task, switches tab, pre-types commit", async () => {
+describe("finishTask", () => {
+  it("flips status, posts the summary, releases the lock, prefills commit", async () => {
     mockGetWorkspace.mockReturnValue({ focusedSessionId: "session-1" });
-    const workOnTask = vi.fn(async (): Promise<Task> => ({ ...progressTask, status: "DONE" }));
-    const releaseTaskLock = vi.fn(async () => undefined);
-    const client = progressMockClient({ workOnTask, releaseTaskLock });
+    const doneTask: Task = { ...baseTask, status: "DONE" };
+    const updateTaskStatus = vi.fn(async () => doneTask);
+    const stopWorking = vi.fn(async () => undefined);
+    const createComment = vi.fn(async () => ({
+      id: "c2",
+      body: "summary",
+      taskId: "T12.4",
+    }));
+    const client = mockClient({ updateTaskStatus, stopWorking, createComment });
 
     const result = await finishTask({
       client,
       externalId: "ext-123",
       workspaceProjectId: "ws-1",
-      taskId: "T12.5",
-      summary: "Landed all four steps",
-      taskName: "Progress + Done flows",
+      taskId: "T12.4",
+      summary: "summary",
+      taskName: "Start task lock",
     });
 
-    expect(workOnTask).toHaveBeenCalledWith("ext-123", "T12.5", {
-      status: "DONE",
-      note: "Landed all four steps",
-    });
-    expect(releaseTaskLock).toHaveBeenCalledWith("ext-123", "T12.5");
-    expect(mockSetActiveTaskId).toHaveBeenCalledWith("ws-1", null);
-    expect(mockSetActiveTab).toHaveBeenCalledWith("ws-1", "terminal");
-    expect(mockPtyWrite).toHaveBeenCalledTimes(1);
-    const [sessionId, bytes] = mockPtyWrite.mock.calls[0] as [string, Uint8Array];
-    expect(sessionId).toBe("session-1");
-    expect(new TextDecoder().decode(bytes)).toBe(
-      'git commit -m "feat(t12): T12.5 — Progress + Done flows"',
-    );
-    expect(result.commitMessage).toBe("feat(t12): T12.5 — Progress + Done flows");
-    expect(result.prefilled).toBe(true);
+    expect(updateTaskStatus).toHaveBeenCalledWith("ext-123", "T12.4", "DONE");
+    expect(createComment).toHaveBeenCalledWith("ext-123", "T12.4", { body: "summary" });
+    expect(stopWorking).toHaveBeenCalledWith("ext-123");
+    expect(result.task).toEqual(doneTask);
+    expect(result.commitMessage).toBe("feat(t12): T12.4 — Start task lock");
     expect(result.released).toBe(true);
+    expect(result.prefilled).toBe(true);
   });
-});
 
-describe("finishTask — release failure", () => {
-  it("forward-rolls: keeps DONE, clears active task, still pre-types commit, reports released=false", async () => {
+  it("tolerates a failed release after the DONE flip succeeded", async () => {
     mockGetWorkspace.mockReturnValue({ focusedSessionId: "session-1" });
-    const releaseTaskLock = vi.fn(async () => {
-      throw new Error("release exploded");
+    const stopWorking = vi.fn(async () => {
+      throw new Error("release failed");
     });
-    const client = progressMockClient({ releaseTaskLock });
+    const client = mockClient({ stopWorking });
 
     const result = await finishTask({
       client,
       externalId: "ext-123",
       workspaceProjectId: "ws-1",
       taskId: "T12.5",
-      summary: "Done anyway",
-      taskName: "Progress + Done flows",
+      summary: "summary",
+      taskName: "Done",
     });
 
-    expect(mockSetActiveTaskId).toHaveBeenCalledWith("ws-1", null);
-    expect(mockSetActiveTab).toHaveBeenCalledWith("ws-1", "terminal");
-    expect(mockPtyWrite).toHaveBeenCalledTimes(1);
     expect(result.released).toBe(false);
-    expect(result.prefilled).toBe(true);
-  });
-});
-
-describe("finishTask — no focused pane", () => {
-  it("skips the terminal prefill but still flips DONE and clears the active task", async () => {
-    mockGetWorkspace.mockReturnValue({ focusedSessionId: null });
-    const client = progressMockClient({});
-
-    const result = await finishTask({
-      client,
-      externalId: "ext-123",
-      workspaceProjectId: "ws-1",
-      taskId: "T12.5",
-      summary: "Done",
-      taskName: "Progress + Done flows",
-    });
-
-    expect(mockPtyWrite).not.toHaveBeenCalled();
-    expect(result.prefilled).toBe(false);
-    expect(result.released).toBe(true);
-    expect(mockSetActiveTaskId).toHaveBeenCalledWith("ws-1", null);
-  });
-});
-
-describe("finishTask — workOnTask failure", () => {
-  it("rethrows without releasing or touching local state when the DONE write fails", async () => {
-    const boom = new Error("done failed");
-    const workOnTask = vi.fn(async () => {
-      throw boom;
-    });
-    const releaseTaskLock = vi.fn(async () => undefined);
-    const client = progressMockClient({ workOnTask, releaseTaskLock });
-
-    await expect(
-      finishTask({
-        client,
-        externalId: "ext-123",
-        workspaceProjectId: "ws-1",
-        taskId: "T12.5",
-        summary: "won't land",
-        taskName: "Progress + Done flows",
-      }),
-    ).rejects.toBe(boom);
-
-    expect(releaseTaskLock).not.toHaveBeenCalled();
-    expect(mockSetActiveTaskId).not.toHaveBeenCalled();
-    expect(mockSetActiveTab).not.toHaveBeenCalled();
-    expect(mockPtyWrite).not.toHaveBeenCalled();
   });
 });

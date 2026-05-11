@@ -92,8 +92,8 @@ export function ActivityFeed(props: ActivityFeedProps): JSX.Element {
         merged.push(change);
       }
       merged.sort((a, b) => {
-        const ta = Date.parse(a.occurredAt);
-        const tb = Date.parse(b.occurredAt);
+        const ta = Date.parse(a.occurredAt ?? "");
+        const tb = Date.parse(b.occurredAt ?? "");
         if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 0;
         return tb - ta;
       });
@@ -163,7 +163,7 @@ export function ActivityFeed(props: ActivityFeedProps): JSX.Element {
                       </Show>
                     </span>
                     <span class="ws-pf-activity__time">
-                      {formatRelative(change.occurredAt, now())}
+                      {formatRelative(change.occurredAt ?? "", now())}
                     </span>
                   </button>
                 </li>
@@ -184,9 +184,9 @@ interface ChangeView {
 }
 
 function describeChange(change: Change): ChangeView {
-  const actor = change.actor?.name?.trim() || change.actor?.email || "Someone";
-  const kind = change.kind ?? "";
-  const target = change.resourceId ?? "";
+  const actor = change.userName?.trim() || change.userEmail || "Someone";
+  const kind = change.entityType && change.action ? `${change.entityType}.${change.action}` : "";
+  const target = change.entityId ?? "";
 
   // Kinds are loosely-typed strings from the server. We pattern-match on
   // common prefixes / suffixes so a future kind doesn't crash the UI.
@@ -229,12 +229,10 @@ function describeChange(change: Change): ChangeView {
 }
 
 function taskIdFor(change: Change): string | null {
-  const type = change.resourceType ?? "";
-  const id = change.resourceId ?? "";
+  const type = change.entityType ?? "";
+  const id = change.entityId ?? "";
   if (!id) return null;
   if (type === "task" || type === "comment") return id;
-  // Many kinds reference a task implicitly via resourceId.
-  if (change.kind?.startsWith("task.") || change.kind?.startsWith("comment.")) return id;
   return null;
 }
 

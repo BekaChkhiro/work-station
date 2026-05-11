@@ -32,9 +32,12 @@ import {
   createRendererPlanFlowClient,
   MissingPlanFlowTokenError,
   PlanFlowAuthError,
-  type ActiveWorkEntry,
+  type ActiveWorkUser,
   type Me,
 } from "../../integrations";
+
+type ActiveWorkEntry = ActiveWorkUser;
+type MeUser = Me["user"];
 
 const POLL_INTERVAL_MS = 10_000;
 const CLOCK_TICK_MS = 30_000;
@@ -64,7 +67,7 @@ export function ActiveWorkPanel(props: ActiveWorkPanelProps): JSX.Element {
 
   const [me] = createResource(
     () => props.externalId,
-    async (): Promise<Me | null> => {
+    async (): Promise<MeUser | null> => {
       try {
         return await client.getMe();
       } catch {

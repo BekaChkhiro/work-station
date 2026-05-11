@@ -47,6 +47,8 @@ import {
   type UserSummary,
 } from "../../integrations";
 
+type MeUser = Me["user"];
+
 const STATUS_LABELS: Record<TaskStatus, string> = {
   TODO: "To do",
   IN_PROGRESS: "In progress",
@@ -72,7 +74,7 @@ export interface TaskDetailPanelProps {
   tasks: readonly Task[];
   /** Current user, if known. Used so the user can self-mention and so the
    *  composer can attribute optimistic state. */
-  me: Me | null | undefined;
+  me: MeUser | null | undefined;
   onClose: () => void;
   /** Called when the user clicks a dependency row — same hook used by the
    *  active-work and activity feed rails. */
@@ -89,7 +91,7 @@ export function TaskDetailPanel(props: TaskDetailPanelProps): JSX.Element {
       taskId: props.taskId,
       reloadKey: reloadKey(),
     }),
-    async (input): Promise<Task> => {
+    async (input): Promise<Task | null> => {
       return await input.client.getTask(input.externalId, input.taskId);
     },
   );
@@ -126,7 +128,11 @@ export function TaskDetailPanel(props: TaskDetailPanelProps): JSX.Element {
       byId.set(u.id, u);
     };
     if (props.me) {
-      add({ id: props.me.id, email: props.me.email, name: props.me.name });
+      add({
+        id: props.me.id,
+        email: props.me.email,
+        name: props.me.name ?? undefined,
+      });
     }
     for (const t of props.tasks) {
       add(t.assignee);

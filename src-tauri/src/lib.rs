@@ -65,6 +65,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // T-fix: HTTP requests to third-party integrations (PlanFlow, GitHub,
+        // Vercel, Neon, Railway). Webview `fetch` is blocked by CORS for
+        // services that don't echo `Access-Control-Allow-Origin`; routing
+        // through Rust avoids that entirely.
+        .plugin(tauri_plugin_http::init())
         // PTY registry (T2.3) — app-scoped so sessions survive webview reloads.
         .manage(pty::PtyManager::new())
         // T7.1: detected-CLI registry, populated once at boot below. App-scoped

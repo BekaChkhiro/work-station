@@ -47,9 +47,14 @@
 
 import { setActiveTab, getWorkspace } from "../../stores/workspace";
 import { setActiveTaskId } from "../../stores/activeTask";
+import { getFocusedSessionCli, launchTaskCli } from "../../stores/taskCliLauncher";
 import { ptyWrite } from "../../ipc/pty";
 import type { PlanFlowClient } from "./client";
 import type { KnowledgeType, Task } from "./schemas";
+
+interface CommentResult {
+  body: string;
+}
 
 export interface StartTaskInput {
   client: PlanFlowClient;
@@ -162,12 +167,16 @@ export function formatCommitCommand(taskId: string, taskName: string): string {
 }
 
 export async function startTask(input: StartTaskInput): Promise<StartTaskResult> {
-  // Step 1 — acquire the lock + flip to IN_PROGRESS. A 409 here means
-  // another user holds the lock; we re-throw so the caller can toast and
-  // refetch the list (their copy of `lockedBy` is stale).
-  const task = await input.client.workOnTask(input.externalId, input.taskId, {
-    status: "IN_PROGRESS",
-  });
+  // Step 1 — acquire the working_on lock via POST /work {action: "start"}.
+  // PlanFlow doesn't auto-flip the task status here, so the second call
+  // bulk-updates status → IN_PROGRESS. A 409 on either call means another
+  // user already holds the lock; we let it propagate as
+  // `PlanFlowConflictError` so the caller can toast and refetch.
+  await input.client.startWorking(input.externalId, input.taskId);
+  const task = await input.client.updateTaskStatus(input.externalId, input.taskId, "IN_PROGRESS");
+  if (task === null) {
+    throw new Error(`PlanFlow: task ${input.taskId} not found after start`);
+  }
 
   // Step 2 — branch suggestion. The lock is now ours; the branch fetch is
   // a soft dependency. If it throws we keep the lock and let the caller
@@ -192,52 +201,93 @@ export async function startTask(input: StartTaskInput): Promise<StartTaskResult>
   // Step 5 — pre-fill the checkout command into the focused pane. We do
   // *not* append a newline: the spec wants the user to hit Enter
   // themselves so the action is consented to, not auto-run.
+  //
+  // Skip when the focused pane is already running a CLI (claude / kimi /
+  // codex). The git command would be typed into the CLI's REPL, not the
+  // shell, and end up being interpreted as a chat prompt — surprising
+  // and not useful. The Step 6 launcher handles the CLI case directly.
   let prefilled = false;
-  if (branchName !== null) {
-    const sessionId = focusedSessionFor(input.workspaceProjectId);
-    if (sessionId !== null) {
-      const command = formatCheckoutCommand(branchName);
-      await writeBytes(sessionId, command);
-      prefilled = true;
-    }
+  const focusedSessionId = focusedSessionFor(input.workspaceProjectId);
+  const focusedIsCli = getFocusedSessionCli(input.workspaceProjectId) !== null;
+  if (branchName !== null && focusedSessionId !== null && !focusedIsCli) {
+    const command = formatCheckoutCommand(branchName);
+    await writeBytes(focusedSessionId, command);
+    prefilled = true;
   }
+
+  // Step 6 — feed `planflow_task_start(taskId: …)` to a CLI. The launcher
+  // routes the call differently depending on what the focused pane is
+  // running: if it's already a CLI, the prompt is typed straight into
+  // that pane (no new split). If it's a shell or there's no focus, a
+  // new CLI pane is spawned next to the existing layout. Wired by
+  // AppRoot via `setTaskCliLauncher`; failures are swallowed inside the
+  // launcher so the lock we just claimed stays intact.
+  void launchTaskCli(input.workspaceProjectId, input.taskId);
 
   return { task, branchName, prefilled };
 }
 
 export async function markProgress(input: MarkProgressInput): Promise<MarkProgressResult> {
-  // workOnTask without `status` keeps the task in IN_PROGRESS — the
-  // server treats the request as a note-only update. `saveAsKnowledge`
-  // and the title/type fields are passed straight through; the server
-  // applies its own defaults (knowledgeType=decision, title derived from
-  // the task id + first sentence) when those are omitted.
-  const task = await input.client.workOnTask(input.externalId, input.taskId, {
-    note: input.note,
-    saveAsKnowledge: input.saveAsKnowledge,
-    knowledgeTitle: input.knowledgeTitle,
-    knowledgeType: input.knowledgeType,
-  });
+  // Progress notes are just task comments. saveAsKnowledge=true mirrors
+  // the MCP behavior by also creating a knowledge entry on the project —
+  // we do both writes here because the REST API doesn't have a single
+  // endpoint that handles them atomically.
+  // The caller renders any failure as an error toast; let it propagate.
+  const commentBody: CommentResult = await input.client.createComment(
+    input.externalId,
+    input.taskId,
+    { body: input.note },
+  );
+  if (input.saveAsKnowledge === true) {
+    try {
+      await input.client.createKnowledge(input.externalId, {
+        title: input.knowledgeTitle ?? `${input.taskId}: ${firstSentence(input.note)}`,
+        body: input.note,
+        type: input.knowledgeType ?? "decision",
+      });
+    } catch {
+      // Soft failure: the comment landed, the knowledge entry can be retried.
+    }
+  }
+  const task = await input.client.getTask(input.externalId, input.taskId);
+  if (task === null) {
+    throw new Error(`PlanFlow: task ${input.taskId} not found`);
+  }
+  void commentBody;
   return { task };
 }
 
-export async function finishTask(input: FinishTaskInput): Promise<FinishTaskResult> {
-  // Step 1 — flip the status to DONE with the summary as the closing
-  // comment. Server posts the note as a task comment and, depending on
-  // its policy, may release the lock as part of the DONE transition.
-  // We still issue an explicit DELETE below to be unambiguous.
-  const task = await input.client.workOnTask(input.externalId, input.taskId, {
-    status: "DONE",
-    note: input.summary,
-  });
+function firstSentence(text: string, max = 80): string {
+  const trimmed = text.trim();
+  const dot = trimmed.search(/[.!?](\s|$)/);
+  const slice = dot > 0 ? trimmed.slice(0, dot) : trimmed;
+  return slice.length > max ? `${slice.slice(0, max - 1)}…` : slice;
+}
 
-  // Step 2 — explicit lock release. The DELETE endpoint is idempotent on
-  // the server side, so calling it after the DONE write is harmless. We
-  // forward-roll on failure: a failed release here leaves the task DONE
-  // and the local active-task slot still cleared below — the user gets
-  // an "unlock failed" toast and can retry from the row.
+export async function finishTask(input: FinishTaskInput): Promise<FinishTaskResult> {
+  // Step 1 — flip the status to DONE. PlanFlow's bulk-status route is the
+  // simplest path because it accepts the human-readable taskId directly.
+  const task = await input.client.updateTaskStatus(input.externalId, input.taskId, "DONE");
+  if (task === null) {
+    throw new Error(`PlanFlow: task ${input.taskId} not found at finish`);
+  }
+
+  // Step 1b — post the user's summary as the closing comment. This is a
+  // soft dependency: a failed comment shouldn't undo the DONE.
+  try {
+    await input.client.createComment(input.externalId, input.taskId, {
+      body: input.summary,
+    });
+  } catch {
+    // Best-effort.
+  }
+
+  // Step 2 — release the working_on lock. PlanFlow uses a literal `_` in
+  // the taskId slot for stop (the server resolves the lock from the user
+  // session). Forward-roll on failure as before.
   let released = false;
   try {
-    await input.client.releaseTaskLock(input.externalId, input.taskId);
+    await input.client.stopWorking(input.externalId);
     released = true;
   } catch {
     released = false;

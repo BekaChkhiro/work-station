@@ -66,7 +66,9 @@ import {
   type TaskComplexity,
   type TaskStatus,
 } from "../../integrations";
-import { activeTaskId } from "../../stores/activeTask";
+
+type MeUser = Me["user"];
+import { activeTaskId, setActiveTaskId } from "../../stores/activeTask";
 import { consumeTaskJump, pendingTaskJump } from "../../stores/pendingTaskJump";
 import { ActiveWorkPanel } from "./ActiveWorkPanel";
 import { ActivityFeed } from "./ActivityFeed";
@@ -175,7 +177,7 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
   // rule that disables Start whenever any lockedBy is set.
   const [me] = createResource(
     () => props.externalId,
-    async (): Promise<Me | null> => {
+    async (): Promise<MeUser | null> => {
       try {
         return await client.getMe();
       } catch {
@@ -345,7 +347,7 @@ interface TaskListBodyProps {
   client: PlanFlowClient;
   workspaceProjectId: string;
   externalId: string;
-  me: Me | null | undefined;
+  me: MeUser | null | undefined;
   /** T12.8 — currently selected task for the detail side panel. */
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
@@ -356,9 +358,23 @@ interface ActionDialogState {
   kind: "progress" | "done";
 }
 
+type TaskView = "list" | "kanban";
+
+/** Persist the user's preferred view across mounts so re-opening the
+ *  PlanFlow tab lands them on the same layout they last used. Stored at
+ *  module scope rather than localStorage; the value is cheap to lose and
+ *  the trade-off keeps Kanban out of the SQLite settings table for the
+ *  first iteration. */
+let lastView: TaskView = "list";
+
 function TaskListBody(props: TaskListBodyProps): JSX.Element {
   const [query, setQuery] = createSignal("");
   const [phase, setPhase] = createSignal<string | null>(null);
+  const [view, setViewState] = createSignal<TaskView>(lastView);
+  const setView = (next: TaskView): void => {
+    lastView = next;
+    setViewState(next);
+  };
   const [doneExpanded, setDoneExpanded] = createSignal(false);
   // T12.5 — open dialog state for the Progress / Done flows. `null` while
   // closed. Submission lives inside <TaskActionDialog>; this signal just
@@ -415,7 +431,7 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
     return props.tasks.filter((task) => {
       if (selectedPhase != null && normalizePhase(task.phase) !== selectedPhase) return false;
       if (!q) return true;
-      if (task.id.toLowerCase().includes(q)) return true;
+      if (task.taskId.toLowerCase().includes(q)) return true;
       if (task.name.toLowerCase().includes(q)) return true;
       const acceptance = typeof task.acceptance === "string" ? task.acceptance : "";
       if (acceptance && acceptance.toLowerCase().includes(q)) return true;
@@ -438,7 +454,41 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
       const bucket = task.status === "DROPPED" ? "DONE" : task.status;
       buckets[bucket].push(task);
     }
+    // Sort each bucket by task id ("T1.1", "T1.2", "T2.1", …) so phase /
+    // sub-task ordering is stable across renders and matches the order
+    // the plan was authored in. PlanFlow returns tasks in updatedAt
+    // order by default, which flips rows around as the user clicks them.
+    for (const status of Object.keys(buckets) as TaskStatus[]) {
+      buckets[status] = [...buckets[status]].sort((a, b) => compareTaskIds(a.taskId, b.taskId));
+    }
     return buckets;
+  });
+
+  // "Ready to start" — tasks the user can pick up *right now*: TODO,
+  // every declared dependency is DONE, and no one else holds the lock.
+  // Membership is reactive so the highlight clears as soon as the user
+  // (or anyone else) starts the task or its blockers complete. We
+  // compare by taskId because that's how `dependencies` are encoded.
+  const doneIds = createMemo<ReadonlySet<string>>(() => {
+    const ids = new Set<string>();
+    for (const task of props.tasks) {
+      if (task.status === "DONE" || task.status === "DROPPED") ids.add(task.taskId);
+    }
+    return ids;
+  });
+  const readyIds = createMemo<ReadonlySet<string>>(() => {
+    const done = doneIds();
+    const me = props.me?.id ?? null;
+    const ready = new Set<string>();
+    for (const task of props.tasks) {
+      if (task.status !== "TODO") continue;
+      const deps = task.dependencies ?? [];
+      if (deps.length > 0 && !deps.every((d) => done.has(d))) continue;
+      const lockerId = task.lockedBy?.id ?? null;
+      if (lockerId !== null && lockerId !== me) continue;
+      ready.add(task.taskId);
+    }
+    return ready;
   });
 
   const totalShown = createMemo(() => filtered().length);
@@ -469,6 +519,30 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
               />
             )}
           </For>
+        </div>
+        <div class="ws-pf-tasks__view-toggle" role="radiogroup" aria-label="Task view">
+          <button
+            type="button"
+            class="ws-pf-tasks__view-btn"
+            role="radio"
+            aria-checked={view() === "list"}
+            data-on={view() === "list" ? "true" : undefined}
+            onClick={() => setView("list")}
+            title="List view (grouped by status)"
+          >
+            List
+          </button>
+          <button
+            type="button"
+            class="ws-pf-tasks__view-btn"
+            role="radio"
+            aria-checked={view() === "kanban"}
+            data-on={view() === "kanban" ? "true" : undefined}
+            onClick={() => setView("kanban")}
+            title="Kanban board"
+          >
+            Kanban
+          </button>
         </div>
         <button
           type="button"
@@ -511,75 +585,123 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
           </Show>
         }
       >
-        <div class="ws-pf-tasks__groups" ref={scrollHostRef}>
-          <For each={STATUS_ORDER}>
-            {(status) => {
-              const bucket = (): Task[] => grouped()[status];
-              const count = (): number => bucket().length;
-              const isDoneGroup = status === "DONE";
-              const expanded = (): boolean => (isDoneGroup ? doneExpanded() : true);
-              return (
-                <Show when={count() > 0}>
-                  <section
-                    class="ws-pf-tasks__group"
-                    data-status={status}
-                    aria-label={`${STATUS_LABELS[status]} (${count()})`}
-                  >
-                    <button
-                      type="button"
-                      class="ws-pf-tasks__group-head"
-                      onClick={() => {
-                        if (!isDoneGroup) return;
-                        setDoneExpanded((v) => !v);
-                      }}
-                      data-collapsible={isDoneGroup ? "true" : undefined}
-                      aria-expanded={isDoneGroup ? expanded() : undefined}
+        <Show
+          when={view() === "list"}
+          fallback={
+            <KanbanBoard
+              tasks={filtered()}
+              readyIds={readyIds()}
+              activeTaskId={activeTaskId(props.workspaceProjectId)}
+              meUserId={props.me?.id ?? null}
+              selectedTaskId={props.selectedTaskId}
+              onSelect={(t) => props.onSelectTask(t.taskId)}
+              onStart={(t) =>
+                void runStartTask(
+                  props.client,
+                  props.externalId,
+                  props.workspaceProjectId,
+                  t,
+                  props.onRetry,
+                )
+              }
+              onChangeStatus={(t, s) =>
+                void runChangeStatus(
+                  props.client,
+                  props.externalId,
+                  props.workspaceProjectId,
+                  t,
+                  s,
+                  props.me?.id ?? null,
+                  props.onRetry,
+                )
+              }
+            />
+          }
+        >
+          <div class="ws-pf-tasks__groups" ref={scrollHostRef}>
+            <For each={STATUS_ORDER}>
+              {(status) => {
+                const bucket = (): Task[] => grouped()[status];
+                const count = (): number => bucket().length;
+                const isDoneGroup = status === "DONE";
+                const expanded = (): boolean => (isDoneGroup ? doneExpanded() : true);
+                return (
+                  <Show when={count() > 0}>
+                    <section
+                      class="ws-pf-tasks__group"
+                      data-status={status}
+                      aria-label={`${STATUS_LABELS[status]} (${count()})`}
                     >
-                      <span
-                        class="ws-pf-tasks__group-dot"
-                        data-status={status}
-                        aria-hidden="true"
-                      />
-                      <span class="ws-pf-tasks__group-label">{STATUS_LABELS[status]}</span>
-                      <span class="ws-pf-tasks__group-count">{count()}</span>
-                      <Show when={isDoneGroup}>
-                        <span class="ws-pf-tasks__group-chevron" aria-hidden="true">
-                          {expanded() ? "▾" : "▸"}
-                        </span>
+                      <button
+                        type="button"
+                        class="ws-pf-tasks__group-head"
+                        onClick={() => {
+                          if (!isDoneGroup) return;
+                          setDoneExpanded((v) => !v);
+                        }}
+                        data-collapsible={isDoneGroup ? "true" : undefined}
+                        aria-expanded={isDoneGroup ? expanded() : undefined}
+                      >
+                        <span
+                          class="ws-pf-tasks__group-dot"
+                          data-status={status}
+                          aria-hidden="true"
+                        />
+                        <span class="ws-pf-tasks__group-label">{STATUS_LABELS[status]}</span>
+                        <span class="ws-pf-tasks__group-count">{count()}</span>
+                        <Show when={isDoneGroup}>
+                          <span class="ws-pf-tasks__group-chevron" aria-hidden="true">
+                            {expanded() ? "▾" : "▸"}
+                          </span>
+                        </Show>
+                      </button>
+                      <Show when={expanded()}>
+                        <ul class="ws-pf-tasks__rows" role="list">
+                          <For each={bucket()}>
+                            {(task) => (
+                              <TaskRow
+                                task={task}
+                                meUserId={props.me?.id ?? null}
+                                activeTaskId={activeTaskId(props.workspaceProjectId)}
+                                ready={readyIds().has(task.taskId)}
+                                selected={props.selectedTaskId === task.taskId}
+                                onSelect={() => props.onSelectTask(task.taskId)}
+                                onStart={(t) =>
+                                  void runStartTask(
+                                    props.client,
+                                    props.externalId,
+                                    props.workspaceProjectId,
+                                    t,
+                                    props.onRetry,
+                                  )
+                                }
+                                onMarkProgress={(t) =>
+                                  setActionDialog({ task: t, kind: "progress" })
+                                }
+                                onMarkDone={(t) => setActionDialog({ task: t, kind: "done" })}
+                                onChangeStatus={(t, s) =>
+                                  void runChangeStatus(
+                                    props.client,
+                                    props.externalId,
+                                    props.workspaceProjectId,
+                                    t,
+                                    s,
+                                    props.me?.id ?? null,
+                                    props.onRetry,
+                                  )
+                                }
+                              />
+                            )}
+                          </For>
+                        </ul>
                       </Show>
-                    </button>
-                    <Show when={expanded()}>
-                      <ul class="ws-pf-tasks__rows" role="list">
-                        <For each={bucket()}>
-                          {(task) => (
-                            <TaskRow
-                              task={task}
-                              meUserId={props.me?.id ?? null}
-                              activeTaskId={activeTaskId(props.workspaceProjectId)}
-                              selected={props.selectedTaskId === task.id}
-                              onSelect={() => props.onSelectTask(task.id)}
-                              onStart={(t) =>
-                                void runStartTask(
-                                  props.client,
-                                  props.externalId,
-                                  props.workspaceProjectId,
-                                  t,
-                                  props.onRetry,
-                                )
-                              }
-                              onMarkProgress={(t) => setActionDialog({ task: t, kind: "progress" })}
-                              onMarkDone={(t) => setActionDialog({ task: t, kind: "done" })}
-                            />
-                          )}
-                        </For>
-                      </ul>
-                    </Show>
-                  </section>
-                </Show>
-              );
-            }}
-          </For>
-        </div>
+                    </section>
+                  </Show>
+                );
+              }}
+            </For>
+          </div>
+        </Show>
       </Show>
       <Show when={actionDialog()}>
         {(state) => (
@@ -597,6 +719,264 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
         )}
       </Show>
     </div>
+  );
+}
+
+/* ─── Kanban board (T-feature) ─────────────────────────────────────── */
+
+/** Columns shown in Kanban mode. "Ready" is a derived bucket — tasks
+ *  whose status is TODO with every declared dependency DONE and no
+ *  external lock — so the user can visually separate "what I can pick up
+ *  *now*" from the rest of the TODO backlog. The Backlog column catches
+ *  the remaining TODOs (deps not done yet). DROPPED rolls into DONE so
+ *  archived rows don't grow a sixth column. */
+type KanbanColumn = "READY" | "TODO" | "IN_PROGRESS" | "BLOCKED" | "DONE";
+const KANBAN_COLUMNS: readonly KanbanColumn[] = ["READY", "TODO", "IN_PROGRESS", "BLOCKED", "DONE"];
+const KANBAN_LABELS: Record<KanbanColumn, string> = {
+  READY: "Ready",
+  TODO: "Backlog",
+  IN_PROGRESS: "In progress",
+  BLOCKED: "Blocked",
+  DONE: "Done",
+};
+
+interface KanbanBoardProps {
+  tasks: readonly Task[];
+  readyIds: ReadonlySet<string>;
+  activeTaskId: string | null;
+  meUserId: string | null;
+  selectedTaskId: string | null;
+  onSelect: (task: Task) => void;
+  onStart: (task: Task) => void;
+  onChangeStatus: (task: Task, status: TaskStatus) => void;
+}
+
+function KanbanBoard(props: KanbanBoardProps): JSX.Element {
+  const buckets = createMemo<Record<KanbanColumn, Task[]>>(() => {
+    const out: Record<KanbanColumn, Task[]> = {
+      READY: [],
+      TODO: [],
+      IN_PROGRESS: [],
+      BLOCKED: [],
+      DONE: [],
+    };
+    for (const task of props.tasks) {
+      if (task.status === "IN_PROGRESS") {
+        out.IN_PROGRESS.push(task);
+      } else if (task.status === "BLOCKED") {
+        out.BLOCKED.push(task);
+      } else if (task.status === "DONE" || task.status === "DROPPED") {
+        out.DONE.push(task);
+      } else if (task.status === "TODO") {
+        if (props.readyIds.has(task.taskId)) out.READY.push(task);
+        else out.TODO.push(task);
+      }
+    }
+    for (const col of KANBAN_COLUMNS) {
+      out[col] = [...out[col]].sort((a, b) => compareTaskIds(a.taskId, b.taskId));
+    }
+    return out;
+  });
+
+  return (
+    <div class="ws-pf-kanban" role="region" aria-label="Kanban board">
+      <For each={KANBAN_COLUMNS}>
+        {(col) => {
+          const list = (): Task[] => buckets()[col];
+          return (
+            <section
+              class="ws-pf-kanban__col"
+              data-col={col}
+              aria-label={`${KANBAN_LABELS[col]} (${list().length})`}
+            >
+              <header class="ws-pf-kanban__col-head">
+                <span class="ws-pf-kanban__col-dot" data-col={col} aria-hidden="true" />
+                <span class="ws-pf-kanban__col-label">{KANBAN_LABELS[col]}</span>
+                <span class="ws-pf-kanban__col-count">{list().length}</span>
+              </header>
+              <ul class="ws-pf-kanban__list" role="list">
+                <For each={list()}>
+                  {(task) => (
+                    <KanbanCard
+                      task={task}
+                      meUserId={props.meUserId}
+                      activeTaskId={props.activeTaskId}
+                      selected={props.selectedTaskId === task.taskId}
+                      column={col}
+                      onSelect={() => props.onSelect(task)}
+                      onStart={() => props.onStart(task)}
+                      onChangeStatus={(s) => props.onChangeStatus(task, s)}
+                    />
+                  )}
+                </For>
+                <Show when={list().length === 0}>
+                  <li class="ws-pf-kanban__empty" aria-hidden="true">
+                    —
+                  </li>
+                </Show>
+              </ul>
+            </section>
+          );
+        }}
+      </For>
+    </div>
+  );
+}
+
+interface KanbanCardProps {
+  task: Task;
+  meUserId: string | null;
+  activeTaskId: string | null;
+  selected: boolean;
+  column: KanbanColumn;
+  onSelect: () => void;
+  onStart: () => void;
+  onChangeStatus: (status: TaskStatus) => void;
+}
+
+function KanbanCard(props: KanbanCardProps): JSX.Element {
+  const depCount = (): number => props.task.dependencies?.length ?? 0;
+  const lockerId = (): string | null => props.task.lockedBy?.id ?? null;
+  const lockedBy = (): string | null => {
+    const locker = props.task.lockedBy;
+    if (!locker) return null;
+    return locker.name?.trim() || locker.email || "another user";
+  };
+  const lockedBySelf = (): boolean => {
+    const meId = props.meUserId;
+    const lid = lockerId();
+    return meId !== null && lid !== null && meId === lid;
+  };
+  const lockedByOther = (): boolean => lockedBy() !== null && !lockedBySelf();
+  const isActive = (): boolean => props.activeTaskId === props.task.taskId;
+  const showStart = (): boolean =>
+    props.column === "READY" || (props.column === "IN_PROGRESS" && isActive());
+  const startLabel = (): string => (isActive() || lockedBySelf() ? "Resume" : "Start");
+  const startDisabled = (): boolean => lockedByOther();
+
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  let cardRef: HTMLLIElement | undefined;
+  const openMenu = (event: MouseEvent): void => {
+    event.preventDefault();
+    setMenuOpen(true);
+  };
+  createEffect(() => {
+    if (!menuOpen()) return;
+    const onDown = (event: MouseEvent): void => {
+      const target = event.target as Node | null;
+      if (cardRef && target && cardRef.contains(target)) return;
+      setMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    onCleanup(() => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    });
+  });
+
+  return (
+    <li
+      class="ws-pf-kanban__card"
+      ref={(el) => (cardRef = el)}
+      data-status={props.task.status}
+      data-selected={props.selected ? "true" : undefined}
+      data-active={isActive() ? "true" : undefined}
+      role="button"
+      tabIndex={0}
+      aria-pressed={props.selected}
+      aria-label={`${props.task.taskId}: ${props.task.name}`}
+      onClick={() => props.onSelect()}
+      onContextMenu={openMenu}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          props.onSelect();
+        }
+      }}
+    >
+      <div class="ws-pf-kanban__card-head">
+        <span class="ws-pf-kanban__card-id">{props.task.taskId}</span>
+        <Show when={depCount() > 0}>
+          <Tooltip label={`Depends on ${depCount()} task${depCount() === 1 ? "" : "s"}`}>
+            <span class="ws-pf-kanban__card-deps" aria-label={`${depCount()} dependencies`}>
+              ⛓ {depCount()}
+            </span>
+          </Tooltip>
+        </Show>
+        <Show when={lockedBy()}>
+          {(who) => (
+            <Tooltip label={`Locked by ${who()}`}>
+              <span class="ws-pf-kanban__card-lock" aria-label={`Locked by ${who()}`}>
+                🔒
+              </span>
+            </Tooltip>
+          )}
+        </Show>
+      </div>
+      <div class="ws-pf-kanban__card-name" title={props.task.name}>
+        {props.task.name}
+      </div>
+      <Show when={showStart()}>
+        <button
+          type="button"
+          class="ws-pf-kanban__card-start"
+          data-active={isActive() ? "true" : undefined}
+          disabled={startDisabled()}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (startDisabled()) return;
+            props.onStart();
+          }}
+          aria-label={`${startLabel()} on ${props.task.taskId}`}
+        >
+          {startLabel()}
+        </button>
+      </Show>
+      <Show when={menuOpen()}>
+        <ul
+          class="ws-pf-tasks__statusmenu ws-pf-kanban__menu"
+          role="menu"
+          aria-label={`Set status for ${props.task.taskId}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <For each={STATUS_CHOICES}>
+            {(option) => (
+              <li role="none">
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="ws-pf-tasks__statusmenu-item"
+                  data-current={props.task.status === option ? "true" : undefined}
+                  data-status={option}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuOpen(false);
+                    if (props.task.status === option) return;
+                    props.onChangeStatus(option);
+                  }}
+                >
+                  <span
+                    class="ws-pf-tasks__statusmenu-dot"
+                    data-status={option}
+                    aria-hidden="true"
+                  />
+                  {STATUS_LABELS[option]}
+                  <Show when={props.task.status === option}>
+                    <span class="ws-pf-tasks__statusmenu-current" aria-hidden="true">
+                      ✓
+                    </span>
+                  </Show>
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </li>
   );
 }
 
@@ -631,6 +1011,11 @@ interface TaskRowProps {
   activeTaskId: string | null;
   /** T12.8 — true when this row is currently shown in the detail panel. */
   selected: boolean;
+  /** T-feature — true when this task is in TODO, every dependency is DONE
+   *  and no one else holds the lock. Surfaces a small "Ready" badge so
+   *  the user can spot the actionable tasks without scanning dependency
+   *  chips manually. */
+  ready: boolean;
   onSelect: () => void;
   onStart: (task: Task) => void;
   /** T12.5 — open the Progress dialog for this task. Surfaced only when
@@ -638,7 +1023,13 @@ interface TaskRowProps {
   onMarkProgress: (task: Task) => void;
   /** T12.5 — open the Done dialog for this task. Same gating as Progress. */
   onMarkDone: (task: Task) => void;
+  /** T-feature — set the task's status directly. Wired to the right-click
+   *  context menu so the user can fix an accidental Done / Progress
+   *  click without going through the action dialog. */
+  onChangeStatus: (task: Task, status: TaskStatus) => void;
 }
+
+const STATUS_CHOICES: readonly TaskStatus[] = ["TODO", "IN_PROGRESS", "BLOCKED", "DONE", "DROPPED"];
 
 function TaskRow(props: TaskRowProps): JSX.Element {
   const depCount = (): number => props.task.dependencies?.length ?? 0;
@@ -655,7 +1046,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
     return meId !== null && lid !== null && meId === lid;
   };
   const lockedByOther = (): boolean => lockedBy() !== null && !lockedBySelf();
-  const isActive = (): boolean => props.activeTaskId === props.task.id;
+  const isActive = (): boolean => props.activeTaskId === props.task.taskId;
   const isDone = (): boolean => props.task.status === "DONE" || props.task.status === "DROPPED";
   // Hide Start on already-finished rows; it's still useful on IN_PROGRESS
   // when the user is the locker (re-arm the terminal nudge).
@@ -680,28 +1071,67 @@ function TaskRow(props: TaskRowProps): JSX.Element {
     }
   };
 
+  // T-feature — right-click status menu. Lets the user undo an accidental
+  // Done / Progress click without going through the full action dialog.
+  // We render the menu inline (anchored to the row) and stash its
+  // open-state in a signal so the menu can close on outside-click /
+  // Escape without leaking event listeners.
+  const [statusMenuOpen, setStatusMenuOpen] = createSignal(false);
+  let rowRef: HTMLLIElement | undefined;
+  const onRowContext = (event: MouseEvent): void => {
+    event.preventDefault();
+    setStatusMenuOpen(true);
+  };
+  createEffect(() => {
+    if (!statusMenuOpen()) return;
+    const onDown = (event: MouseEvent): void => {
+      const target = event.target as Node | null;
+      if (rowRef && target && rowRef.contains(target)) return;
+      setStatusMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setStatusMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    onCleanup(() => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    });
+  });
+
   return (
     <li
       class="ws-pf-tasks__row"
+      ref={(el) => (rowRef = el)}
       id={`ws-pf-task-${props.task.id}`}
-      data-task-id={props.task.id}
+      data-task-id={props.task.taskId}
       data-status={props.task.status}
       data-locked={lockedBy() ? "true" : undefined}
       data-active-task={isActive() ? "true" : undefined}
       data-selected={props.selected ? "true" : undefined}
+      data-ready={props.ready ? "true" : undefined}
       role="button"
       tabIndex={0}
       aria-pressed={props.selected}
-      aria-label={`Open detail for ${props.task.id}: ${props.task.name}`}
+      aria-label={`Open detail for ${props.task.taskId}: ${props.task.name}`}
       onClick={() => props.onSelect()}
+      onContextMenu={onRowContext}
       onKeyDown={onRowKeyDown}
     >
-      <span class="ws-pf-tasks__id" aria-label={`Task ${props.task.id}`}>
-        {props.task.id}
+      <span class="ws-pf-tasks__id" aria-label={`Task ${props.task.taskId}`}>
+        {props.task.taskId}
       </span>
       <span class="ws-pf-tasks__name" title={props.task.name}>
         {props.task.name}
       </span>
+      <Show when={props.ready && !isActive()}>
+        <Tooltip label="All dependencies done — ready to start">
+          <span class="ws-pf-tasks__ready" aria-label="Ready to start">
+            Ready
+          </span>
+        </Tooltip>
+      </Show>
       <Show when={complexity()}>
         {(c) => (
           <Tooltip label={`${COMPLEXITY_LABEL[c()]} complexity`}>
@@ -742,8 +1172,8 @@ function TaskRow(props: TaskRowProps): JSX.Element {
           disabled={startDisabled()}
           aria-label={
             startDisabled()
-              ? `${startLabel()} on ${props.task.id} — locked by ${lockedBy()}`
-              : `${startLabel()} on ${props.task.id}`
+              ? `${startLabel()} on ${props.task.taskId} — locked by ${lockedBy()}`
+              : `${startLabel()} on ${props.task.taskId}`
           }
           title={
             startDisabled()
@@ -765,7 +1195,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
         <button
           type="button"
           class="ws-pf-tasks__progress"
-          aria-label={`Mark progress on ${props.task.id}`}
+          aria-label={`Mark progress on ${props.task.taskId}`}
           title="Post a comment without changing status"
           onClick={(e) => {
             e.stopPropagation();
@@ -777,7 +1207,7 @@ function TaskRow(props: TaskRowProps): JSX.Element {
         <button
           type="button"
           class="ws-pf-tasks__done"
-          aria-label={`Mark ${props.task.id} done`}
+          aria-label={`Mark ${props.task.taskId} done`}
           title="Set DONE, release the lock, and stage a commit message"
           onClick={(e) => {
             e.stopPropagation();
@@ -787,8 +1217,117 @@ function TaskRow(props: TaskRowProps): JSX.Element {
           Done
         </button>
       </Show>
+      <Show when={statusMenuOpen()}>
+        <ul
+          class="ws-pf-tasks__statusmenu"
+          role="menu"
+          aria-label={`Set status for ${props.task.taskId}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <For each={STATUS_CHOICES}>
+            {(option) => (
+              <li role="none">
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="ws-pf-tasks__statusmenu-item"
+                  data-current={props.task.status === option ? "true" : undefined}
+                  data-status={option}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setStatusMenuOpen(false);
+                    if (props.task.status === option) return;
+                    props.onChangeStatus(props.task, option);
+                  }}
+                >
+                  <span
+                    class="ws-pf-tasks__statusmenu-dot"
+                    data-status={option}
+                    aria-hidden="true"
+                  />
+                  {STATUS_LABELS[option]}
+                  <Show when={props.task.status === option}>
+                    <span class="ws-pf-tasks__statusmenu-current" aria-hidden="true">
+                      ✓
+                    </span>
+                  </Show>
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
     </li>
   );
+}
+
+// T-feature — direct status flip from the row's right-click menu. The
+// caller only sees the resolved Task ("T1.1"); we forward it to
+// `bulk-status` (via the client's UUID resolution) and refetch the
+// list so the row's group placement updates. Errors land in a toast.
+//
+// When the user moves a task *off* IN_PROGRESS (e.g. accidentally
+// pressed Done, fixing it back to TODO), we also need to:
+//   - Release the server-side work lock — bulk-status does not do this
+//     on its own, so without `stopWorking` the row keeps showing 🔒 me
+//     and the Start button stays as "Resume".
+//   - Clear the local active-task entry so the workspace tab badge
+//     and the row's "Resume" label drop back to "Start working".
+// Both calls are best-effort: a failure on either leaves the new status
+// in place and the user just sees a slightly stale local indicator
+// until the next refetch.
+async function runChangeStatus(
+  client: PlanFlowClient,
+  externalId: string,
+  workspaceProjectId: string,
+  task: Task,
+  status: TaskStatus,
+  meUserId: string | null,
+  onRetry: () => void,
+): Promise<void> {
+  try {
+    await client.updateTaskStatus(externalId, task.taskId, status);
+    if (status !== "IN_PROGRESS") {
+      const lockerId = task.lockedBy?.id ?? null;
+      const lockedByMe = meUserId !== null && lockerId !== null && lockerId === meUserId;
+      const wasMyActive = activeTaskId(workspaceProjectId) === task.taskId;
+      if (lockedByMe || wasMyActive) {
+        try {
+          await client.stopWorking(externalId);
+        } catch {
+          // Best-effort. The status flip already succeeded; the lock is
+          // stale at worst.
+        }
+      }
+      if (wasMyActive) {
+        setActiveTaskId(workspaceProjectId, null);
+      }
+    }
+    showToast({
+      message: `${task.taskId} → ${status}.`,
+      variant: "success",
+    });
+  } catch (error) {
+    if (error instanceof PlanFlowAuthError) {
+      showToast({
+        message: "PlanFlow rejected the token. Reconnect in Settings.",
+        variant: "error",
+      });
+    } else if (error instanceof PlanFlowApiError) {
+      showToast({
+        message: `Couldn't change ${task.taskId} status: HTTP ${error.status}.`,
+        variant: "error",
+      });
+    } else {
+      const detail = error instanceof Error ? error.message : "Unknown error.";
+      showToast({
+        message: `Couldn't change ${task.taskId} status: ${detail}`,
+        variant: "error",
+      });
+    }
+  } finally {
+    onRetry();
+  }
 }
 
 // T12.4 — Wraps `startTask` for the row's click handler. On success we
@@ -804,27 +1343,32 @@ async function runStartTask(
   onRetry: () => void,
 ): Promise<void> {
   try {
-    const result = await startTask({ client, externalId, workspaceProjectId, taskId: task.id });
+    const result = await startTask({
+      client,
+      externalId,
+      workspaceProjectId,
+      taskId: task.taskId,
+    });
     if (result.branchName === null) {
       showToast({
-        message: `Started ${task.id} — couldn't fetch branch name. Run \`git checkout -b\` manually.`,
+        message: `Started ${task.taskId} — couldn't fetch branch name. Run \`git checkout -b\` manually.`,
         variant: "warning",
       });
     } else if (!result.prefilled) {
       showToast({
-        message: `Started ${task.id}. Open a terminal pane to run: git checkout -b ${result.branchName}`,
+        message: `Started ${task.taskId}. Open a terminal pane to run: git checkout -b ${result.branchName}`,
         variant: "info",
       });
     } else {
       showToast({
-        message: `${task.id} in progress — press Enter to create branch ${result.branchName}.`,
+        message: `${task.taskId} in progress — press Enter to create branch ${result.branchName}.`,
         variant: "success",
       });
     }
   } catch (error) {
     if (error instanceof PlanFlowConflictError) {
       showToast({
-        message: `${task.id} is already locked by another user.`,
+        message: `${task.taskId} is already locked by another user.`,
         variant: "warning",
       });
     } else if (error instanceof PlanFlowAuthError) {
@@ -834,7 +1378,7 @@ async function runStartTask(
       });
     } else {
       const detail = error instanceof Error ? error.message : "Unknown error.";
-      showToast({ message: `Couldn't start ${task.id}: ${detail}`, variant: "error" });
+      showToast({ message: `Couldn't start ${task.taskId}: ${detail}`, variant: "error" });
     }
   } finally {
     onRetry();
@@ -845,6 +1389,31 @@ function normalizePhase(value: string | number | null | undefined): string | nul
   if (value == null) return null;
   const text = String(value).trim();
   return text.length > 0 ? text : null;
+}
+
+/** Compare task ids of the shape `T<phase>.<index>` (e.g. "T1.1", "T12.10")
+ *  so the natural reading order survives a `Array.sort`. Tasks whose ids
+ *  don't match the pattern fall back to a string compare; the result is
+ *  pushed below the well-formed entries so a malformed row doesn't move
+ *  the rest. */
+function compareTaskIds(a: string, b: string): number {
+  const parse = (id: string): { phase: number; index: number } | null => {
+    const match = id.match(/^T(\d+)\.(\d+)$/);
+    if (!match) return null;
+    const phase = Number.parseInt(match[1] ?? "", 10);
+    const index = Number.parseInt(match[2] ?? "", 10);
+    if (!Number.isFinite(phase) || !Number.isFinite(index)) return null;
+    return { phase, index };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (pa && pb) {
+    if (pa.phase !== pb.phase) return pa.phase - pb.phase;
+    return pa.index - pb.index;
+  }
+  if (pa) return -1;
+  if (pb) return 1;
+  return a.localeCompare(b);
 }
 
 function comparePhases(a: string, b: string): number {
@@ -924,7 +1493,7 @@ function TaskActionDialog(props: TaskActionDialogProps): JSX.Element {
   const task = (): Task => props.state.task;
   const kind = (): "progress" | "done" => props.state.kind;
   const title = (): string =>
-    kind() === "progress" ? `Mark progress on ${task().id}` : `Mark ${task().id} done`;
+    kind() === "progress" ? `Mark progress on ${task().taskId}` : `Mark ${task().taskId} done`;
   const placeholder = (): string =>
     kind() === "progress"
       ? "What just happened? (decisions, blockers, partial findings)"
@@ -933,7 +1502,7 @@ function TaskActionDialog(props: TaskActionDialogProps): JSX.Element {
     if (submitting()) return kind() === "progress" ? "Posting…" : "Closing…";
     return kind() === "progress" ? "Post comment" : "Mark done";
   };
-  const commitPreview = (): string => formatCommitMessage(task().id, task().name);
+  const commitPreview = (): string => formatCommitMessage(task().taskId, task().name);
   const canSubmit = (): boolean => note().trim().length > 0 && !submitting();
 
   let textareaRef: HTMLTextAreaElement | undefined;
@@ -964,14 +1533,14 @@ function TaskActionDialog(props: TaskActionDialogProps): JSX.Element {
         await markProgress({
           client: props.client,
           externalId: props.externalId,
-          taskId: task().id,
+          taskId: task().taskId,
           note: body,
           saveAsKnowledge: saveAsKnowledge(),
         });
         showToast({
           message: saveAsKnowledge()
-            ? `Comment + knowledge entry posted on ${task().id}.`
-            : `Comment posted on ${task().id}.`,
+            ? `Comment + knowledge entry posted on ${task().taskId}.`
+            : `Comment posted on ${task().taskId}.`,
           variant: "success",
         });
       } else {
@@ -979,23 +1548,23 @@ function TaskActionDialog(props: TaskActionDialogProps): JSX.Element {
           client: props.client,
           externalId: props.externalId,
           workspaceProjectId: props.workspaceProjectId,
-          taskId: task().id,
+          taskId: task().taskId,
           summary: body,
           taskName: task().name,
         });
         if (!result.released) {
           showToast({
-            message: `${task().id} marked done. Lock release didn't confirm — refresh to verify.`,
+            message: `${task().taskId} marked done. Lock release didn't confirm — refresh to verify.`,
             variant: "warning",
           });
         } else if (!result.prefilled) {
           showToast({
-            message: `${task().id} done. Open a terminal and run: ${result.commitMessage}`,
+            message: `${task().taskId} done. Open a terminal and run: ${result.commitMessage}`,
             variant: "info",
           });
         } else {
           showToast({
-            message: `${task().id} done — press Enter to commit.`,
+            message: `${task().taskId} done — press Enter to commit.`,
             variant: "success",
           });
         }

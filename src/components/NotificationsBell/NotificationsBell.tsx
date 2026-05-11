@@ -230,13 +230,15 @@ export function NotificationsBell(): JSX.Element {
                       <button
                         type="button"
                         class="ws-bell__row"
-                        classList={{ "ws-bell__row--unread": notification.read === false }}
+                        classList={{ "ws-bell__row--unread": notification.readAt == null }}
                         onClick={() => void handleNotificationClick(notification)}
                       >
-                        <Show when={notification.read === false}>
+                        <Show when={notification.readAt == null}>
                           <span class="ws-bell__dot" aria-hidden="true" />
                         </Show>
-                        <span class="ws-bell__row-message">{notification.message}</span>
+                        <span class="ws-bell__row-message">
+                          {notification.title ?? notification.body ?? notification.type}
+                        </span>
                         <Show when={notification.createdAt}>
                           <span class="ws-bell__row-time">
                             {relativeTime(notification.createdAt as string, now())}

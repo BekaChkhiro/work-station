@@ -1200,7 +1200,11 @@ function PlanFlowLinkPicker(): JSX.Element {
         // token deserves the Reconnect banner.
         reauthIntegration: Integration.PlanFlow,
       });
-      const list = await client.listProjects(PLANFLOW_PROJECTS_TTL_MS);
+      // PlanFlow returns projects scoped to a specific organization. We pass
+      // `undefined` so the client resolves the user's default org (matches
+      // what the MCP CLI does) and the picker shows every project the user
+      // can see.
+      const list = await client.listProjects(undefined, PLANFLOW_PROJECTS_TTL_MS);
       // Stable alpha-sort so the dropdown order doesn't shift between fetches.
       const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name));
       setPlanflowProjects(sorted);
@@ -1233,6 +1237,30 @@ function PlanFlowLinkPicker(): JSX.Element {
     const current = link();
     if (!current) return null;
     return planflowProjects().find((p) => p.id === current.externalId) ?? null;
+  });
+
+  // T-feature — auto-suggest a PlanFlow project whose name matches the
+  // active workspace project. Only kicks in when the user hasn't already
+  // picked a link AND the dropdown is empty — saves a click on first
+  // open, doesn't disturb an existing link. Match is case-insensitive
+  // and tolerates "Work Station" ↔ "work-station" / "workstation"-style
+  // formatting differences.
+  const normaliseName = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const suggestedId = createMemo<string | null>(() => {
+    if (link() != null) return null;
+    if (draftId().length > 0) return null;
+    const ws = wsProject();
+    if (!ws) return null;
+    const target = normaliseName(ws.name);
+    if (target.length === 0) return null;
+    const match = planflowProjects().find((p) => normaliseName(p.name) === target);
+    return match?.id ?? null;
+  });
+  createEffect(() => {
+    const sid = suggestedId();
+    if (sid == null) return;
+    if (draftId().length > 0) return;
+    setDraftId(sid);
   });
 
   const doLink = async (): Promise<void> => {
@@ -1333,6 +1361,15 @@ function PlanFlowLinkPicker(): JSX.Element {
             </option>
             <For each={planflowProjects()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
           </select>
+          <Show when={suggestedId() != null && link() == null && draftId() === suggestedId()}>
+            <div
+              class="ws-settings-page__hint ws-settings-page__hint--accent"
+              role="status"
+              aria-live="polite"
+            >
+              Suggested match based on project name — click <strong>Link</strong> to confirm.
+            </div>
+          </Show>
           <button
             type="button"
             class="ws-settings-page__btn"

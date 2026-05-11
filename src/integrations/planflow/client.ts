@@ -10,32 +10,35 @@ import type { IntegrationId } from "../credentials";
 import { markNeedsReauth, runWithReauthGuard } from "../reauth";
 import { mapHttpError, PlanFlowParseError } from "./errors";
 import {
-  activeWorkListSchema,
-  branchNameResponseSchema,
+  activeWorkResponseSchema,
   changesResponseSchema,
+  commentDetailSchema,
   commentListSchema,
-  commentSchema,
+  envelopeSchema,
   knowledgeEntrySchema,
   knowledgeListSchema,
   knowledgeTypeSchema,
   meSchema,
   notificationListSchema,
   unreadNotificationCountSchema,
+  organizationListSchema,
+  organizationSchema,
+  projectDetailSchema,
   projectListSchema,
   projectSchema,
   taskListSchema,
   taskSchema,
   type ActiveWorkEntry,
-  type BranchNameResponse,
-  type ChangesResponse,
   type Comment,
   type KnowledgeEntry,
   type KnowledgeType,
   type Me,
   type Notification,
+  type Organization,
   type Project,
   type Task,
   type TaskStatus,
+  type Change,
 } from "./schemas";
 
 export const PLANFLOW_DEFAULT_BASE_URL = "https://api.planflow.tools";
@@ -57,33 +60,26 @@ export interface PlanFlowClientOptions {
 
 export interface ListTasksOptions {
   status?: TaskStatus | TaskStatus[];
-  phase?: string | number;
   cacheTtlMs?: number;
 }
 
 export interface ListChangesOptions {
-  /** Watermark — return only changes that occurred after this cursor.
-   *  Wire param is `since` per the API spec; the response carries the
-   *  new watermark back as `cursor`. */
+  /** Server-side watermark — return only changes that occurred after this
+   *  timestamp (ISO string). The API does not echo back a cursor; the
+   *  caller is expected to use the most recent `occurredAt`/`createdAt` it
+   *  has seen. */
   since?: string;
   limit?: number;
 }
 
-export interface TaskWorkPayload {
-  status?: TaskStatus;
-  note?: string;
-  saveAsKnowledge?: boolean;
-  knowledgeTitle?: string;
-  knowledgeType?: KnowledgeType;
+/** PlanFlow's `/work` endpoint takes an action verb rather than a status.
+ *  Status changes ride a separate route (PATCH /tasks/:taskId). */
+export interface StartWorkPayload {
+  taskId: string;
 }
 
-export interface UpdateTaskPayload {
-  name?: string;
-  description?: string;
-  status?: TaskStatus;
-  complexity?: string;
-  phase?: string | number;
-  dependencies?: string[];
+export interface UpdateTaskStatusPayload {
+  status: TaskStatus;
 }
 
 export interface CreateCommentPayload {
@@ -96,13 +92,32 @@ export interface CreateKnowledgePayload {
   type?: KnowledgeType;
 }
 
-export interface BulkStatusPayload {
-  taskIds: string[];
-  status: TaskStatus;
+export interface MarkNotificationsReadPayload {
+  notificationIds?: string[];
+  projectId?: string;
 }
 
-export interface ReorderTasksPayload {
-  taskIds: string[];
+/** A flattened active-work entry that matches what the UI already expected
+ *  before T-fix. We adapt the new server response (`{taskId, userId,
+ *  userName, ...}`) into a `{user, taskId, startedAt}` triple so the
+ *  rest of the app doesn't have to change. */
+export interface ActiveWorkUser {
+  user: {
+    id: string;
+    email?: string;
+    name?: string | null;
+  };
+  taskId: string;
+  startedAt: string;
+}
+
+/** Mirrors the old `{branchName: string}` shape so the caller doesn't need
+ *  to know we now generate this client-side. */
+export interface BranchNameResponse {
+  branchName: string;
+  /** Optional convenience string that callers can drop straight into a
+   *  terminal — `git checkout -b <branchName>`. */
+  gitCommand?: string;
 }
 
 export class PlanFlowClient {
@@ -130,16 +145,37 @@ export class PlanFlowClient {
     });
   }
 
-  async getMe(): Promise<Me> {
-    return this.#get("/me", meSchema);
+  async getMe(): Promise<Me["user"]> {
+    const payload = await this.#get("/auth/me", meSchema);
+    return payload.user;
   }
 
-  async listProjects(cacheTtlMs?: number): Promise<Project[]> {
-    return this.#get("/projects", projectListSchema, { cacheTtlMs });
+  async listOrganizations(): Promise<Organization[]> {
+    const payload = await this.#get("/organizations", organizationListSchema);
+    return payload.organizations;
+  }
+
+  async listProjects(organizationId?: string, cacheTtlMs?: number): Promise<Project[]> {
+    let orgId = organizationId;
+    if (orgId == null) {
+      const orgs = await this.listOrganizations();
+      const first = orgs[0];
+      if (first == null) return [];
+      orgId = first.id;
+    }
+    const payload = await this.#get("/projects", projectListSchema, {
+      query: { organizationId: orgId },
+      cacheTtlMs,
+    });
+    return payload.projects;
   }
 
   async getProject(projectId: string): Promise<Project> {
-    return this.#get(`/projects/${encodeURIComponent(projectId)}`, projectSchema);
+    const payload = await this.#get(
+      `/projects/${encodeURIComponent(projectId)}`,
+      projectDetailSchema,
+    );
+    return payload.project;
   }
 
   async listTasks(projectId: string, options: ListTasksOptions = {}): Promise<Task[]> {
@@ -147,92 +183,154 @@ export class PlanFlowClient {
     if (options.status != null) {
       query["status"] = Array.isArray(options.status) ? options.status.join(",") : options.status;
     }
-    if (options.phase != null) query["phase"] = String(options.phase);
-    return this.#get(`/projects/${encodeURIComponent(projectId)}/tasks`, taskListSchema, {
-      query,
-      cacheTtlMs: options.cacheTtlMs,
-    });
-  }
-
-  async getTask(projectId: string, taskId: string): Promise<Task> {
-    return this.#get(
-      `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
-      taskSchema,
+    const payload = await this.#get(
+      `/projects/${encodeURIComponent(projectId)}/tasks`,
+      taskListSchema,
+      { query, cacheTtlMs: options.cacheTtlMs },
     );
+    return payload.tasks;
   }
 
-  async updateTask(projectId: string, taskId: string, payload: UpdateTaskPayload): Promise<Task> {
-    return this.#request(
-      `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
-      taskSchema,
-      { method: "PATCH", json: payload },
-    );
+  /** PlanFlow has no single-task GET — the caller looks the task up in the
+   *  bulk list. We keep this signature for API parity but it's just a
+   *  thin filter on top of `listTasks`. */
+  async getTask(projectId: string, taskIdOrUuid: string): Promise<Task | null> {
+    const tasks = await this.listTasks(projectId);
+    return tasks.find((t) => t.taskId === taskIdOrUuid || t.id === taskIdOrUuid) ?? null;
   }
 
-  async workOnTask(
+  /** Update a task's status. PlanFlow's `bulk-status` route is the cleanest
+   *  way to flip a single task because it returns the patched row in the
+   *  response, but the server validates the body's `taskIds` against task
+   *  UUIDs only. The path parameter is the project UUID; the body needs
+   *  the task UUID even when the caller has the human-readable taskId
+   *  ("T1.1") in hand. We resolve `T<n>.<m>` → UUID with a single
+   *  `listTasks` round-trip when needed. */
+  async updateTaskStatus(
     projectId: string,
-    taskId: string,
-    payload: TaskWorkPayload = {},
-  ): Promise<Task> {
-    return this.#request(
-      `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/work`,
-      taskSchema,
-      { method: "POST", json: payload },
+    taskIdOrUuid: string,
+    status: TaskStatus,
+  ): Promise<Task | null> {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      taskIdOrUuid,
     );
+    let taskUuid = taskIdOrUuid;
+    if (!isUuid) {
+      const tasks = await this.listTasks(projectId);
+      const match = tasks.find((t) => t.taskId === taskIdOrUuid);
+      if (!match) return null;
+      taskUuid = match.id;
+    }
+    const response = await this.#request(
+      `/projects/${encodeURIComponent(projectId)}/tasks/bulk-status`,
+      taskListSchema,
+      { method: "POST", json: { taskIds: [taskUuid], status } },
+    );
+    return response.tasks[0] ?? null;
   }
 
-  async releaseTaskLock(projectId: string, taskId: string): Promise<void> {
+  /** Start working on a task — claims the lock + sets working_on for
+   *  the authenticated user. PlanFlow uses `{action: "start"}` (NOT a
+   *  status flip). The task itself is not transitioned by this call;
+   *  the caller must follow up with `updateTaskStatus(..., "IN_PROGRESS")`
+   *  if that's the intent. */
+  async startWorking(projectId: string, taskId: string): Promise<void> {
     await this.#request(
       `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/work`,
       z.unknown(),
-      { method: "DELETE", responseType: "void" },
+      { method: "POST", json: { action: "start" }, responseType: "void" },
     );
   }
 
-  async bulkUpdateStatus(projectId: string, payload: BulkStatusPayload): Promise<Task[]> {
-    return this.#request(
-      `/projects/${encodeURIComponent(projectId)}/tasks/bulk-status`,
-      taskListSchema,
-      { method: "POST", json: payload },
-    );
-  }
-
-  async reorderTasks(projectId: string, payload: ReorderTasksPayload): Promise<void> {
-    await this.#request(`/projects/${encodeURIComponent(projectId)}/tasks/reorder`, z.unknown(), {
+  /** Stop working — the taskId in the URL is literal `_` per PlanFlow's
+   *  contract; the server resolves the current working_on from the user's
+   *  session. */
+  async stopWorking(projectId: string): Promise<void> {
+    await this.#request(`/projects/${encodeURIComponent(projectId)}/tasks/_/work`, z.unknown(), {
       method: "POST",
-      json: payload,
+      json: { action: "stop" },
       responseType: "void",
     });
   }
 
-  async getBranchName(projectId: string, taskId: string): Promise<BranchNameResponse> {
-    return this.#get(
-      `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/branch-name`,
-      branchNameResponseSchema,
-    );
+  /** Client-side branch-name generation. PlanFlow's `/branch-name` route
+   *  exists but is gated by browser-JWT (not API tokens), so we replicate
+   *  its slug logic here. Kept as `async` for API parity. */
+  async getBranchName(
+    projectId: string,
+    taskId: string,
+    options: { prefix?: string } = {},
+  ): Promise<BranchNameResponse> {
+    void projectId;
+    // The task name isn't strictly required for branch generation but it
+    // makes the slug human-friendly. We fetch it best-effort and fall back
+    // to the taskId-only branch when offline / unauthorised.
+    let name: string | null = null;
+    try {
+      const task = await this.getTask(projectId, taskId);
+      name = task?.name ?? null;
+    } catch {
+      // Branch name fallback is acceptable on error.
+    }
+    const prefix = options.prefix?.trim() ?? "feature";
+    const slug = slugify(name ?? taskId);
+    const branchName = `${prefix}/${taskId.toLowerCase()}-${slug}`.replace(/-+$/g, "");
+    return { branchName, gitCommand: `git checkout -b ${branchName}` };
   }
 
-  async listChanges(projectId: string, options: ListChangesOptions = {}): Promise<ChangesResponse> {
+  async listChanges(
+    projectId: string,
+    options: ListChangesOptions = {},
+  ): Promise<{ changes: Change[]; cursor: string | null }> {
     const query: Record<string, string | number> = {};
     if (options.since != null) query["since"] = options.since;
     if (options.limit != null) query["limit"] = options.limit;
-    return this.#get(`/projects/${encodeURIComponent(projectId)}/changes`, changesResponseSchema, {
-      query,
-    });
+    const payload = await this.#get(
+      `/projects/${encodeURIComponent(projectId)}/changes`,
+      changesResponseSchema,
+      { query },
+    );
+    // Normalise the timestamp field so consumers can rely on `occurredAt`
+    // regardless of what the server happens to call it.
+    const normalised: Change[] = payload.changes.map((c: Change) => ({
+      ...c,
+      occurredAt: c.occurredAt ?? c.timestamp ?? c.createdAt ?? "",
+    }));
+    // PlanFlow doesn't return a cursor itself — derive one from the most
+    // recent entry so the next poll can pass `since=<latest>` and skip
+    // already-seen rows.
+    const stamps: string[] = [];
+    for (const c of normalised) {
+      const t = c.occurredAt;
+      if (typeof t === "string" && t.length > 0) stamps.push(t);
+    }
+    stamps.sort((a, b) => Date.parse(b) - Date.parse(a));
+    const latest = stamps[0] ?? null;
+    return { changes: normalised, cursor: latest };
   }
 
-  async listActiveWork(projectId: string): Promise<ActiveWorkEntry[]> {
-    return this.#get(
+  async listActiveWork(projectId: string): Promise<ActiveWorkUser[]> {
+    const payload = await this.#get(
       `/projects/${encodeURIComponent(projectId)}/active-work`,
-      activeWorkListSchema,
+      activeWorkResponseSchema,
     );
+    return payload.activeWork.map((entry: ActiveWorkEntry) => ({
+      user: {
+        id: entry.userId,
+        email: entry.userEmail,
+        name: entry.userName,
+      },
+      taskId: entry.taskId,
+      startedAt: entry.startedAt,
+    }));
   }
 
   async listComments(projectId: string, taskId: string): Promise<Comment[]> {
-    return this.#get(
+    const payload = await this.#get(
       `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/comments`,
       commentListSchema,
     );
+    return payload.comments;
   }
 
   async createComment(
@@ -240,31 +338,46 @@ export class PlanFlowClient {
     taskId: string,
     payload: CreateCommentPayload,
   ): Promise<Comment> {
-    return this.#request(
+    // PlanFlow's create-comment route expects `content` as the field name;
+    // older callers in this app pass `body`. We accept the legacy shape
+    // and translate at the wire boundary so consumers don't have to.
+    const response = await this.#request(
       `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/comments`,
-      commentSchema,
-      { method: "POST", json: payload },
+      commentDetailSchema,
+      { method: "POST", json: { content: payload.body } },
     );
+    return response.comment;
   }
 
-  async listNotifications(): Promise<Notification[]> {
-    return this.#get("/notifications", notificationListSchema);
+  async listNotifications(
+    options: { unreadOnly?: boolean; limit?: number } = {},
+  ): Promise<Notification[]> {
+    const query: Record<string, string | number> = {};
+    if (options.unreadOnly) query["unreadOnly"] = "true";
+    if (options.limit != null) query["limit"] = options.limit;
+    const payload = await this.#get("/notifications", notificationListSchema, { query });
+    return payload.notifications;
   }
 
   async getUnreadNotificationCount(): Promise<number> {
-    const response = await this.#get("/notifications/unread-count", unreadNotificationCountSchema);
-    return response.count;
+    const payload = await this.#get("/notifications/unread-count", unreadNotificationCountSchema);
+    return payload.unreadCount;
   }
 
+  /** Mark a single notification as read. PlanFlow uses PATCH (not POST). */
   async markNotificationRead(notificationId: string): Promise<void> {
     await this.#request(`/notifications/${encodeURIComponent(notificationId)}/read`, z.unknown(), {
-      method: "POST",
+      method: "PATCH",
       responseType: "void",
     });
   }
 
   async listKnowledge(projectId: string): Promise<KnowledgeEntry[]> {
-    return this.#get(`/projects/${encodeURIComponent(projectId)}/knowledge`, knowledgeListSchema);
+    const payload = await this.#get(
+      `/projects/${encodeURIComponent(projectId)}/knowledge`,
+      knowledgeListSchema,
+    );
+    return payload.knowledge ?? payload.entries ?? [];
   }
 
   async createKnowledge(
@@ -313,7 +426,7 @@ export class PlanFlowClient {
           cacheTtlMs: options.cacheTtlMs,
           responseType,
           parse:
-            responseType === "json" ? (value) => parseWithSchema(schema, path, value) : undefined,
+            responseType === "json" ? (value) => parseEnvelope(schema, path, value) : undefined,
         });
       } catch (error) {
         mapHttpError(error);
@@ -328,8 +441,26 @@ export function createPlanFlowClient(options: PlanFlowClientOptions): PlanFlowCl
   return new PlanFlowClient(options);
 }
 
-function parseWithSchema<T>(schema: ZodType<T>, path: string, value: unknown): T {
-  const result = schema.safeParse(value);
-  if (result.success) return result.data;
-  throw new PlanFlowParseError(path, result.error);
+/** All success responses look like `{success: true, data: ...}`. We strip
+ *  the envelope at the parse step so callers see the inner shape directly.
+ *  When the response doesn't carry the envelope (older endpoints, future
+ *  changes) we fall back to parsing the raw value so the call still works. */
+function parseEnvelope<T>(schema: ZodType<T>, path: string, value: unknown): T {
+  const enveloped = envelopeSchema(schema).safeParse(value);
+  if (enveloped.success) return enveloped.data.data;
+  const direct = schema.safeParse(value);
+  if (direct.success) return direct.data;
+  // Surface the envelope-shaped failure: it's more informative because the
+  // wrapper mismatch is the common case.
+  throw new PlanFlowParseError(path, enveloped.error);
 }
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+export { organizationSchema, projectSchema, taskSchema };

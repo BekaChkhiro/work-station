@@ -32,6 +32,7 @@ export {
   credentialsErrorSchema,
   deleteCredential,
   getCredential,
+  invalidateCredentialCache,
   hasCredential,
   setCredential,
 } from "./credentials";
@@ -117,10 +118,9 @@ export { IntegrationVerifyError, verifyIntegration } from "./verifiers";
 export type { VerifyFailureReason, VerifyOptions, VerifyResult } from "./verifiers";
 export type {
   ActiveWorkEntry,
+  ActiveWorkUser,
   BranchNameResponse,
-  BulkStatusPayload,
   Change,
-  ChangesResponse,
   Comment,
   CreateCommentPayload,
   CreateKnowledgePayload,
@@ -130,6 +130,7 @@ export type {
   ListTasksOptions,
   Me,
   Notification,
+  Organization,
   PlanFlowClientOptions,
   Project,
   RendererPlanFlowClientOptions,
@@ -137,13 +138,11 @@ export type {
   FinishTaskResult,
   MarkProgressInput,
   MarkProgressResult,
-  ReorderTasksPayload,
   StartTaskInput,
   StartTaskResult,
   Task,
   TaskComplexity,
   TaskStatus,
-  TaskWorkPayload,
-  UpdateTaskPayload,
+  UpdateTaskStatusPayload,
   UserSummary,
 } from "./planflow";

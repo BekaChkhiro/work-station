@@ -11,6 +11,16 @@
     "store:default",
     "dialog:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://api.planflow.tools/*" },
+        { "url": "https://api.github.com/*" },
+        { "url": "https://api.vercel.com/*" },
+        { "url": "https://console.neon.tech/*" },
+        { "url": "https://backboard.railway.com/*" }
+      ]
+    }
   ]
 }

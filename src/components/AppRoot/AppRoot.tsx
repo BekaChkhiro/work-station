@@ -51,7 +51,7 @@ import {
 import { getSetting, setSetting } from "../../db/settings";
 import { pickProjectFolder } from "../../ipc/picker";
 import { cliListAvailable } from "../../ipc/cli";
-import { ptyKill, ptySpawn } from "../../ipc/pty";
+import { ptyKill, ptySpawn, ptyWrite } from "../../ipc/pty";
 import { setThemeMode, themeMode, type ThemeMode } from "../../stores/theme";
 import {
   activeProjectId,
@@ -73,6 +73,7 @@ import {
 } from "../../stores/workspace";
 import { listProjectLinks } from "../../db/projectLinks";
 import { Integration } from "../../integrations";
+import { setFocusedSessionCliResolver, setTaskCliLauncher } from "../../stores/taskCliLauncher";
 import type { WorkspaceTabKind } from "../../types/workspaceTab";
 import {
   collectPanes,
@@ -458,6 +459,14 @@ export function AppRoot(): JSX.Element {
         } catch (err) {
           console.error("[T5.9] last_active_project restore failed:", err);
         }
+        // Wire the PlanFlow Start-task → CLI bridge. We register AFTER
+        // `availableClis` and project metadata have loaded so the very
+        // first Start press has the data it needs. The resolver feeds
+        // `startTask` the focused pane's CLI so the orchestrator can
+        // skip the `git checkout` pre-fill when the focused pane is a
+        // REPL (Claude / Kimi / Codex).
+        setTaskCliLauncher((projectId, taskId) => startTaskCliLauncher(projectId, taskId));
+        setFocusedSessionCliResolver((projectId) => resolveFocusedSessionCli(projectId));
         setBoot({ kind: "ready" });
         void checkUpdate()
           .then((update) => {
@@ -471,6 +480,10 @@ export function AppRoot(): JSX.Element {
     })();
 
     onCleanup(() => {
+      // Drop the PlanFlow Start-task bridge so a stale closure doesn't
+      // outlive this mount during HMR.
+      setTaskCliLauncher(null);
+      setFocusedSessionCliResolver(null);
       // Best-effort — if the window is closing the OS will reap them
       // anyway, but explicit kills help during HMR-style remounts.
       for (const list of Object.values(sessionsByProject)) {
@@ -653,16 +666,21 @@ export function AppRoot(): JSX.Element {
     }
   };
 
-  const spawnCli = async (projectId: string, cli: PaneCliOption): Promise<string> => {
+  const spawnCli = async (
+    projectId: string,
+    cli: PaneCliOption,
+    extraStartupCommands: readonly string[] = [],
+  ): Promise<string> => {
     const cwd = projectPaths[projectId];
     const env = projectEnvs[projectId] ?? {};
-    const startupCommands = projectStartupCommands[projectId] ?? [];
+    const projectStartups = projectStartupCommands[projectId] ?? [];
+    const combined = [...projectStartups, ...extraStartupCommands];
     const resp = await ptySpawn({
       command: cli.path,
       args: [],
       cwd: cwd && cwd.length > 0 ? cwd : undefined,
       env: { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: cli.name },
-      startupCommands: startupCommands.length > 0 ? startupCommands : undefined,
+      startupCommands: combined.length > 0 ? combined : undefined,
       cols: 80,
       rows: 24,
     });
@@ -711,6 +729,84 @@ export function AppRoot(): JSX.Element {
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  // Build the prompt we hand to a freshly-spawned CLI when the user
+  // presses "Start" on a PlanFlow task. We pass the literal MCP tool
+  // invocation so any MCP-aware CLI (Claude Code, codex, kimi) picks it
+  // up as a tool call rather than parsing it as natural language.
+  // Embedded double quotes in the task id are not expected (it's
+  // `T<n>.<m>` shape), but we escape defensively in case the format
+  // ever expands.
+  const formatPlanFlowStartPrompt = (taskId: string): string => {
+    const escaped = taskId.replace(/"/g, '\\"');
+    return `planflow_task_start(taskId: "${escaped}")`;
+  };
+
+  // Resolve the CLI to launch for a Start-task pane. Project default
+  // wins; if that's not on PATH (T7.8 case) fall back to the first
+  // available CLI. Returns `null` only when *no* CLI is available, in
+  // which case the launcher silently skips the spawn and the user keeps
+  // the existing flow (git checkout pre-fill in the focused pane).
+  const resolveTaskCli = (projectId: string): PaneCliOption | null => {
+    const preferred = resolveDefaultCli(projectId);
+    if (preferred) return preferred;
+    return availableClis()[0] ?? null;
+  };
+
+  // Run `planflow_task_start(taskId: …)` against the project. Routing:
+  //   - Focused pane is already running a CLI → type the prompt straight
+  //     into that pane. No new split, no second Claude instance to swap
+  //     between. Adds a leading newline so a partially-typed line in
+  //     the CLI is committed first and the planflow_task_start call
+  //     lands on a fresh prompt.
+  //   - Focused pane is a shell, or no pane is focused → spawn the
+  //     project's default CLI in a new pane (vertical split next to
+  //     the focus, or first pane in an empty layout) with the prompt
+  //     queued as a startup command. The CLI receives it as user input
+  //     once subscribers are attached, so the tool call fires
+  //     immediately after the CLI boots.
+  const startTaskCliLauncher = async (projectId: string, taskId: string): Promise<void> => {
+    const prompt = formatPlanFlowStartPrompt(taskId);
+    const ws = getWorkspace(projectId);
+    const focused = ws?.focusedSessionId ?? null;
+    const focusedCli = focused != null ? (sessionCli()[focused] ?? null) : null;
+    if (focused != null && focusedCli != null) {
+      // Existing CLI pane — type the prompt into it. Newline so the CLI
+      // executes the line; the user pressing Start consented to running
+      // the tool, just like the shell case auto-runs via startupCommand.
+      const bytes = new TextEncoder().encode(`${prompt}\n`);
+      await ptyWrite(focused, bytes);
+      return;
+    }
+    const cli = resolveTaskCli(projectId);
+    if (!cli) return;
+    const sessionId = await spawnCli(projectId, cli, [prompt]);
+    trackSession(projectId, sessionId);
+    if (focused !== null && ws?.layout) {
+      splitPane(projectId, focused, "v", sessionId);
+      const layoutNow = getWorkspace(projectId)?.layout;
+      const attached =
+        layoutNow != null && collectPanes(layoutNow).some((pane) => pane.sessionId === sessionId);
+      if (!attached) {
+        await ptyKill(sessionId);
+        untrackSession(projectId, sessionId);
+      }
+      return;
+    }
+    setLayout(projectId, paneNode(sessionId));
+    setFocusedSession(projectId, sessionId);
+  };
+
+  // Sibling of the launcher: synchronous lookup of the focused pane's CLI
+  // for `projectId`. `startTask` reads this *before* it decides whether to
+  // pre-fill `git checkout -b …` — when a CLI is running, the git command
+  // would land in the REPL as a chat prompt instead of a shell command.
+  const resolveFocusedSessionCli = (projectId: string): string | null => {
+    const ws = getWorkspace(projectId);
+    const focused = ws?.focusedSessionId ?? null;
+    if (focused == null) return null;
+    return sessionCli()[focused] ?? null;
   };
 
   const handleLaunchFirstCli = async (projectId: string, cli: PaneCliOption): Promise<void> => {

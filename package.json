@@ -1,6 +1,6 @@
 {
   "name": "work-station",
-  "version": "0.1.0",
+  "version": "3.0.0",
   "description": "Cross-platform desktop hub for managing multiple Claude Code / Kimi / Codex terminal sessions across projects.",
   "private": true,
   "type": "module",
@@ -23,6 +23,7 @@
     "@tailwindcss/vite": "^4.2.4",
     "@tauri-apps/api": "2.11.0",
     "@tauri-apps/plugin-dialog": "2.7.1",
+    "@tauri-apps/plugin-http": "^2.5.9",
     "@tauri-apps/plugin-opener": "2.5.3",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-sql": "2.4.0",

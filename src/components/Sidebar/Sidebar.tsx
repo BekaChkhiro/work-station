@@ -31,6 +31,8 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
 import { Tooltip } from "../Tooltip";
+import { NotificationsBell } from "../NotificationsBell";
+import { resolvedTheme, setThemeMode } from "../../stores/theme";
 
 export interface SidebarProject {
   id: string;
@@ -231,6 +233,7 @@ export function Sidebar(props: SidebarProps): JSX.Element {
     >
       <div class="ws-sb__section">
         <span class="ws-sb__section-label">Projects</span>
+        <NotificationsBell />
         <Tooltip label={isCollapsed() ? "Expand sidebar" : "Collapse sidebar"}>
           <button
             type="button"
@@ -354,6 +357,20 @@ export function Sidebar(props: SidebarProps): JSX.Element {
             <kbd class="ws-sb__kbd">{props.newProjectShortcut}</kbd>
           ) : null}
         </button>
+        <Tooltip
+          label={resolvedTheme() === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        >
+          <button
+            type="button"
+            class="ws-sb__icon-btn"
+            aria-label="Toggle theme"
+            onClick={() => setThemeMode(resolvedTheme() === "dark" ? "light" : "dark")}
+          >
+            <Show when={resolvedTheme() === "dark"} fallback={<IconMoon size={14} />}>
+              <IconSun size={14} />
+            </Show>
+          </button>
+        </Tooltip>
         <Tooltip label="Settings">
           <button
             type="button"
@@ -366,6 +383,43 @@ export function Sidebar(props: SidebarProps): JSX.Element {
         </Tooltip>
       </div>
     </nav>
+  );
+}
+
+function IconSun(props: { size?: number }): JSX.Element {
+  return (
+    <svg
+      width={props.size ?? 14}
+      height={props.size ?? 14}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="7" cy="7" r="2.5" />
+      <path d="M7 0.8 V2.4 M7 11.6 V13.2 M0.8 7 H2.4 M11.6 7 H13.2 M2.5 2.5 L3.6 3.6 M10.4 10.4 L11.5 11.5 M2.5 11.5 L3.6 10.4 M10.4 3.6 L11.5 2.5" />
+    </svg>
+  );
+}
+
+function IconMoon(props: { size?: number }): JSX.Element {
+  return (
+    <svg
+      width={props.size ?? 14}
+      height={props.size ?? 14}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M11.8 8.4 A5 5 0 1 1 5.6 2.2 A4 4 0 0 0 11.8 8.4 Z" />
+    </svg>
   );
 }
 
@@ -432,16 +486,16 @@ function IconCog(props: { size?: number }): JSX.Element {
     <svg
       width={props.size ?? 14}
       height={props.size ?? 14}
-      viewBox="0 0 14 14"
+      viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      stroke-width="1.4"
+      stroke-width="1.6"
       stroke-linecap="round"
       stroke-linejoin="round"
       aria-hidden="true"
     >
-      <circle cx="7" cy="7" r="2.2" />
-      <path d="M7 1.5 V3 M7 11 V12.5 M1.5 7 H3 M11 7 H12.5 M2.6 2.6 L3.7 3.7 M10.3 10.3 L11.4 11.4 M2.6 11.4 L3.7 10.3 M10.3 3.7 L11.4 2.6" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   );
 }

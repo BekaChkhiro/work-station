@@ -65,6 +65,7 @@ export function WorkspaceTabStrip(props: WorkspaceTabStripProps): JSX.Element {
                   tabIndex={isActive() ? 0 : -1}
                   onClick={() => props.onActivate(kind)}
                 >
+                  <span class="ws-workspace-tabs__dot" data-kind={meta.kind} aria-hidden="true" />
                   <span class="ws-workspace-tabs__label">{meta.label}</span>
                   <Show when={badge()}>
                     {(text) => (
