@@ -72,10 +72,8 @@ import {
   visibleTabs,
 } from "../../stores/workspace";
 import { listProjectLinks } from "../../db/projectLinks";
-import { readCachedLinks } from "../../integrations/projectLinks";
 import { Integration } from "../../integrations";
 import { setFocusedSessionCliResolver, setTaskCliLauncher } from "../../stores/taskCliLauncher";
-import { installChatBridge } from "../../integrations/planflow/chatBridge";
 import type { WorkspaceTabKind } from "../../types/workspaceTab";
 import {
   collectPanes,
@@ -163,10 +161,6 @@ export function AppRoot(): JSX.Element {
   // new spawn lands.
   const [sessionCli, setSessionCli] = createSignal<Record<string, string>>({});
 
-  // Dispose handle for the PlanFlow chat bridge (Phase 3). Captured here
-  // so the same `onCleanup` that tears down the task-CLI launcher can
-  // also release the chat bridge — no separate effect needed.
-  let chatBridgeDispose: (() => void) | null = null;
   const recordSessionCli = (sessionId: string, cliId: string): void => {
     setSessionCli((prev) => ({ ...prev, [sessionId]: cliId }));
   };
@@ -474,20 +468,9 @@ export function AppRoot(): JSX.Element {
         // REPL (Claude / Kimi / Codex).
         setTaskCliLauncher((projectId, taskId) => startTaskCliLauncher(projectId, taskId));
         setFocusedSessionCliResolver((projectId) => resolveFocusedSessionCli(projectId));
-        // PlanFlow chat — wire the hidden PTY bridge so the floating
-        // chat panel's send button can actually reach a CLI. The
-        // installer takes closures over our spawn helpers + project
-        // metadata maps so it can drive `ptySpawn` directly without
-        // mounting a Terminal pane.
-        chatBridgeDispose = installChatBridge({
-          resolveCliPath: (cliId) => availableClis().find((c) => c.name === cliId)?.path ?? null,
-          resolveProjectCwd: (projectId) => projectPaths[projectId] ?? null,
-          resolveProjectEnv: (projectId) => projectEnvs[projectId] ?? {},
-          resolveExternalId: (projectId) => {
-            const cached = readCachedLinks(projectId) ?? [];
-            return cached.find((link) => link.service === Integration.PlanFlow)?.externalId ?? null;
-          },
-        });
+        // PlanFlow chat ships an embedded xterm.js mini-terminal now —
+        // no PTY-output scraping, so no hidden-bridge installer is
+        // needed. The chat panel spawns its own PTY directly.
         setBoot({ kind: "ready" });
         void checkUpdate()
           .then((update) => {
@@ -505,8 +488,6 @@ export function AppRoot(): JSX.Element {
       // outlive this mount during HMR.
       setTaskCliLauncher(null);
       setFocusedSessionCliResolver(null);
-      chatBridgeDispose?.();
-      chatBridgeDispose = null;
       // Best-effort — if the window is closing the OS will reap them
       // anyway, but explicit kills help during HMR-style remounts.
       for (const list of Object.values(sessionsByProject)) {
