@@ -1,10 +1,12 @@
-// T13.3: typed wrapper around the `read_text_file` Tauri command.
+// T13.3 / T13.4: typed wrappers around the `read_text_file` / `write_text_file`
+// Tauri commands.
 //
-// Path-scoped read for the editor. The Rust side canonicalizes
+// Path-scoped on both sides: the Rust side canonicalizes
 // `projectRoot` + `relativePath` and rejects anything that escapes
-// the project; the response shape distinguishes text from binary so
+// the project. The read response distinguishes text from binary so
 // the UI can render Monaco vs. a "not a text file" placeholder without
-// guessing.
+// guessing; the write side round-trips the encoding tag so a file that
+// had a UTF-8 BOM on disk gets one written back.
 
 import { invoke } from "@tauri-apps/api/core";
 import { z } from "zod";
@@ -38,4 +40,18 @@ export async function readTextFile(
     relativePath,
   });
   return ReadResultSchema.parse(raw);
+}
+
+export async function writeTextFile(
+  projectRoot: string,
+  relativePath: string,
+  content: string,
+  encoding: TextEncoding = "utf-8",
+): Promise<void> {
+  await invoke<void>("write_text_file", {
+    projectRoot,
+    relativePath,
+    content,
+    encoding,
+  });
 }

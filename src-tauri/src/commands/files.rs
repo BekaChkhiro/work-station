@@ -1,25 +1,36 @@
-//! T13.3: read text files for the in-app Monaco editor.
+//! T13.3 / T13.4: read and write text files for the in-app Monaco editor.
 //!
-//! `read_text_file` is a path-scoped reader. The frontend supplies a
-//! project root and a path relative to it; everything is canonicalized
-//! and the resolved target must live inside the canonicalized root —
-//! otherwise the call is rejected. This is the single chokepoint for
-//! editor reads, so the project boundary is enforced here rather than
-//! in capability JSON (which Tauri's FS plugin uses) — it gives us a
-//! typed error the UI can render and lets us layer charset/binary
-//! detection alongside the bounds check.
+//! Both `read_text_file` and `write_text_file` are path-scoped: the
+//! frontend supplies a project root and a path relative to it; everything
+//! is canonicalized and the resolved target must live inside the
+//! canonicalized root — otherwise the call is rejected. This is the
+//! single chokepoint for editor reads and writes, so the project
+//! boundary is enforced here rather than in capability JSON (which
+//! Tauri's FS plugin uses) — it gives us a typed error the UI can
+//! render and lets us layer charset/binary detection alongside the
+//! bounds check.
 //!
-//! Result shape:
+//! Read result shape:
 //!   • Text  — UTF-8 (with or without BOM). BOM is stripped from the
 //!             content; the encoding tag lets the save path round-trip
 //!             it (T13.4).
 //!   • Binary — file has a NUL byte in the first 8 KiB, or its bytes
 //!              are not valid UTF-8. Surfaced to the UI as a "not a
 //!              text file" placeholder instead of garbage in Monaco.
+//!
+//! Write semantics (T13.4):
+//!   • Target must already exist inside the project root — saving from
+//!     the editor only happens after a successful read, so this keeps
+//!     the surface narrow. File creation lives with a future "new file"
+//!     flow, not the save path.
+//!   • Atomic on POSIX: bytes are written to a sibling temp file and
+//!     `rename`d into place, so a crash mid-write can't truncate an
+//!     existing file. The encoding tag round-trips the BOM the reader
+//!     stripped.
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::pty::{Recovery, UserShape};
@@ -51,7 +62,7 @@ pub enum ReadResult {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextEncoding {
     Utf8,
@@ -261,6 +272,78 @@ pub async fn read_text_file(
         .map_err(|e| FileError::internal(format!("join error: {e}")))?
 }
 
+fn write_inner(
+    project_root: &str,
+    relative_path: &str,
+    content: &str,
+    encoding: TextEncoding,
+) -> Result<(), FileError> {
+    let target = resolve_in_root(Path::new(project_root), Path::new(relative_path))?;
+
+    let meta =
+        std::fs::metadata(&target).map_err(|e| FileError::internal(format!("stat failed: {e}")))?;
+    if !meta.is_file() {
+        return Err(FileError::invalid_path("path is not a regular file"));
+    }
+
+    // Reapply the BOM the reader stripped so files round-trip byte-for-byte
+    // for users on tools that look for it (Windows Notepad, some PowerShell
+    // pipelines).
+    let mut bytes: Vec<u8> = Vec::with_capacity(content.len() + 3);
+    if matches!(encoding, TextEncoding::Utf8Bom) {
+        bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    }
+    bytes.extend_from_slice(content.as_bytes());
+
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(FileError::too_large(bytes.len() as u64));
+    }
+
+    // Atomic write: a sibling temp file in the same directory keeps the
+    // rename on the same filesystem, then `rename` swaps it in. A crash
+    // between `write` and `rename` leaves the original file untouched.
+    // PID + nanos in the suffix avoids clashes when two saves race on the
+    // same file (the second save's rename simply overwrites the first).
+    let parent = target
+        .parent()
+        .ok_or_else(|| FileError::invalid_path("cannot resolve parent directory of target"))?;
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| FileError::invalid_path("target path has no valid filename component"))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let tmp = parent.join(format!(".{file_name}.tmp.{pid}.{nanos}"));
+
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(FileError::internal(format!("write failed: {e}")));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(FileError::internal(format!("rename failed: {e}")));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn write_text_file(
+    project_root: String,
+    relative_path: String,
+    content: String,
+    encoding: TextEncoding,
+) -> Result<(), FileError> {
+    tokio::task::spawn_blocking(move || {
+        write_inner(&project_root, &relative_path, &content, encoding)
+    })
+    .await
+    .map_err(|e| FileError::internal(format!("join error: {e}")))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,5 +455,96 @@ mod tests {
         let dir = tempdir().unwrap();
         let err = read_inner(dir.path().to_str().unwrap(), "nope.txt").unwrap_err();
         assert!(matches!(err, FileError::NotFound { .. }));
+    }
+
+    #[test]
+    fn write_round_trips_utf8() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("hello.txt");
+        fs::write(&path, "old\n").unwrap();
+
+        write_inner(
+            dir.path().to_str().unwrap(),
+            "hello.txt",
+            "fresh content\n",
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+
+        let on_disk = fs::read(&path).unwrap();
+        assert_eq!(on_disk, b"fresh content\n");
+    }
+
+    #[test]
+    fn write_reapplies_bom() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bom.txt");
+        fs::write(&path, "seed").unwrap();
+
+        write_inner(
+            dir.path().to_str().unwrap(),
+            "bom.txt",
+            "with bom\n",
+            TextEncoding::Utf8Bom,
+        )
+        .unwrap();
+
+        let on_disk = fs::read(&path).unwrap();
+        let expected: Vec<u8> = [0xEF, 0xBB, 0xBF]
+            .iter()
+            .copied()
+            .chain(b"with bom\n".iter().copied())
+            .collect();
+        assert_eq!(on_disk, expected);
+    }
+
+    #[test]
+    fn write_rejects_path_outside_root() {
+        let outer = tempdir().unwrap();
+        let inner = tempdir().unwrap();
+        let escape_target = outer.path().join("secret.txt");
+        fs::write(&escape_target, "shhh").unwrap();
+
+        let relative = PathBuf::from("..")
+            .join(outer.path().file_name().unwrap())
+            .join("secret.txt");
+
+        let err = write_inner(
+            inner.path().to_str().unwrap(),
+            relative.to_str().unwrap(),
+            "pwned",
+            TextEncoding::Utf8,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, FileError::OutOfScope { .. }));
+        // Original file must be untouched.
+        assert_eq!(fs::read(&escape_target).unwrap(), b"shhh");
+    }
+
+    #[test]
+    fn write_atomic_leaves_no_tmp_on_success() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        fs::write(&path, "before").unwrap();
+
+        write_inner(
+            dir.path().to_str().unwrap(),
+            "file.txt",
+            "after",
+            TextEncoding::Utf8,
+        )
+        .unwrap();
+
+        let leftover = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with(".file.txt.tmp."))
+                    .unwrap_or(false)
+            });
+        assert!(!leftover, "temp file should be renamed away on success");
     }
 }

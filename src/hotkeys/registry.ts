@@ -69,6 +69,12 @@ const DEFAULT_ACTIONS: HotkeyAction[] = [
     binding: { modifiers: ["mod", "shift"], key: "\\" },
   },
   { id: "close-pane", label: "Close pane", binding: { modifiers: ["mod"], key: "w" } },
+  // T13.4 — `save-file` is the editor save accelerator. On macOS the
+  // native menu accelerator (Cmd+S) drives the menu event; on Windows
+  // the WindowsAppMenu picks up the same registry binding. EditorWorkspace
+  // listens for the dispatched menu action and only triggers a save when
+  // the editor tab is the active workspace tab.
+  { id: "save-file", label: "Save file", binding: { modifiers: ["mod"], key: "s" } },
   { id: "quick-switcher", label: "Quick switcher", binding: { modifiers: ["mod"], key: "k" } },
   {
     id: "find-in-terminal",

@@ -82,6 +82,8 @@ import {
   paneNode,
   remapSessionIds,
   type LayoutNode,
+  type PaneNode,
+  type SplitDirection,
 } from "../../types/layout";
 import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "../../db/sessions";
 import type { LayoutPersister } from "../../db/sessions";
@@ -117,6 +119,41 @@ const defaultShellArgs = (): string[] => {
   if (isWindows) return [];
   return ["-l"];
 };
+
+// Pick the pane + split direction for the next PlanFlow-Start spawn so the
+// resulting layout tiles into a 2×2 grid as starts accumulate. Returns
+// `null` when the layout doesn't look like a partial grid (4+ panes or a
+// shape the user has manually reorganised) — caller falls back to
+// splitting the focused pane vertically.
+//
+// Expected grid shapes by step:
+//   1 pane :  Pane(s1)                                       → next: split s1 'h'
+//   2 panes:  Split(h, s1, s2)                               → next: split s1 'v'
+//   3 panes:  Split(h, Split(v, s1, s3), s2)                 → next: split s2 'v'
+//   4 panes:  Split(h, Split(v, s1, s3), Split(v, s2, s4))   → grid full
+//
+// `collectPanes` walks the tree left-first, so the leftmost-leaf ordering
+// `[s1]`, `[s1, s2]`, `[s1, s3, s2]` matches the shapes above and lets us
+// pick the target by index alone.
+function pickGridSplitTarget(
+  layout: LayoutNode,
+  focusedSessionId: string | null,
+): { sessionId: string; direction: SplitDirection } | null {
+  const panes: PaneNode[] = collectPanes(layout);
+  if (panes.length === 1 && panes[0]) {
+    return { sessionId: panes[0].sessionId, direction: "h" };
+  }
+  if (panes.length === 2 && panes[0]) {
+    return { sessionId: panes[0].sessionId, direction: "v" };
+  }
+  if (panes.length === 3 && panes[2]) {
+    return { sessionId: panes[2].sessionId, direction: "v" };
+  }
+  if (focusedSessionId !== null) {
+    return { sessionId: focusedSessionId, direction: "v" };
+  }
+  return null;
+}
 
 export function AppRoot(): JSX.Element {
   const [boot, setBoot] = createSignal<BootState>({ kind: "loading" });
@@ -766,11 +803,14 @@ export function AppRoot(): JSX.Element {
 
   // Run `planflow_task_start(taskId: …)` against the project. Always spawn
   // a fresh CLI pane with the prompt queued as a startup command — never
-  // type into an existing CLI pane. Each Start press gets its own terminal
-  // so prior task sessions stay intact and side-by-side comparison is
-  // possible. When the project already has a layout, the new pane lands
-  // as a vertical split next to the focused pane; otherwise it becomes
-  // the first pane in an empty layout.
+  // type into an existing CLI pane. Each Start press gets its own terminal,
+  // tiled into a 2×2 grid as starts accumulate:
+  //   1st Start (empty layout) → single pane, full size.
+  //   2nd Start              → side-by-side with the 1st (top row).
+  //   3rd Start              → below the 1st (bottom-left).
+  //   4th Start              → below the 2nd (bottom-right) → grid complete.
+  //   5th+ Start             → fall back to splitting the focused pane
+  //                            vertically; the user can rearrange manually.
   const startTaskCliLauncher = async (projectId: string, taskId: string): Promise<void> => {
     const prompt = formatPlanFlowStartPrompt(taskId);
     const ws = getWorkspace(projectId);
@@ -779,16 +819,19 @@ export function AppRoot(): JSX.Element {
     if (!cli) return;
     const sessionId = await spawnCli(projectId, cli, [prompt]);
     trackSession(projectId, sessionId);
-    if (focused !== null && ws?.layout) {
-      splitPane(projectId, focused, "v", sessionId);
-      const layoutNow = getWorkspace(projectId)?.layout;
-      const attached =
-        layoutNow != null && collectPanes(layoutNow).some((pane) => pane.sessionId === sessionId);
-      if (!attached) {
-        await ptyKill(sessionId);
-        untrackSession(projectId, sessionId);
+    if (ws?.layout) {
+      const target = pickGridSplitTarget(ws.layout, focused);
+      if (target !== null) {
+        splitPane(projectId, target.sessionId, target.direction, sessionId);
+        const layoutNow = getWorkspace(projectId)?.layout;
+        const attached =
+          layoutNow != null && collectPanes(layoutNow).some((pane) => pane.sessionId === sessionId);
+        if (!attached) {
+          await ptyKill(sessionId);
+          untrackSession(projectId, sessionId);
+        }
+        return;
       }
-      return;
     }
     setLayout(projectId, paneNode(sessionId));
     setFocusedSession(projectId, sessionId);
@@ -975,6 +1018,7 @@ export function AppRoot(): JSX.Element {
               hasInstallUrl={(cliName) => cliName in CLI_INSTALL_URLS}
               onWorkspaceTabChange={handleWorkspaceTabChange}
               onOpenSettings={() => setSettingsOpen(true)}
+              resolveProjectPath={(id) => projectPaths[id] ?? null}
             />
           </Match>
         </Switch>

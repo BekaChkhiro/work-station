@@ -55,6 +55,11 @@ const IntegrationStatusSchema = z.record(
 // reassuring the user that tokens never leave the device. Once dismissed
 // we don't show it again — toggled back on by clearing the flag.
 const IntegrationsIntroDismissedSchema = z.boolean();
+// T13.4 — debounced auto-save delay in milliseconds for the editor. `0`
+// disables auto-save entirely (default); any positive value enables it and
+// is treated as the debounce window after the last keystroke. Capped at
+// 60s so a typo in the settings UI can't push saves into the next year.
+const EditorAutosaveMsSchema = z.number().int().min(0).max(60_000);
 
 interface SettingDef<T> {
   schema: z.ZodType<T>;
@@ -79,6 +84,7 @@ export const SETTINGS = {
   ui_font_size: def(UiFontSizeSchema, 13),
   integration_status: def(IntegrationStatusSchema, {} as z.infer<typeof IntegrationStatusSchema>),
   integrations_intro_dismissed: def(IntegrationsIntroDismissedSchema, false),
+  editor_autosave_ms: def(EditorAutosaveMsSchema, 0),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;

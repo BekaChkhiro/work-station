@@ -8,6 +8,7 @@ export type MenuActionId =
   | "new-project"
   | "new-terminal"
   | "close-pane"
+  | "save-file"
   | "open-settings"
   | "copy"
   | "paste"
@@ -46,6 +47,8 @@ export const APP_MENU: readonly MenuSection[] = [
       { id: "new-project", label: "New project", hotkeyId: "add-project" },
       { id: "new-terminal", label: "New terminal", hotkeyId: "new-tab" },
       { id: "close-pane", label: "Close pane", hotkeyId: "close-pane" },
+      "separator",
+      { id: "save-file", label: "Save file", hotkeyId: "save-file" },
       "separator",
       { id: "open-settings", label: "Settings", hotkeyId: "open-settings" },
       "separator",

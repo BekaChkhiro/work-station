@@ -41,7 +41,18 @@ const ProjectWorkspaceTabsSchema = z
       seen.add(k);
       out.push(k);
     }
-    if (!seen.has("terminal")) out.unshift("terminal");
+    // Terminal + Editor are core tabs and always visible — rows persisted
+    // before T13.1 only stored ["terminal"], so backfill editor here so the
+    // Monaco scratch buffer is reachable in legacy projects without a
+    // manual reset. Mirrors the same guarantee in WorkspaceTabsSchema.
+    if (!seen.has("terminal")) {
+      out.unshift("terminal");
+      seen.add("terminal");
+    }
+    if (!seen.has("editor")) {
+      const terminalIdx = out.indexOf("terminal");
+      out.splice(terminalIdx + 1, 0, "editor");
+    }
     return out;
   });
 

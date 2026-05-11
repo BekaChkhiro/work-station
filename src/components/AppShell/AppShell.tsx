@@ -22,7 +22,12 @@ import type { JSX } from "solid-js";
 import { FileTree } from "../FileTree";
 import { LayoutTree } from "../LayoutTree";
 import { MonacoEditor } from "../MonacoEditor";
-import { readTextFile, type ReadFileResult } from "../../ipc/files";
+import {
+  readTextFile,
+  writeTextFile,
+  type ReadFileResult,
+  type TextEncoding,
+} from "../../ipc/files";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import type { CliMeta } from "../../types/tab";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
@@ -32,6 +37,7 @@ import { IntegrationTabPlaceholder, WorkspaceTabStrip } from "../WorkspaceTabStr
 import { IntegrationReauthBanner } from "../IntegrationReauthBanner";
 import { PlanFlowTaskList } from "../PlanFlowTaskList";
 import { editorScratch, setEditorScratch } from "../../stores/editorScratch";
+import { editorAutosaveMs } from "../../stores/editorAutosave";
 import { hydrateReauthState, reauthSnapshot } from "../../integrations";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
 import type { LayoutPath } from "../../types/layout";
@@ -493,7 +499,7 @@ function ProjectTerminalEmptyState(props: ProjectTerminalEmptyStateProps): JSX.E
 }
 
 /**
- * T13.2 — editor tab body: [file tree | Monaco editor].
+ * T13.2 / T13.4 — editor tab body: [file tree | Monaco editor].
  *
  * Layout splits side-by-side: a fixed-width file tree on the left, the
  * editor filling the rest. The tree is hidden when the project root is
@@ -502,9 +508,24 @@ function ProjectTerminalEmptyState(props: ProjectTerminalEmptyStateProps): JSX.E
  *
  * Buffer state machine:
  *   • no selection      → editable scratch buffer (per-project store)
- *   • file loaded       → readOnly view of the file's content
+ *   • text file         → editable buffer with a `baseline` snapshot of
+ *                          last-known disk content; dirty = content ≠ baseline
  *   • binary file       → readOnly placeholder explaining why
  *   • read error        → readOnly placeholder showing the error message
+ *   • saving            → marker on the text variant suppresses redundant
+ *                          concurrent saves; the in-flight write keeps the
+ *                          editor responsive (no UI lock)
+ *
+ * Save flow (T13.4):
+ *   • Cmd/Ctrl+S routes through the `save-file` menu action — the menu
+ *     bridge fires whether focus is on the editor, the file tree, or the
+ *     header bar, so the accelerator works anywhere inside the tab.
+ *   • Optional debounced auto-save: when `editor_autosave_ms > 0`, every
+ *     keystroke restarts a timer; expiry triggers a save iff the buffer is
+ *     dirty and not already saving. Default is `0` (off) so we never
+ *     silently rewrite a file the user didn't ask us to.
+ *   • Successful saves update `baseline` to the just-saved string, which
+ *     clears the dirty indicator without re-reading from disk.
  *
  * The selection is local to this view (signal), not persisted. Multi-
  * tab persistence is T13.6.
@@ -512,7 +533,16 @@ function ProjectTerminalEmptyState(props: ProjectTerminalEmptyStateProps): JSX.E
 function EditorWorkspace(props: { projectId: string; projectPath: string | null }): JSX.Element {
   type OpenedFile =
     | { kind: "loading"; path: string }
-    | { kind: "text"; path: string; content: string }
+    | {
+        kind: "text";
+        path: string;
+        relative: string;
+        content: string;
+        baseline: string;
+        encoding: TextEncoding;
+        saving: boolean;
+        lastError: string | null;
+      }
     | { kind: "binary"; path: string; reason: string }
     | { kind: "error"; path: string; message: string };
 
@@ -522,22 +552,44 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
   // read on /readme.md should land readme's content in the editor — not
   // big.txt's content arriving later and overwriting it.
   let openSeq = 0;
+  // Per-open auto-save timer. Cleared on every keystroke (and on tab/file
+  // change) so we only ever have one pending save in flight.
+  let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearAutosaveTimer = (): void => {
+    if (autosaveTimer !== null) {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = null;
+    }
+  };
+
+  const toRelative = (root: string, absPath: string): string => {
+    if (absPath.startsWith(`${root}/`)) return absPath.slice(root.length + 1);
+    if (absPath.startsWith(`${root}\\`)) return absPath.slice(root.length + 1);
+    return absPath;
+  };
 
   const handleSelect = async (absPath: string): Promise<void> => {
     const root = props.projectPath;
     if (root === null) return;
-    const relative = absPath.startsWith(`${root}/`)
-      ? absPath.slice(root.length + 1)
-      : absPath.startsWith(`${root}\\`)
-        ? absPath.slice(root.length + 1)
-        : absPath;
+    const relative = toRelative(root, absPath);
     const myToken = ++openSeq;
+    clearAutosaveTimer();
     setOpened({ kind: "loading", path: absPath });
     try {
       const result: ReadFileResult = await readTextFile(root, relative);
       if (myToken !== openSeq) return;
       if (result.kind === "text") {
-        setOpened({ kind: "text", path: absPath, content: result.content });
+        setOpened({
+          kind: "text",
+          path: absPath,
+          relative,
+          content: result.content,
+          baseline: result.content,
+          encoding: result.encoding,
+          saving: false,
+          lastError: null,
+        });
       } else {
         const reason =
           result.reason === "nul-byte"
@@ -561,13 +613,106 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
     return `// ${o.path}\n//\n// Could not open file: ${o.message}`;
   };
 
-  const isReadOnly = (): boolean => opened() !== null;
+  // Only "text" and `null` (scratch) buffers are editable. Loading, binary
+  // and error variants render their placeholder text read-only so the user
+  // can't accidentally clobber unloaded state.
+  const isReadOnly = (): boolean => {
+    const o = opened();
+    return o !== null && o.kind !== "text";
+  };
+
+  const isDirty = (): boolean => {
+    const o = opened();
+    return o?.kind === "text" && o.content !== o.baseline;
+  };
+
+  const fileLabel = (): string | null => {
+    const o = opened();
+    if (o === null) return null;
+    const path = o.path;
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return slash === -1 ? path : path.slice(slash + 1);
+  };
+
+  const saveStatus = (): "idle" | "saving" | "dirty" | "error" => {
+    const o = opened();
+    if (o?.kind !== "text") return "idle";
+    if (o.saving) return "saving";
+    if (o.lastError !== null) return "error";
+    return isDirty() ? "dirty" : "idle";
+  };
+
+  const performSave = async (): Promise<void> => {
+    const root = props.projectPath;
+    if (root === null) return;
+    const current = opened();
+    if (current?.kind !== "text") return;
+    if (current.saving) return;
+    if (current.content === current.baseline) return;
+
+    const snapshot = current.content;
+    const targetPath = current.path;
+    setOpened({ ...current, saving: true, lastError: null });
+    try {
+      await writeTextFile(root, current.relative, snapshot, current.encoding);
+      // Reconcile against `opened()` rather than `current`: the user may
+      // have kept typing during the await. Updating `baseline` to the just-
+      // saved snapshot leaves the live `content` intact, so the dirty flag
+      // continues to reflect "what's in the buffer vs. what's on disk".
+      setOpened((prev) =>
+        prev?.kind === "text" && prev.path === targetPath
+          ? { ...prev, baseline: snapshot, saving: false, lastError: null }
+          : prev,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setOpened((prev) =>
+        prev?.kind === "text" && prev.path === targetPath
+          ? { ...prev, saving: false, lastError: message }
+          : prev,
+      );
+      console.warn("[editor] save failed", err);
+    }
+  };
 
   const handleEditorChange = (v: string): void => {
-    // Only the scratch buffer is editable; file buffers are read-only
-    // until T13.4 lands save support.
-    if (opened() === null) setEditorScratch(props.projectId, v);
+    const o = opened();
+    if (o === null) {
+      setEditorScratch(props.projectId, v);
+      return;
+    }
+    if (o.kind !== "text") return;
+    setOpened({ ...o, content: v, lastError: null });
+    // Restart the debounce window on every keystroke. The guard against
+    // saving === true falls out of `performSave` itself; we just want to
+    // avoid scheduling pointless timers when auto-save is disabled.
+    clearAutosaveTimer();
+    const delay = editorAutosaveMs();
+    if (delay > 0) {
+      autosaveTimer = setTimeout(() => {
+        autosaveTimer = null;
+        void performSave();
+      }, delay);
+    }
   };
+
+  // T13.4 — Cmd/Ctrl+S bridge. The native menu (macOS) and WindowsAppMenu
+  // both emit `save-file`; document-level keyboard listeners (T8.x) translate
+  // the keystroke into the same event when no menu is mounted. Only fire
+  // when the editor tab is the active workspace tab so the accelerator
+  // doesn't try to save while focus is on, say, a Terminal pane.
+  onMount(() => {
+    const dispose = addMenuActionListener((id) => {
+      if (id !== "save-file") return;
+      if (activeTab(props.projectId) !== "editor") return;
+      if (activeProjectId() !== props.projectId) return;
+      void performSave();
+    });
+    onCleanup(() => {
+      clearAutosaveTimer();
+      dispose();
+    });
+  });
 
   return (
     <div class="ws-editor-tab flex min-h-0 flex-1">
@@ -582,8 +727,46 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
           </aside>
         )}
       </Show>
-      <div class="ws-editor-tab__editor min-h-0 flex-1">
-        <MonacoEditor value={editorValue()} readOnly={isReadOnly()} onChange={handleEditorChange} />
+      <div class="ws-editor-tab__editor min-h-0 flex-1 flex flex-col">
+        <Show when={fileLabel()}>
+          {(label) => (
+            <div
+              class="ws-editor-tab__header"
+              role="toolbar"
+              aria-label="Editor status"
+              data-status={saveStatus()}
+            >
+              <span class="ws-editor-tab__header-filename" title={opened()?.path ?? undefined}>
+                <Show when={isDirty()}>
+                  <span class="ws-editor-tab__dirty-dot" aria-label="Unsaved changes" />
+                </Show>
+                {label()}
+              </span>
+              <Show when={saveStatus() === "saving"}>
+                <span class="ws-editor-tab__header-status">Saving…</span>
+              </Show>
+              <Show when={saveStatus() === "error"}>
+                {(_) => {
+                  const o = opened();
+                  const err = o?.kind === "text" ? o.lastError : null;
+                  return (
+                    <span class="ws-editor-tab__header-status ws-editor-tab__header-status--error">
+                      Save failed{err ? `: ${err}` : ""}
+                    </span>
+                  );
+                }}
+              </Show>
+            </div>
+          )}
+        </Show>
+        <div class="min-h-0 flex-1">
+          <MonacoEditor
+            value={editorValue()}
+            path={opened()?.path ?? undefined}
+            readOnly={isReadOnly()}
+            onChange={handleEditorChange}
+          />
+        </div>
       </div>
     </div>
   );

@@ -48,10 +48,11 @@ export const WORKSPACE_TAB_META: Readonly<Record<WorkspaceTabKind, WorkspaceTabM
   railway: { kind: "railway", label: "Railway", category: "integration" },
 };
 
-/** The Terminal tab is the only default-visible kind for a new project.
- *  Editor + integration tabs surface explicitly: Editor when the user opens a
- *  file (T13.x) and integrations once linked (T11.5). */
-export const DEFAULT_VISIBLE_TABS: readonly WorkspaceTabKind[] = ["terminal"];
+/** Terminal + Editor are the core tabs and ship visible by default.
+ *  Editor mounts a Monaco instance (T13.1) so the user can scratch-edit
+ *  before file open lands in T13.3. Integration tabs surface only after
+ *  the matching service is linked (T11.5). */
+export const DEFAULT_VISIBLE_TABS: readonly WorkspaceTabKind[] = ["terminal", "editor"];
 
 export const DEFAULT_ACTIVE_TAB: WorkspaceTabKind = "terminal";
 
@@ -67,8 +68,16 @@ export const WorkspaceTabsSchema = z.array(WorkspaceTabKindSchema).transform((ki
     seen.add(kind);
     out.push(kind);
   }
-  // Terminal is always visible — a row that somehow lost it gets it back.
-  if (!seen.has("terminal")) out.unshift("terminal");
+  // Terminal + Editor are always visible — rows that somehow lost them get
+  // them back. Terminal stays first; Editor slots in right after.
+  if (!seen.has("terminal")) {
+    out.unshift("terminal");
+    seen.add("terminal");
+  }
+  if (!seen.has("editor")) {
+    const terminalIdx = out.indexOf("terminal");
+    out.splice(terminalIdx + 1, 0, "editor");
+  }
   return out;
 });
 
