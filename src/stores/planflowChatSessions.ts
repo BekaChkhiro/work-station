@@ -1,76 +1,71 @@
-// Module-level registry of PlanFlow chat PTY sessions, keyed by
-// workspace projectId. Lifts the session out of the PlanFlowChat
-// component so it survives:
-//   * panel collapse / expand (the xterm renderer unmounts but the
-//     underlying PTY stays running so the assistant can keep working)
-//   * project switches (the chat panel for project A keeps its
-//     session alive while the user looks at project B)
+// Module-level registry of PlanFlow chat PTY sessions, keyed by chat
+// session row id (NOT projectId — each project can have many chat
+// tabs running concurrently). Lifts the live PTY out of the
+// PlanFlowChat component so it survives:
+//   * tab switches inside the panel (other tabs' PTYs keep running)
+//   * panel collapse / expand
+//   * project switches
 //   * component remounts (HMR, route changes, etc.)
 //
-// The session is only torn down when:
-//   * the user explicitly hits "Close session" in the chat header
-//   * the user picks a different CLI in the dropdown (we kill the old
-//     one before spawning the new one)
-//   * the app shuts down — handled by AppRoot's cleanup hook
+// The PTY is torn down when:
+//   * the user hits ⏹ on the active tab — kills that one session
+//   * the user closes the tab — kills + removes the session row
+//   * the user changes the tab's CLI in the dropdown — old PTY killed
+//   * the app shuts down — AppRoot's cleanup hook
 //
 // Each entry holds the PTY sessionId + the CLI it was spawned with so
-// we can tell "session belongs to claude" from "session belongs to
-// kimi" without re-querying the backend.
+// the panel's "this tab is running claude vs kimi" state is canonical
+// from one place rather than scattered across component signals.
 
 import { createSignal } from "solid-js";
 
 import { ptyKill } from "../ipc/pty";
 
-export interface PlanflowChatSession {
+export interface PlanflowChatRuntime {
   sessionId: string;
   cliId: string;
+  /** Which project this PTY belongs to. Persisted alongside the
+   *  session row in the DB; cached here so AppRoot's cleanup can group
+   *  reports per project if it ever wants to. */
+  projectId: string;
 }
 
-const [sessionsByProject, setSessionsByProject] = createSignal<Record<string, PlanflowChatSession>>(
-  {},
-);
+const [runtimes, setRuntimes] = createSignal<Record<string, PlanflowChatRuntime>>({});
 
-/** Reactive accessor for a project's active chat session. Returns
- *  `null` when no session has been spawned yet (or after the user
- *  closed it). The reactive read lets the chat panel re-render the
- *  Terminal pane the instant a fresh sessionId lands. */
-export function planflowChatSession(projectId: string): PlanflowChatSession | null {
-  return sessionsByProject()[projectId] ?? null;
+/** Reactive: PTY runtime for the chat session row. Returns `null`
+ *  when the tab hasn't been spawned yet (cold state after app
+ *  restart) or after the user closed the session. */
+export function planflowChatRuntime(rowId: string): PlanflowChatRuntime | null {
+  return runtimes()[rowId] ?? null;
 }
 
-/** Replace a project's session record. Use this from the spawn flow
- *  in PlanFlowChat once `ptySpawn` returns. */
-export function setPlanflowChatSession(projectId: string, session: PlanflowChatSession): void {
-  setSessionsByProject((prev) => ({ ...prev, [projectId]: session }));
+export function setPlanflowChatRuntime(rowId: string, runtime: PlanflowChatRuntime): void {
+  setRuntimes((prev) => ({ ...prev, [rowId]: runtime }));
 }
 
-/** Tear down the project's PTY (best-effort) and forget the entry.
- *  Used by the user-facing "Close session" action and by the CLI-swap
- *  flow. Safe to call when no session exists. */
-export async function closePlanflowChatSession(projectId: string): Promise<void> {
-  const session = sessionsByProject()[projectId];
-  setSessionsByProject((prev) => {
-    if (!(projectId in prev)) return prev;
-    // Build the next record without the removed key — explicit
-    // destructure avoids the no-dynamic-delete lint without changing
-    // semantics.
-    const { [projectId]: _removed, ...rest } = prev;
+/** Best-effort tear-down: kills the PTY for `rowId` if one is tracked,
+ *  removes the registry entry. Safe to call when nothing is tracked. */
+export async function closePlanflowChatRuntime(rowId: string): Promise<void> {
+  const runtime = runtimes()[rowId];
+  setRuntimes((prev) => {
+    if (!(rowId in prev)) return prev;
+    const { [rowId]: _removed, ...rest } = prev;
     void _removed;
     return rest;
   });
-  if (session) {
+  if (runtime) {
     try {
-      await ptyKill(session.sessionId);
+      await ptyKill(runtime.sessionId);
     } catch {
-      // Backend already logs the failed kill; nothing the UI can do.
+      // Backend logs the failure; nothing for the UI to surface.
     }
   }
 }
 
-/** Tear down EVERY tracked session. Called from AppRoot's cleanup so
- *  closing the window leaves no orphaned CLI processes. */
-export async function closeAllPlanflowChatSessions(): Promise<void> {
-  const map = sessionsByProject();
-  setSessionsByProject({});
-  await Promise.allSettled(Object.values(map).map((session) => ptyKill(session.sessionId)));
+/** Tear down every tracked runtime. Called from AppRoot's cleanup so
+ *  the window closing leaves no orphaned CLI processes. */
+export async function closeAllPlanflowChatRuntimes(): Promise<void> {
+  const map = runtimes();
+  setRuntimes({});
+  await Promise.allSettled(Object.values(map).map((runtime) => ptyKill(runtime.sessionId)));
 }

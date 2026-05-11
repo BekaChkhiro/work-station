@@ -76,6 +76,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "create planflow_chats table",
         sql: include_str!("../../migrations/0009_planflow_chats.sql"),
     },
+    Migration {
+        version: 10,
+        name: "create planflow_chat_sessions table",
+        sql: include_str!("../../migrations/0010_planflow_chat_sessions.sql"),
+    },
 ];
 
 #[derive(Debug, thiserror::Error)]

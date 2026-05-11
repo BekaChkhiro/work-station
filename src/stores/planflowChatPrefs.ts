@@ -18,9 +18,11 @@ const DEFAULT_PANEL: ChatPanelState = "collapsed";
 
 const cliKey = (projectId: string): string => `planflow_chat_cli:${projectId}`;
 const panelKey = (projectId: string): string => `planflow_chat_panel:${projectId}`;
+const activeKey = (projectId: string): string => `planflow_chat_active:${projectId}`;
 
 const [cliByProject, setCliByProject] = createSignal<Record<string, string | null>>({});
 const [panelByProject, setPanelByProject] = createSignal<Record<string, ChatPanelState>>({});
+const [activeByProject, setActiveByProject] = createSignal<Record<string, string | null>>({});
 const [hydrated, setHydrated] = createSignal<Record<string, boolean>>({});
 
 function isPanelState(value: unknown): value is ChatPanelState {
@@ -53,6 +55,7 @@ export function hydrateChatPrefs(projectId: string): void {
   if (hydrated()[projectId]) return;
   const cliRaw = readLocal(cliKey(projectId));
   const panelRaw = readLocal(panelKey(projectId));
+  const activeRaw = readLocal(activeKey(projectId));
   batch(() => {
     setCliByProject((prev) => ({
       ...prev,
@@ -61,6 +64,10 @@ export function hydrateChatPrefs(projectId: string): void {
     setPanelByProject((prev) => ({
       ...prev,
       [projectId]: isPanelState(panelRaw) ? panelRaw : DEFAULT_PANEL,
+    }));
+    setActiveByProject((prev) => ({
+      ...prev,
+      [projectId]: activeRaw != null && activeRaw.length > 0 ? activeRaw : null,
     }));
     setHydrated((prev) => ({ ...prev, [projectId]: true }));
   });
@@ -86,4 +93,16 @@ export function setChatCli(projectId: string, cli: string | null): void {
 export function setChatPanel(projectId: string, panel: ChatPanelState): void {
   setPanelByProject((prev) => ({ ...prev, [projectId]: panel }));
   writeLocal(panelKey(projectId), panel);
+}
+
+/** Reactive accessor: which chat session row is currently focused
+ *  inside the panel for `projectId`. `null` when the user hasn't
+ *  picked one yet (or after the active one was closed). */
+export function chatActiveSessionId(projectId: string): string | null {
+  return activeByProject()[projectId] ?? null;
+}
+
+export function setChatActiveSessionId(projectId: string, rowId: string | null): void {
+  setActiveByProject((prev) => ({ ...prev, [projectId]: rowId }));
+  writeLocal(activeKey(projectId), rowId ?? "");
 }
