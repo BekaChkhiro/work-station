@@ -15,7 +15,7 @@
 // `ws-workspace-tabs` modifier so the workspace-level strip can diverge
 // visually later without rewriting the per-terminal strip.
 
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { Tooltip } from "../Tooltip";
 import { WORKSPACE_TAB_META, type WorkspaceTabKind } from "../../types/workspaceTab";
@@ -27,10 +27,18 @@ export interface WorkspaceTabStripProps {
   /** Currently active tab kind. Must be one of `tabs` — out-of-list values
    *  render with no active highlight. */
   activeKind: WorkspaceTabKind;
+  /** T12.4: short text shown as a pill next to a tab's label. Used to
+   *  surface the in-progress PlanFlow task ID ("T12.4") while the user
+   *  holds the lock. Absent / empty entries render no pill. */
+  tabBadges?: Partial<Record<WorkspaceTabKind, string>>;
   onActivate(kind: WorkspaceTabKind): void;
 }
 
 export function WorkspaceTabStrip(props: WorkspaceTabStripProps): JSX.Element {
+  const badgeFor = (kind: WorkspaceTabKind): string | null => {
+    const value = props.tabBadges?.[kind];
+    return value && value.length > 0 ? value : null;
+  };
   return (
     <div class="ws-workspace-tabs" role="tablist" aria-label="Workspace views">
       <div class="ws-workspace-tabs__scroll">
@@ -38,8 +46,13 @@ export function WorkspaceTabStrip(props: WorkspaceTabStripProps): JSX.Element {
           {(kind) => {
             const meta = WORKSPACE_TAB_META[kind];
             const isActive = (): boolean => props.activeKind === kind;
+            const badge = (): string | null => badgeFor(kind);
+            const tooltipLabel = (): string => {
+              const b = badge();
+              return b ? `${meta.label} — ${b} in progress` : meta.label;
+            };
             return (
-              <Tooltip label={meta.label}>
+              <Tooltip label={tooltipLabel()}>
                 <button
                   type="button"
                   role="tab"
@@ -47,11 +60,19 @@ export function WorkspaceTabStrip(props: WorkspaceTabStripProps): JSX.Element {
                   data-active={isActive() ? "true" : undefined}
                   data-kind={meta.kind}
                   data-category={meta.category}
+                  data-has-badge={badge() ? "true" : undefined}
                   aria-selected={isActive()}
                   tabIndex={isActive() ? 0 : -1}
                   onClick={() => props.onActivate(kind)}
                 >
                   <span class="ws-workspace-tabs__label">{meta.label}</span>
+                  <Show when={badge()}>
+                    {(text) => (
+                      <span class="ws-workspace-tabs__badge" aria-label={`${text()} in progress`}>
+                        {text()}
+                      </span>
+                    )}
+                  </Show>
                 </button>
               </Tooltip>
             );

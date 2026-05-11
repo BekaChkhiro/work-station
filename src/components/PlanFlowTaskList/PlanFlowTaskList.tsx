@@ -31,22 +31,42 @@
 // (it only mounts when expanded), and stick to plain `<For />` so each
 // row keys by `task.id` — no virtualisation needed at this scale.
 
-import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  createMemo,
+  createResource,
+  createSignal,
+  onMount,
+} from "solid-js";
 import type { JSX, Resource } from "solid-js";
 
 import { EmptyState, ErrorCard, SkeletonRows } from "../AsyncStates";
 import { Tooltip } from "../Tooltip";
+import { showToast } from "../Toast";
 import {
   createRendererPlanFlowClient,
   MissingPlanFlowTokenError,
   PlanFlowApiError,
   PlanFlowAuthError,
+  PlanFlowClient,
+  PlanFlowConflictError,
   PlanFlowParseError,
+  startTask,
   usePlanFlowLink,
+  type Me,
   type Task,
   type TaskComplexity,
   type TaskStatus,
 } from "../../integrations";
+import { activeTaskId } from "../../stores/activeTask";
+import { ActiveWorkPanel } from "./ActiveWorkPanel";
+import { ActivityFeed } from "./ActivityFeed";
+
+const ROW_FLASH_CLASS = "ws-pf-tasks__row--flash";
+const ROW_FLASH_DURATION_MS = 1400;
 
 const STATUS_ORDER: readonly TaskStatus[] = ["TODO", "IN_PROGRESS", "BLOCKED", "DONE"];
 
@@ -76,6 +96,7 @@ export interface PlanFlowTaskListProps {
 export function PlanFlowTaskList(props: PlanFlowTaskListProps): JSX.Element {
   const projectIdAccessor = (): string => props.projectId;
   const link = usePlanFlowLink(projectIdAccessor);
+  const workspaceProjectId = (): string => props.projectId;
 
   return (
     <div class="ws-pf-tasks" role="region" aria-label="PlanFlow tasks">
@@ -105,6 +126,7 @@ export function PlanFlowTaskList(props: PlanFlowTaskListProps): JSX.Element {
         >
           {(linked) => (
             <LinkedTaskList
+              workspaceProjectId={workspaceProjectId()}
               externalId={linked().externalId}
               onOpenSettings={props.onOpenSettings}
             />
@@ -116,8 +138,13 @@ export function PlanFlowTaskList(props: PlanFlowTaskListProps): JSX.Element {
 }
 
 interface LinkedTaskListProps {
+  workspaceProjectId: string;
   externalId: string;
   onOpenSettings?: () => void;
+}
+
+interface TaskListController {
+  jumpToTask: (taskId: string) => void;
 }
 
 function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
@@ -134,31 +161,72 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
     },
   );
 
+  // T12.4 — `Me` is needed once per view so the Start button can detect
+  // whether the lock is held by *us* (button label flips to "Resume",
+  // still actionable) or by another user (button disabled, tooltip names
+  // the holder). Best-effort: on failure we fall back to a conservative
+  // rule that disables Start whenever any lockedBy is set.
+  const [me] = createResource(
+    () => props.externalId,
+    async (): Promise<Me | null> => {
+      try {
+        return await client.getMe();
+      } catch {
+        return null;
+      }
+    },
+  );
+
   const retry = (): void => {
     setReloadKey((k) => k + 1);
     void refetch();
   };
 
+  let controller: TaskListController | null = null;
+  const bindController = (c: TaskListController): void => {
+    controller = c;
+  };
+  const jumpToTask = (taskId: string): void => {
+    controller?.jumpToTask(taskId);
+  };
+
   return (
-    <Switch>
-      <Match when={tasks.loading}>
-        <div class="ws-pf-tasks__loading">
-          <SkeletonRows rows={8} ariaLabel="Loading PlanFlow tasks" />
+    <div class="ws-pf-tasks__shell">
+      <div class="ws-pf-tasks__main">
+        <div class="ws-pf-tasks__body">
+          <Switch>
+            <Match when={tasks.loading}>
+              <div class="ws-pf-tasks__loading">
+                <SkeletonRows rows={8} ariaLabel="Loading PlanFlow tasks" />
+              </div>
+            </Match>
+            <Match when={tasks.error}>
+              <TaskFetchError
+                error={tasks.error as unknown}
+                onRetry={retry}
+                onOpenSettings={props.onOpenSettings}
+              />
+            </Match>
+            <Match when={tasks()}>
+              {(loaded) => (
+                <TaskListBody
+                  tasks={loaded()}
+                  onOpenSettings={props.onOpenSettings}
+                  onRetry={retry}
+                  bindController={bindController}
+                  client={client}
+                  workspaceProjectId={props.workspaceProjectId}
+                  externalId={props.externalId}
+                  me={me()}
+                />
+              )}
+            </Match>
+          </Switch>
         </div>
-      </Match>
-      <Match when={tasks.error}>
-        <TaskFetchError
-          error={tasks.error as unknown}
-          onRetry={retry}
-          onOpenSettings={props.onOpenSettings}
-        />
-      </Match>
-      <Match when={tasks()}>
-        {(loaded) => (
-          <TaskListBody tasks={loaded()} onOpenSettings={props.onOpenSettings} onRetry={retry} />
-        )}
-      </Match>
-    </Switch>
+        <ActiveWorkPanel externalId={props.externalId} onJumpToTask={jumpToTask} />
+      </div>
+      <ActivityFeed externalId={props.externalId} onJumpToTask={jumpToTask} />
+    </div>
   );
 }
 
@@ -222,12 +290,51 @@ interface TaskListBodyProps {
   tasks: readonly Task[];
   onOpenSettings?: () => void;
   onRetry: () => void;
+  bindController?: (controller: TaskListController) => void;
+  client: PlanFlowClient;
+  workspaceProjectId: string;
+  externalId: string;
+  me: Me | null | undefined;
 }
 
 function TaskListBody(props: TaskListBodyProps): JSX.Element {
   const [query, setQuery] = createSignal("");
   const [phase, setPhase] = createSignal<string | null>(null);
   const [doneExpanded, setDoneExpanded] = createSignal(false);
+
+  let scrollHostRef: HTMLDivElement | undefined;
+
+  const jumpToTask = (taskId: string): void => {
+    // Clearing filters here is intentional: an active worker on a task
+    // hidden by a phase/search filter should still surface when its row
+    // is clicked from the side rail — otherwise the click would feel
+    // dead. We also force-expand the DONE group in case the task has
+    // already been completed.
+    setQuery("");
+    setPhase(null);
+    setDoneExpanded(true);
+
+    const focusRow = (): void => {
+      const host = scrollHostRef;
+      if (!host) return;
+      const row = host.querySelector<HTMLElement>(`[data-task-id="${cssEscape(taskId)}"]`);
+      if (!row) return;
+      row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      row.classList.add(ROW_FLASH_CLASS);
+      window.setTimeout(() => {
+        row.classList.remove(ROW_FLASH_CLASS);
+      }, ROW_FLASH_DURATION_MS);
+    };
+
+    // Wait a frame so filter resets above commit to the DOM before we
+    // look up the row — otherwise the row may still be hidden behind a
+    // stale filter pass.
+    queueMicrotask(() => requestAnimationFrame(focusRow));
+  };
+
+  onMount(() => {
+    props.bindController?.({ jumpToTask });
+  });
 
   const phases = createMemo<readonly string[]>(() => {
     const seen = new Set<string>();
@@ -341,7 +448,7 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
           </Show>
         }
       >
-        <div class="ws-pf-tasks__groups">
+        <div class="ws-pf-tasks__groups" ref={scrollHostRef}>
           <For each={STATUS_ORDER}>
             {(status) => {
               const bucket = (): Task[] => grouped()[status];
@@ -380,7 +487,24 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
                     </button>
                     <Show when={expanded()}>
                       <ul class="ws-pf-tasks__rows" role="list">
-                        <For each={bucket()}>{(task) => <TaskRow task={task} />}</For>
+                        <For each={bucket()}>
+                          {(task) => (
+                            <TaskRow
+                              task={task}
+                              meUserId={props.me?.id ?? null}
+                              activeTaskId={activeTaskId(props.workspaceProjectId)}
+                              onStart={(t) =>
+                                void runStartTask(
+                                  props.client,
+                                  props.externalId,
+                                  props.workspaceProjectId,
+                                  t,
+                                  props.onRetry,
+                                )
+                              }
+                            />
+                          )}
+                        </For>
                       </ul>
                     </Show>
                   </section>
@@ -417,16 +541,37 @@ function PhaseChip(props: PhaseChipProps): JSX.Element {
 
 interface TaskRowProps {
   task: Task;
+  /** Current user id. `null` when `/me` failed — falls back to disabling
+   *  Start whenever *any* user (incl. self) holds the lock. */
+  meUserId: string | null;
+  /** Active in-progress task id for this project. Used to mark the row
+   *  when it matches `task.id` so the badge styling lights up. */
+  activeTaskId: string | null;
+  onStart: (task: Task) => void;
 }
 
 function TaskRow(props: TaskRowProps): JSX.Element {
   const depCount = (): number => props.task.dependencies?.length ?? 0;
   const complexity = (): TaskComplexity | null => props.task.complexity ?? null;
+  const lockerId = (): string | null => props.task.lockedBy?.id ?? null;
   const lockedBy = (): string | null => {
     const locker = props.task.lockedBy;
     if (!locker) return null;
     return locker.name?.trim() || locker.email || "another user";
   };
+  const lockedBySelf = (): boolean => {
+    const meId = props.meUserId;
+    const lid = lockerId();
+    return meId !== null && lid !== null && meId === lid;
+  };
+  const lockedByOther = (): boolean => lockedBy() !== null && !lockedBySelf();
+  const isActive = (): boolean => props.activeTaskId === props.task.id;
+  const isDone = (): boolean => props.task.status === "DONE" || props.task.status === "DROPPED";
+  // Hide Start on already-finished rows; it's still useful on IN_PROGRESS
+  // when the user is the locker (re-arm the terminal nudge).
+  const showStart = (): boolean => !isDone();
+  const startDisabled = (): boolean => lockedByOther();
+  const startLabel = (): string => (isActive() || lockedBySelf() ? "Resume" : "Start working");
   const assignee = (): string | null => {
     const a = props.task.assignee;
     if (!a) return null;
@@ -436,8 +581,11 @@ function TaskRow(props: TaskRowProps): JSX.Element {
   return (
     <li
       class="ws-pf-tasks__row"
+      id={`ws-pf-task-${props.task.id}`}
+      data-task-id={props.task.id}
       data-status={props.task.status}
       data-locked={lockedBy() ? "true" : undefined}
+      data-active-task={isActive() ? "true" : undefined}
     >
       <span class="ws-pf-tasks__id" aria-label={`Task ${props.task.id}`}>
         {props.task.id}
@@ -477,8 +625,85 @@ function TaskRow(props: TaskRowProps): JSX.Element {
           </Tooltip>
         )}
       </Show>
+      <Show when={showStart()}>
+        <button
+          type="button"
+          class="ws-pf-tasks__start"
+          data-active={isActive() ? "true" : undefined}
+          disabled={startDisabled()}
+          aria-label={
+            startDisabled()
+              ? `${startLabel()} on ${props.task.id} — locked by ${lockedBy()}`
+              : `${startLabel()} on ${props.task.id}`
+          }
+          title={
+            startDisabled()
+              ? `Locked by ${lockedBy() ?? "another user"}`
+              : isActive()
+                ? "In progress — switch to terminal and re-prime the command"
+                : "Acquire lock, set IN_PROGRESS, and pre-fill the checkout command"
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            if (startDisabled()) return;
+            props.onStart(props.task);
+          }}
+        >
+          {startLabel()}
+        </button>
+      </Show>
     </li>
   );
+}
+
+// T12.4 — Wraps `startTask` for the row's click handler. On success we
+// refetch the task list so `lockedBy = me` shows up. On
+// PlanFlowConflictError we toast "locked by …" and refetch so the row
+// updates with the real holder. Auth errors are handled by the reauth
+// guard elsewhere; we just surface a short note.
+async function runStartTask(
+  client: PlanFlowClient,
+  externalId: string,
+  workspaceProjectId: string,
+  task: Task,
+  onRetry: () => void,
+): Promise<void> {
+  try {
+    const result = await startTask({ client, externalId, workspaceProjectId, taskId: task.id });
+    if (result.branchName === null) {
+      showToast({
+        message: `Started ${task.id} — couldn't fetch branch name. Run \`git checkout -b\` manually.`,
+        variant: "warning",
+      });
+    } else if (!result.prefilled) {
+      showToast({
+        message: `Started ${task.id}. Open a terminal pane to run: git checkout -b ${result.branchName}`,
+        variant: "info",
+      });
+    } else {
+      showToast({
+        message: `${task.id} in progress — press Enter to create branch ${result.branchName}.`,
+        variant: "success",
+      });
+    }
+  } catch (error) {
+    if (error instanceof PlanFlowConflictError) {
+      showToast({
+        message: `${task.id} is already locked by another user.`,
+        variant: "warning",
+      });
+    } else if (error instanceof PlanFlowAuthError) {
+      showToast({
+        message: "PlanFlow rejected the token. Reconnect in Settings.",
+        variant: "error",
+      });
+    } else {
+      const detail = error instanceof Error ? error.message : "Unknown error.";
+      showToast({ message: `Couldn't start ${task.id}: ${detail}`, variant: "error" });
+    }
+  } finally {
+    onRetry();
+  }
 }
 
 function normalizePhase(value: string | number | null | undefined): string | null {
@@ -515,6 +740,17 @@ function initials(name: string): string {
   const a = first ? (first[0] ?? "") : "";
   const b = last ? (last[0] ?? "") : "";
   return (a + b).toUpperCase() || "?";
+}
+
+function cssEscape(value: string): string {
+  // Task IDs are well-formed ("T12.3", "T7.10"), but CSS.escape is the
+  // belt-and-braces guard — periods would otherwise read as class
+  // selectors inside querySelector. Falls back to a manual escape on
+  // platforms where CSS.escape is missing (older WebKit, jsdom).
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value);
+  }
+  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
 }
 
 function describeError(error: unknown): string {

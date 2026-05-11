@@ -1,6 +1,8 @@
 export { createPlanFlowClient, PlanFlowClient, PLANFLOW_DEFAULT_BASE_URL } from "./client";
 export { createRendererPlanFlowClient, MissingPlanFlowTokenError } from "./clientFactory";
 export type { RendererPlanFlowClientOptions } from "./clientFactory";
+export { formatCheckoutCommand, startTask } from "./startTask";
+export type { StartTaskInput, StartTaskResult } from "./startTask";
 export type {
   BulkStatusPayload,
   CreateCommentPayload,
@@ -12,7 +14,12 @@ export type {
   TaskWorkPayload,
   UpdateTaskPayload,
 } from "./client";
-export { PlanFlowApiError, PlanFlowAuthError, PlanFlowParseError } from "./errors";
+export {
+  PlanFlowApiError,
+  PlanFlowAuthError,
+  PlanFlowConflictError,
+  PlanFlowParseError,
+} from "./errors";
 export type {
   ActiveWorkEntry,
   BranchNameResponse,

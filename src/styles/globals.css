@@ -1198,6 +1198,17 @@ button {
 .ws-workspace-tabs__label {
   white-space: nowrap;
 }
+.ws-workspace-tabs__badge {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: var(--r-xs, 4px);
+  background: rgba(106, 170, 100, 0.18);
+  color: #6aaa64;
+  white-space: nowrap;
+}
 
 /* T6.1 — Sidebar. Right-side, collapsible project list. Mirrors the
  * prototype's `.sidebar` rules in work-station-design/styles.css with the
@@ -3857,7 +3868,7 @@ button {
 
 .ws-pf-tasks__row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) repeat(5, auto);
   gap: 10px;
   align-items: center;
   padding: 7px 14px;
@@ -3866,6 +3877,14 @@ button {
   font-size: 12px;
   color: var(--text-primary);
   transition: background var(--dur-fast, 150ms) var(--ease, ease);
+}
+
+.ws-pf-tasks__row[data-active-task="true"] {
+  background: rgba(106, 170, 100, 0.08);
+}
+
+.ws-pf-tasks__row[data-active-task="true"]:hover {
+  background: rgba(106, 170, 100, 0.14);
 }
 
 .ws-pf-tasks__row:hover {
@@ -3952,4 +3971,389 @@ button {
   color: var(--warn, #d6a056);
   padding: 2px 6px;
   border-radius: var(--r-xs, 4px);
+}
+
+.ws-pf-tasks__start {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: var(--r-xs, 4px);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: var(--bg-surface, var(--bg-hover));
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast, 150ms) var(--ease, ease),
+    border-color var(--dur-fast, 150ms) var(--ease, ease);
+}
+
+.ws-pf-tasks__start:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-hover, rgba(255, 255, 255, 0.16));
+}
+
+.ws-pf-tasks__start:focus-visible {
+  outline: 2px solid var(--focus, #4f8cc9);
+  outline-offset: 1px;
+}
+
+.ws-pf-tasks__start:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ws-pf-tasks__start[data-active="true"] {
+  border-color: rgba(106, 170, 100, 0.45);
+  color: #6aaa64;
+}
+
+/* ─── T12.6 Active work panel + row flash ─────────────────────────────── */
+
+.ws-pf-tasks__main {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 0;
+}
+
+.ws-pf-tasks__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+@keyframes ws-pf-row-flash {
+  0% {
+    background: var(--accent-soft, rgba(78, 201, 176, 0.18));
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.ws-pf-tasks__row--flash {
+  animation: ws-pf-row-flash 1.2s var(--ease, ease) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-pf-tasks__row--flash {
+    animation: none;
+    background: var(--accent-soft, rgba(78, 201, 176, 0.18));
+  }
+}
+
+.ws-pf-active {
+  flex: 0 0 240px;
+  min-width: 200px;
+  border-left: 1px solid var(--border-default);
+  background: var(--bg-surface, transparent);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.ws-pf-active--compact {
+  flex: 0 0 auto;
+  width: 100%;
+  border-left: none;
+  border-top: 1px solid var(--border-default);
+  padding: 8px 14px;
+  background: var(--bg-surface, transparent);
+}
+
+.ws-pf-active__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-default);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.ws-pf-active__title {
+  font-weight: 600;
+}
+
+.ws-pf-active__count {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.ws-pf-active__pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #4ec9b0);
+  animation: ws-pf-active-pulse 1.8s var(--ease, ease) infinite;
+}
+
+@keyframes ws-pf-active-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(78, 201, 176, 0.6);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(78, 201, 176, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(78, 201, 176, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-pf-active__pulse {
+    animation: none;
+  }
+}
+
+.ws-pf-active__rows {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ws-pf-active__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast, 150ms) var(--ease, ease);
+}
+
+.ws-pf-active__row:hover {
+  background: var(--bg-hover);
+}
+
+.ws-pf-active__row:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.ws-pf-active__avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-soft, var(--bg-hover));
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.ws-pf-active__meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ws-pf-active__name {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-pf-active__sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.ws-pf-active__taskid {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  color: var(--text-secondary);
+}
+
+.ws-pf-active__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 6px;
+  background: var(--bg-canvas, var(--bg-surface, transparent));
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast, 150ms) var(--ease, ease),
+    border-color var(--dur-fast, 150ms) var(--ease, ease),
+    color var(--dur-fast, 150ms) var(--ease, ease);
+}
+
+.ws-pf-active__chip:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent, var(--border-strong, var(--border-default)));
+}
+
+.ws-pf-active__chip:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.ws-pf-active__chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ws-pf-active__chip-id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  color: var(--text-primary);
+}
+
+@media (max-width: 640px) {
+  .ws-pf-tasks__main {
+    flex-direction: column;
+  }
+  .ws-pf-active {
+    flex: 0 0 auto;
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--border-default);
+  }
+}
+
+/* ─── T12.7 Activity feed (bottom rail) ───────────────────────────────── */
+
+.ws-pf-tasks__shell {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.ws-pf-activity {
+  flex: 0 0 auto;
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-default);
+  background: var(--bg-surface, transparent);
+}
+
+.ws-pf-activity__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.ws-pf-activity__title {
+  font-weight: 600;
+}
+
+.ws-pf-activity__count {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.ws-pf-activity__rows {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 8px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.ws-pf-activity__empty {
+  padding: 14px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ws-pf-activity__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 6px 14px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast, 150ms) var(--ease, ease);
+}
+
+.ws-pf-activity__row:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ws-pf-activity__row:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.ws-pf-activity__row:disabled {
+  cursor: default;
+}
+
+.ws-pf-activity__icon {
+  width: 18px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.ws-pf-activity__line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-pf-activity__actor {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.ws-pf-activity__verb {
+  color: var(--text-secondary);
+}
+
+.ws-pf-activity__target {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  color: var(--text-primary);
+}
+
+.ws-pf-activity__time {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
 }

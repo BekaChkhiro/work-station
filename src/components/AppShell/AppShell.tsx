@@ -44,6 +44,7 @@ import {
   getWorkspace,
   visibleTabs,
 } from "../../stores/workspace";
+import { activeTaskId } from "../../stores/activeTask";
 import { sessionList } from "../../stores/sessions";
 import { useNumericProjectHotkeys } from "../../hotkeys/numericProjectHotkeys";
 import { usePaneNavHotkeys } from "../../hotkeys/paneNavHotkeys";
@@ -281,6 +282,13 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
   };
   const tabs = (): readonly WorkspaceTabKind[] => visibleTabs(props.projectId);
   const currentTab = (): WorkspaceTabKind => activeTab(props.projectId);
+  // T12.4 — surface the in-progress PlanFlow task id as a pill on the
+  // PlanFlow tab so the user can see at a glance which task they're
+  // holding the lock for, regardless of which tab is currently focused.
+  const tabBadges = (): Partial<Record<WorkspaceTabKind, string>> => {
+    const taskId = activeTaskId(props.projectId);
+    return taskId ? { planflow: taskId } : {};
+  };
 
   // T11.8 — reauth is keyed by integration id, which lines up 1:1 with
   // the integration WorkspaceTabKind values (`planflow` / `github` /
@@ -309,7 +317,12 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
 
   return (
     <div class="ws-appshell__pane-host relative flex min-h-0 flex-1 flex-col">
-      <WorkspaceTabStrip tabs={tabs()} activeKind={currentTab()} onActivate={handleTabActivate} />
+      <WorkspaceTabStrip
+        tabs={tabs()}
+        activeKind={currentTab()}
+        tabBadges={tabBadges()}
+        onActivate={handleTabActivate}
+      />
       <Show when={props.cliWarning}>
         {(missingCli) => (
           <div class="ws-cli-warning" role="alert" aria-live="polite">

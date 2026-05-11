@@ -61,7 +61,10 @@ export interface ListTasksOptions {
 }
 
 export interface ListChangesOptions {
-  cursor?: string;
+  /** Watermark — return only changes that occurred after this cursor.
+   *  Wire param is `since` per the API spec; the response carries the
+   *  new watermark back as `cursor`. */
+  since?: string;
   limit?: number;
 }
 
@@ -210,7 +213,7 @@ export class PlanFlowClient {
 
   async listChanges(projectId: string, options: ListChangesOptions = {}): Promise<ChangesResponse> {
     const query: Record<string, string | number> = {};
-    if (options.cursor != null) query["cursor"] = options.cursor;
+    if (options.since != null) query["since"] = options.since;
     if (options.limit != null) query["limit"] = options.limit;
     return this.#get(`/projects/${encodeURIComponent(projectId)}/changes`, changesResponseSchema, {
       query,

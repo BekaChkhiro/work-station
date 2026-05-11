@@ -67,12 +67,15 @@ export type {
 export {
   createPlanFlowClient,
   createRendererPlanFlowClient,
+  formatCheckoutCommand,
   MissingPlanFlowTokenError,
   PlanFlowApiError,
   PlanFlowAuthError,
   PlanFlowClient,
+  PlanFlowConflictError,
   PlanFlowParseError,
   PLANFLOW_DEFAULT_BASE_URL,
+  startTask,
 } from "./planflow";
 
 export {
@@ -125,6 +128,8 @@ export type {
   Project,
   RendererPlanFlowClientOptions,
   ReorderTasksPayload,
+  StartTaskInput,
+  StartTaskResult,
   Task,
   TaskComplexity,
   TaskStatus,
