@@ -19,3 +19,37 @@ export type {
   ResponseType,
   RetryOptions,
 } from "./httpClient";
+
+export {
+  createPlanFlowClient,
+  PlanFlowApiError,
+  PlanFlowAuthError,
+  PlanFlowClient,
+  PlanFlowParseError,
+  PLANFLOW_DEFAULT_BASE_URL,
+} from "./planflow";
+export type {
+  ActiveWorkEntry,
+  BranchNameResponse,
+  BulkStatusPayload,
+  Change,
+  ChangesResponse,
+  Comment,
+  CreateCommentPayload,
+  CreateKnowledgePayload,
+  KnowledgeEntry,
+  KnowledgeType,
+  ListChangesOptions,
+  ListTasksOptions,
+  Me,
+  Notification,
+  PlanFlowClientOptions,
+  Project,
+  ReorderTasksPayload,
+  Task,
+  TaskComplexity,
+  TaskStatus,
+  TaskWorkPayload,
+  UpdateTaskPayload,
+  UserSummary,
+} from "./planflow";
