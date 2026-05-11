@@ -17,9 +17,12 @@
 // scoped search metadata, etc.) stays out of this file — it just deals
 // in layout trees and sessionIds.
 
-import { For, Show, createEffect, onCleanup, onMount, untrack } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import type { JSX } from "solid-js";
+import { FileTree } from "../FileTree";
 import { LayoutTree } from "../LayoutTree";
+import { MonacoEditor } from "../MonacoEditor";
+import { readTextFile, type ReadFileResult } from "../../ipc/files";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import type { CliMeta } from "../../types/tab";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
@@ -28,6 +31,7 @@ import { WindowsAppMenu } from "../WindowsAppMenu";
 import { IntegrationTabPlaceholder, WorkspaceTabStrip } from "../WorkspaceTabStrip";
 import { IntegrationReauthBanner } from "../IntegrationReauthBanner";
 import { PlanFlowTaskList } from "../PlanFlowTaskList";
+import { editorScratch, setEditorScratch } from "../../stores/editorScratch";
 import { hydrateReauthState, reauthSnapshot } from "../../integrations";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
 import type { LayoutPath } from "../../types/layout";
@@ -105,6 +109,11 @@ export interface AppShellProps {
   onWorkspaceTabChange?: (projectId: string, kind: WorkspaceTabKind) => void;
   /** T11.1 — open Settings (used by the integration-tab placeholder CTA). */
   onOpenSettings?: () => void;
+  /** T13.2 — resolve a project's absolute root path so the editor tab can
+   *  mount its file tree. Returning null hides the tree gracefully (the
+   *  Monaco scratch buffer still renders), which keeps the prop optional
+   *  for harnesses that don't track project paths. */
+  resolveProjectPath?: (projectId: string) => string | null;
 }
 
 const defaultEmptyWorkspace = (): JSX.Element => (
@@ -216,6 +225,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
                   onOpenSettings={
                     props.onOpenSettings ?? (() => dispatchMenuAction("open-settings"))
                   }
+                  projectPath={props.resolveProjectPath?.(project.id) ?? null}
                 />
               </div>
             );
@@ -265,6 +275,8 @@ interface ProjectWorkspaceViewProps {
   hasInstallUrl?: (cliName: string) => boolean;
   onWorkspaceTabChange?: (kind: WorkspaceTabKind) => void;
   onOpenSettings?: () => void;
+  /** T13.2 — absolute root path for the file tree, or null when unknown. */
+  projectPath?: string | null;
 }
 
 function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
@@ -371,16 +383,31 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
         when={currentTab() === "terminal"}
         fallback={
           <Show
-            when={currentTab() === "planflow" && !tabNeedsReauth("planflow")}
+            when={currentTab() === "editor"}
             fallback={
-              <IntegrationTabPlaceholder
-                kind={currentTab()}
-                onOpenSettings={props.onOpenSettings}
-                needsReauth={tabNeedsReauth(currentTab())}
-              />
+              <Show
+                when={currentTab() === "planflow" && !tabNeedsReauth("planflow")}
+                fallback={
+                  <IntegrationTabPlaceholder
+                    kind={currentTab()}
+                    onOpenSettings={props.onOpenSettings}
+                    needsReauth={tabNeedsReauth(currentTab())}
+                  />
+                }
+              >
+                <PlanFlowTaskList
+                  projectId={props.projectId}
+                  onOpenSettings={props.onOpenSettings}
+                />
+              </Show>
             }
           >
-            <PlanFlowTaskList projectId={props.projectId} onOpenSettings={props.onOpenSettings} />
+            {/* T13.1 — Monaco editor + T13.2 file tree. When a file is
+             *  picked in the tree the buffer becomes read-only and shows
+             *  that file's contents (T13.3 wired); without a selection
+             *  we fall back to the scratch buffer so the editor tab is
+             *  never empty on first open. */}
+            <EditorWorkspace projectId={props.projectId} projectPath={props.projectPath ?? null} />
           </Show>
         }
       >
@@ -460,6 +487,103 @@ function ProjectTerminalEmptyState(props: ProjectTerminalEmptyStateProps): JSX.E
             </For>
           </div>
         </Show>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * T13.2 — editor tab body: [file tree | Monaco editor].
+ *
+ * Layout splits side-by-side: a fixed-width file tree on the left, the
+ * editor filling the rest. The tree is hidden when the project root is
+ * unknown (harnesses without `resolveProjectPath`) so the editor still
+ * works as a scratch buffer.
+ *
+ * Buffer state machine:
+ *   • no selection      → editable scratch buffer (per-project store)
+ *   • file loaded       → readOnly view of the file's content
+ *   • binary file       → readOnly placeholder explaining why
+ *   • read error        → readOnly placeholder showing the error message
+ *
+ * The selection is local to this view (signal), not persisted. Multi-
+ * tab persistence is T13.6.
+ */
+function EditorWorkspace(props: { projectId: string; projectPath: string | null }): JSX.Element {
+  type OpenedFile =
+    | { kind: "loading"; path: string }
+    | { kind: "text"; path: string; content: string }
+    | { kind: "binary"; path: string; reason: string }
+    | { kind: "error"; path: string; message: string };
+
+  const [opened, setOpened] = createSignal<OpenedFile | null>(null);
+
+  // Token-based race guard. A slow read on /big.txt followed by a fast
+  // read on /readme.md should land readme's content in the editor — not
+  // big.txt's content arriving later and overwriting it.
+  let openSeq = 0;
+
+  const handleSelect = async (absPath: string): Promise<void> => {
+    const root = props.projectPath;
+    if (root === null) return;
+    const relative = absPath.startsWith(`${root}/`)
+      ? absPath.slice(root.length + 1)
+      : absPath.startsWith(`${root}\\`)
+        ? absPath.slice(root.length + 1)
+        : absPath;
+    const myToken = ++openSeq;
+    setOpened({ kind: "loading", path: absPath });
+    try {
+      const result: ReadFileResult = await readTextFile(root, relative);
+      if (myToken !== openSeq) return;
+      if (result.kind === "text") {
+        setOpened({ kind: "text", path: absPath, content: result.content });
+      } else {
+        const reason =
+          result.reason === "nul-byte"
+            ? "binary file (contains NUL bytes)"
+            : "binary file (not valid UTF-8)";
+        setOpened({ kind: "binary", path: absPath, reason });
+      }
+    } catch (err) {
+      if (myToken !== openSeq) return;
+      const message = err instanceof Error ? err.message : String(err);
+      setOpened({ kind: "error", path: absPath, message });
+    }
+  };
+
+  const editorValue = (): string => {
+    const o = opened();
+    if (o === null) return editorScratch(props.projectId);
+    if (o.kind === "loading") return "// Loading…";
+    if (o.kind === "text") return o.content;
+    if (o.kind === "binary") return `// ${o.path}\n//\n// Not displayed — ${o.reason}.`;
+    return `// ${o.path}\n//\n// Could not open file: ${o.message}`;
+  };
+
+  const isReadOnly = (): boolean => opened() !== null;
+
+  const handleEditorChange = (v: string): void => {
+    // Only the scratch buffer is editable; file buffers are read-only
+    // until T13.4 lands save support.
+    if (opened() === null) setEditorScratch(props.projectId, v);
+  };
+
+  return (
+    <div class="ws-editor-tab flex min-h-0 flex-1">
+      <Show when={props.projectPath}>
+        {(root) => (
+          <aside class="ws-editor-tab__tree" aria-label="Project files">
+            <FileTree
+              root={root()}
+              onSelectFile={(p) => void handleSelect(p)}
+              selectedPath={opened()?.path ?? null}
+            />
+          </aside>
+        )}
+      </Show>
+      <div class="ws-editor-tab__editor min-h-0 flex-1">
+        <MonacoEditor value={editorValue()} readOnly={isReadOnly()} onChange={handleEditorChange} />
       </div>
     </div>
   );

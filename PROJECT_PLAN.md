@@ -1618,7 +1618,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T13.7: Language detection + theme integration
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: M
 - **Dependencies**: T13.1, T8.3
 - **Description**:
