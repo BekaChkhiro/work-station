@@ -26,7 +26,9 @@ import {
   createMemo,
   createResource,
   createSignal,
+  on,
   onCleanup,
+  untrack,
   type JSX,
 } from "solid-js";
 
@@ -103,71 +105,77 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
     return availableClis()?.find((c) => c.name === cliId)?.path ?? null;
   };
 
-  // Spawn / re-spawn the PTY when the panel is open and the CLI
-  // selection changes. We don't keep a session alive while collapsed:
-  // the user can re-open and start fresh, which matches the chat
-  // metaphor better than carrying TUI state across visits.
-  createEffect(() => {
-    const panel = chatPanel(props.projectId);
-    const cli = chatCli(props.projectId);
+  // Spawn / re-spawn the PTY when the *trigger inputs* — panel state +
+  // chosen CLI — change. We use `on(...)` with explicit deps so the
+  // effect re-runs ONLY when those signals change, not when the body
+  // happens to read other reactive values (like `sessionId`). Without
+  // this guard the previous version looped: setSessionId inside the
+  // async block was tracked by the surrounding effect, which spawned
+  // again, ad infinitum — hence the "session EOF; removing" log spam.
+  createEffect(
+    on([() => chatPanel(props.projectId), () => chatCli(props.projectId)], ([panel, cli]) => {
+      if (panel === "collapsed") {
+        const id = untrack(sessionId);
+        if (id != null) {
+          void ptyKill(id);
+          setSessionId(null);
+          // When the panel closes we ALSO bump the refetch tick so
+          // any task changes the assistant made show up. Guarded by
+          // the "had-a-session" check so collapsed → collapsed
+          // re-renders don't spam refetches.
+          bumpPlanflowChatRefetch(props.projectId);
+        }
+        return;
+      }
 
-    if (panel === "collapsed") {
-      const id = sessionId();
-      if (id != null) {
-        void ptyKill(id);
+      if (cli == null) {
+        setSpawnError("No CLI on PATH. Install claude / codex / kimi.");
+        return;
+      }
+      const path = resolvePath(cli);
+      if (path == null) {
+        setSpawnError(`CLI "${cli}" is not on PATH.`);
+        return;
+      }
+      setSpawnError(null);
+
+      void (async () => {
+        // Read + clear the previous session id before awaiting the
+        // new spawn so a fast CLI swap doesn't double-spawn. Both
+        // reads are untracked because Solid's tracking of async
+        // continuations would otherwise re-arm the outer effect.
+        const previousId = untrack(sessionId);
+        if (previousId != null) {
+          void ptyKill(previousId);
+        }
         setSessionId(null);
-      }
-      // When the panel closes, any plan/task changes the assistant
-      // made are likely already on the server. Refresh the task list
-      // so the user sees the result the next time they look at it.
-      bumpPlanflowChatRefetch(props.projectId);
-      return;
-    }
-
-    if (cli == null) {
-      setSpawnError("No CLI on PATH. Install claude / codex / kimi.");
-      return;
-    }
-    const path = resolvePath(cli);
-    if (path == null) {
-      setSpawnError(`CLI "${cli}" is not on PATH.`);
-      return;
-    }
-    setSpawnError(null);
-
-    void (async () => {
-      const currentId = sessionId();
-      if (currentId != null) {
-        void ptyKill(currentId);
-        setSessionId(null);
-      }
-      try {
-        const resp = await ptySpawn({
-          command: path,
-          args: [],
-          env: {
-            WS_PROJECT_ID: props.projectId,
-            WS_CLI_NAME: cli,
-            WS_PLANFLOW_SCOPE: "1",
-          },
-          cols: 80,
-          rows: 24,
-        });
-        setSessionId(resp.sessionId);
-        // CR terminator → TUI sees Enter.
-        const primer = `${scopePrimer(props.externalId)}\r`;
-        await ptyWrite(resp.sessionId, new TextEncoder().encode(primer));
-      } catch (error) {
-        setSpawnError(error instanceof Error ? error.message : "Couldn't start the CLI.");
-      }
-    })();
-  });
+        try {
+          const resp = await ptySpawn({
+            command: path,
+            args: [],
+            env: {
+              WS_PROJECT_ID: props.projectId,
+              WS_CLI_NAME: cli,
+              WS_PLANFLOW_SCOPE: "1",
+            },
+            cols: 80,
+            rows: 24,
+          });
+          setSessionId(resp.sessionId);
+          // CR terminator → TUI sees Enter.
+          const primer = `${scopePrimer(props.externalId)}\r`;
+          await ptyWrite(resp.sessionId, new TextEncoder().encode(primer));
+        } catch (error) {
+          setSpawnError(error instanceof Error ? error.message : "Couldn't start the CLI.");
+        }
+      })();
+    }),
+  );
 
   onCleanup(() => {
-    const id = sessionId();
+    const id = untrack(sessionId);
     if (id != null) {
       void ptyKill(id);
-      setSessionId(null);
     }
   });
 
