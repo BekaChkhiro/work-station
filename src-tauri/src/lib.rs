@@ -1,8 +1,13 @@
 // Module skeleton (T1.5). Each module is empty until its feature phase fills it in.
+use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 
 mod cli;
 mod commands;
+// T11.2: OS-native credential store. Used by the integrations layer
+// (T11.3 Settings panel, T12+ per-service flows) — the public surface
+// is the four Tauri commands wired into the handler below.
+mod credentials;
 mod db;
 // T11.4: HTTP client + cache. The downstream consumers (T11.6 connection
 // test, T11.8 token refresh, T11.9 offline queue, T12+ integrations) land
@@ -17,6 +22,11 @@ mod pty;
 mod shell_path;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// Bootstrap wiring is inherently long — module setup, async migration
+// tasks, command-handler registration — and lives in one function so
+// the boot order is auditable in a single read. Refactoring purely to
+// satisfy the line count would scatter that order across helpers.
+#[allow(clippy::too_many_lines)]
 pub fn run() {
     logging::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "work-station starting");
@@ -29,7 +39,21 @@ pub fn run() {
     // gets a chance to start. No-op on Windows.
     shell_path::hydrate_from_login_shell();
 
+    // T10.2: cold-start bench exit. When WS_BENCH_EXIT=1, the app tears
+    // down on the main webview's `load` event so `hyperfine` can measure
+    // spawn → first-paint → exit as a single wall-clock interval. The
+    // env flag is the only switch; in production launches the callback
+    // checks it once per page-load and falls through, so the cost is a
+    // single env::var read at startup.
+    let bench_exit = std::env::var("WS_BENCH_EXIT").as_deref() == Ok("1");
+
     tauri::Builder::default()
+        .on_page_load(move |window, payload| {
+            if bench_exit && payload.event() == PageLoadEvent::Finished {
+                tracing::info!(target: "bench", "WS_BENCH_EXIT: page load finished, exiting");
+                window.app_handle().exit(0);
+            }
+        })
         .plugin(tauri_plugin_opener::init())
         // T3.1: SQLite (preloaded via tauri.conf.json plugins.sql.preload) + key-value store.
         // T3.5: migrations are applied by our own runner (db::run_migrations) so we
@@ -136,6 +160,10 @@ pub fn run() {
             commands::picker::pick_project_folder,
             commands::cli::cli_list_available,
             commands::clipboard::save_clipboard_image,
+            commands::credentials::credentials_set,
+            commands::credentials::credentials_get,
+            commands::credentials::credentials_delete,
+            commands::credentials::credentials_has,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

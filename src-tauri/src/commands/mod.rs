@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod clipboard;
+pub mod credentials;
 pub mod log;
 pub mod picker;
 pub mod projects;

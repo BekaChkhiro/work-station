@@ -59,6 +59,20 @@ reqwest = { version = "=0.13.3", default-features = false, features = ["rustls",
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
 
+# T11.2: OS-native credential store. Each backend pulls in a
+# platform-specific crate (security-framework / windows-sys / dbus-secret-
+# service) that won't compile on the other platforms, so the keyring dep
+# itself has to be target-gated. `crypto-rust` keeps Linux libsodium /
+# openssl out of the link line, matching reqwest's rustls choice in T11.4.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
 # T2.11: bench-only deps. base64 reproduces the legacy IPC path
 # (base64-encoded JSON string) we're benchmarking against the new
 # Channel<Bytes> raw path.

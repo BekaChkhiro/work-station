@@ -21,6 +21,23 @@ export type {
 } from "./httpClient";
 
 export {
+  CredentialsError,
+  DEFAULT_ACCOUNT,
+  Integration,
+  credentialsErrorSchema,
+  deleteCredential,
+  getCredential,
+  hasCredential,
+  setCredential,
+} from "./credentials";
+export type {
+  CredentialsErrorKind,
+  CredentialsErrorPayload,
+  CredentialsRecovery,
+  IntegrationId,
+} from "./credentials";
+
+export {
   createPlanFlowClient,
   PlanFlowApiError,
   PlanFlowAuthError,
