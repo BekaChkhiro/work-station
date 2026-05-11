@@ -1,12 +1,12 @@
 // T6.8: Onboarding card shown when no projects exist.
 //
-// Pure presentational component — the parent owns the "no projects" check
-// and wires the CTA back to whatever `onAddProject` flow it uses. Mirrors
-// the prototype's empty-state pattern (centred card, swatch tile, headline
-// + supporting copy + primary CTA), styled via `.ws-empty__*` classes in
-// globals.css.
+// Thin wrapper around the shared <EmptyState /> primitive (T11.7) that
+// fixes the copy + glyph for the "no projects yet" case. The parent owns
+// the "is empty" check and the CTA handler — typically the Add Project
+// modal.
 
 import type { JSX } from "solid-js";
+import { EmptyState } from "../AsyncStates";
 
 export interface ProjectsEmptyStateProps {
   /** Fires when the primary CTA is pressed. The parent typically opens
@@ -19,32 +19,36 @@ export interface ProjectsEmptyStateProps {
 
 export function ProjectsEmptyState(props: ProjectsEmptyStateProps): JSX.Element {
   return (
-    <div class="ws-empty" role="region" aria-label="Welcome to Work Station">
-      <div class="ws-empty__card">
-        <div class="ws-empty__glyph" aria-hidden="true">
-          <IconFolder />
-        </div>
-        <div class="ws-empty__copy">
-          <h1 class="ws-empty__title">Welcome to Work Station</h1>
-          <p class="ws-empty__subtitle">
-            You don't have any projects yet. Create your first one to start spawning terminal
-            sessions.
-          </p>
-        </div>
-        <button
-          type="button"
-          class="ws-empty__cta"
-          onClick={() => props.onAddProject?.()}
-          autofocus
-        >
-          <span class="ws-empty__cta-icon" aria-hidden="true">
-            <IconPlus />
-          </span>
-          <span>Add your first project</span>
-          {props.shortcut ? <kbd class="ws-empty__kbd">{props.shortcut}</kbd> : null}
-        </button>
-      </div>
-    </div>
+    <EmptyState
+      ariaLabel="Welcome to Work Station"
+      title="Welcome to Work Station"
+      description="You don't have any projects yet. Create your first one to start spawning terminal sessions."
+      glyph={<IconFolder />}
+      primaryAction={
+        props.onAddProject
+          ? {
+              label: "Add your first project",
+              onClick: () => props.onAddProject?.(),
+              shortcut: props.shortcut,
+              icon: <IconPlus />,
+              autofocus: true,
+            }
+          : undefined
+      }
+    />
+  );
+}
+
+function IconPlus(): JSX.Element {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+      <path
+        d="M6 1.5 V10.5 M1.5 6 H10.5"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+      />
+    </svg>
   );
 }
 
@@ -62,19 +66,6 @@ function IconFolder(): JSX.Element {
       aria-hidden="true"
     >
       <path d="M3.5 8.5 a2 2 0 0 1 2-2 h4.5 l2.5 2.5 h10 a2 2 0 0 1 2 2 v9 a2 2 0 0 1 -2 2 h-17 a2 2 0 0 1 -2 -2 z" />
-    </svg>
-  );
-}
-
-function IconPlus(): JSX.Element {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-      <path
-        d="M6 1.5 V10.5 M1.5 6 H10.5"
-        stroke="currentColor"
-        stroke-width="1.5"
-        stroke-linecap="round"
-      />
     </svg>
   );
 }

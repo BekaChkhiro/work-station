@@ -1199,54 +1199,6 @@ button {
   white-space: nowrap;
 }
 
-.ws-workspace-tabs__placeholder {
-  display: grid;
-  place-items: center;
-  flex: 1;
-  min-height: 0;
-  padding: 24px;
-}
-.ws-workspace-tabs__placeholder-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 24px 28px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--r-md, 6px);
-  max-width: 360px;
-  text-align: center;
-}
-.ws-workspace-tabs__placeholder-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.ws-workspace-tabs__placeholder-body {
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-.ws-workspace-tabs__placeholder-cta {
-  margin-top: 4px;
-  padding: 6px 12px;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-default);
-  border-radius: var(--r-sm, 4px);
-  color: var(--text-primary);
-  font-size: 12px;
-  cursor: default;
-  transition: background var(--dur-fast, 150ms) var(--ease, ease);
-}
-.ws-workspace-tabs__placeholder-cta:hover {
-  background: var(--bg-hover);
-}
-.ws-workspace-tabs__placeholder-cta:focus-visible {
-  outline: 1px solid var(--border-focus);
-  outline-offset: 1px;
-}
-
 /* T6.1 — Sidebar. Right-side, collapsible project list. Mirrors the
  * prototype's `.sidebar` rules in work-station-design/styles.css with the
  * `ws-sb__*` prefix. Width is driven by the `--ws-sb-width` custom prop
@@ -2400,6 +2352,43 @@ button {
   letter-spacing: 0;
 }
 
+/* T11.7 — Muted variant. Same markup, smaller card + ghost CTA so the
+ * empty state can live inside a workspace tab without dominating the view.
+ * The full-canvas chrome (height/background/glyph tile) is dropped so the
+ * card sits inline with whatever container it lands in. */
+.ws-empty[data-variant="muted"] {
+  background: transparent;
+  padding: 24px 16px;
+  flex: 1;
+  min-height: 0;
+}
+.ws-empty[data-variant="muted"] .ws-empty__card {
+  width: min(360px, 90%);
+  gap: 10px;
+}
+.ws-empty[data-variant="muted"] .ws-empty__title {
+  font-size: 14px;
+}
+.ws-empty[data-variant="muted"] .ws-empty__subtitle {
+  font-size: 12.5px;
+}
+.ws-empty[data-variant="muted"] .ws-empty__cta {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 400;
+}
+.ws-empty[data-variant="muted"] .ws-empty__cta:hover {
+  background: var(--bg-hover);
+  filter: none;
+}
+.ws-empty[data-variant="muted"] .ws-empty__kbd {
+  color: var(--text-tertiary);
+  background: var(--bg-elevated);
+}
+
 /* T7.8 — CLI-not-found inline warning banner */
 .ws-cli-warning {
   display: flex;
@@ -3164,4 +3153,345 @@ button {
 .ws-settings-page__about-meta {
   font-size: var(--fs-12);
   color: var(--text-tertiary);
+}
+
+/* T11.3 — Integrations panel */
+.ws-settings-page__integrations {
+  gap: var(--sp-4);
+}
+
+.ws-integration {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-3) var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+
+.ws-integration__head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: var(--sp-3);
+}
+
+.ws-integration__title {
+  min-width: 0;
+}
+
+.ws-integration__token {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.ws-integration__input {
+  width: 100%;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+.ws-integration__actions {
+  display: inline-flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.ws-integration__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+.ws-integration__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.ws-integration__pill[data-tone="ok"] {
+  color: var(--success, #4ade80);
+  border-color: color-mix(in oklab, var(--success, #4ade80) 35%, transparent);
+}
+.ws-integration__pill[data-tone="ok"] .ws-integration__dot {
+  background: var(--success, #4ade80);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--success, #4ade80) 22%, transparent);
+}
+
+.ws-integration__pill[data-tone="saved"] {
+  color: var(--text-primary);
+}
+.ws-integration__pill[data-tone="saved"] .ws-integration__dot {
+  background: var(--accent);
+}
+
+.ws-integration__pill[data-tone="checking"] .ws-integration__dot {
+  background: var(--accent);
+  animation: ws-integration-pulse 1.1s ease-in-out infinite;
+}
+
+.ws-integration__pill[data-tone="off"] {
+  color: var(--text-tertiary);
+}
+
+@keyframes ws-integration-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.ws-integration__error {
+  font-size: var(--fs-12);
+  color: var(--warning, #d4a017);
+  background: color-mix(in oklab, var(--warning, #d4a017) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--warning, #d4a017) 35%, transparent);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+}
+
+/* T11.7 — Async-state primitives. SkeletonRows / LoadingPulse / ErrorCard
+ * absorb the canonical loading / empty / error slots for any async view
+ * (integration tabs, settings panes, future editor lists). The empty slot
+ * reuses the existing .ws-empty block — generic enough for both the
+ * projects empty state and the per-integration "not connected" card. */
+.ws-skel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  flex: 1;
+  min-height: 0;
+}
+.ws-skel__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+}
+.ws-skel__shape {
+  background: var(--bg-elevated);
+  border-radius: var(--r-sm);
+  position: relative;
+  overflow: hidden;
+}
+.ws-skel__shape::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--text-primary) 8%, transparent) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: ws-skel-shimmer 1.6s linear infinite;
+}
+.ws-skel__icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ws-skel__line {
+  height: 10px;
+  flex: 1;
+}
+.ws-skel__line--short {
+  flex: 0 0 38%;
+}
+.ws-skel__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+@keyframes ws-skel-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.ws-pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.ws-pulse--block {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  height: 100%;
+  width: 100%;
+}
+.ws-pulse__dots {
+  display: inline-flex;
+  gap: 3px;
+  line-height: 1;
+}
+.ws-pulse__dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: ws-pulse-blink 1.4s ease-in-out infinite both;
+}
+.ws-pulse__dot:nth-child(2) {
+  animation-delay: 0.18s;
+}
+.ws-pulse__dot:nth-child(3) {
+  animation-delay: 0.36s;
+}
+@keyframes ws-pulse-blink {
+  0%,
+  80%,
+  100% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+.ws-error-card {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  width: 100%;
+  padding: 24px;
+  background: var(--bg-canvas);
+}
+.ws-error-card__inner {
+  width: min(420px, 90%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.ws-error-card__glyph {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: color-mix(in oklab, var(--warning, #d4a017) 14%, transparent);
+  color: var(--warning, #d4a017);
+}
+.ws-error-card__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ws-error-card__message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-width: 360px;
+}
+.ws-error-card__detail {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 100%;
+  text-align: left;
+}
+.ws-error-card__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 4px;
+}
+.ws-error-card__btn {
+  padding: 6px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+  transition:
+    background var(--dur-fast, 150ms) var(--ease, ease),
+    border-color var(--dur-fast, 150ms) var(--ease, ease);
+}
+.ws-error-card__btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong, var(--border-default));
+}
+.ws-error-card__btn:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+.ws-error-card__btn--primary {
+  background: var(--accent);
+  color: #07181c;
+  border-color: transparent;
+}
+.ws-error-card__btn--primary:hover {
+  filter: brightness(1.06);
+  background: var(--accent);
+}
+.ws-error-card__link {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: default;
+}
+.ws-error-card__link:hover {
+  color: var(--text-secondary);
+}
+.ws-error-card__link:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-skel__shape::after {
+    animation: none;
+    transform: none;
+    opacity: 0.5;
+  }
+  .ws-pulse__dot {
+    animation: none;
+    opacity: 0.65;
+  }
 }

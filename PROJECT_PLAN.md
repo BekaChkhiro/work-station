@@ -1375,7 +1375,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T11.6: Connection test flow
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: S
 - **Dependencies**: T11.3, T11.4
 - **Description**:

@@ -30,6 +30,14 @@ export {
   hasCredential,
   setCredential,
 } from "./credentials";
+
+export {
+  clearIntegrationStatus,
+  getIntegrationStatus,
+  getIntegrationStatusMap,
+  setIntegrationStatus,
+} from "./status";
+export type { IntegrationStatusEntry, IntegrationStatusMap } from "./status";
 export type {
   CredentialsErrorKind,
   CredentialsErrorPayload,
@@ -45,6 +53,9 @@ export {
   PlanFlowParseError,
   PLANFLOW_DEFAULT_BASE_URL,
 } from "./planflow";
+
+export { IntegrationVerifyError, verifyIntegration } from "./verifiers";
+export type { VerifyFailureReason, VerifyOptions, VerifyResult } from "./verifiers";
 export type {
   ActiveWorkEntry,
   BranchNameResponse,

@@ -13,6 +13,7 @@ import AppShellLiveHarness from "./components/AppShell/AppShell.live.dev";
 import AddProjectModalLiveHarness from "./components/AddProjectModal/AddProjectModal.live.dev";
 import EditProjectFlowLiveHarness from "./components/EditProjectFlow/EditProjectFlow.live.dev";
 import ProjectsEmptyStateLiveHarness from "./components/ProjectsEmptyState/ProjectsEmptyState.live.dev";
+import AsyncStatesLiveHarness from "./components/AsyncStates/AsyncStates.live.dev";
 import { AppRoot } from "./components/AppRoot";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
@@ -36,6 +37,7 @@ type DebugMode =
   | "addproject"
   | "editproject"
   | "projectsempty"
+  | "asyncstates"
   | "tokens"
   | null;
 
@@ -54,6 +56,7 @@ const debugMode = (): DebugMode => {
     v === "addproject" ||
     v === "editproject" ||
     v === "projectsempty" ||
+    v === "asyncstates" ||
     v === "tokens"
     ? v
     : null;
@@ -177,6 +180,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "projectsempty"}>
             <ProjectsEmptyStateLiveHarness />
+          </Match>
+          <Match when={debugMode() === "asyncstates"}>
+            <AsyncStatesLiveHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>

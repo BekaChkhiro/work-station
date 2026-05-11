@@ -29,6 +29,17 @@ const FallbackCliSchema = z.string().min(1).nullable();
 const DensitySchema = z.enum(["compact", "comfortable"]);
 const MonoFontSchema = z.enum(["jetbrains", "geist", "berkeley", "system"]);
 const UiFontSizeSchema = z.number().int().min(12).max(16);
+// T11.3: per-integration verified-state cache. Keys are integration ids
+// (e.g. "planflow", "github"); unknown keys are tolerated so a future
+// integration can ship without a settings migration. The map is rewritten
+// in whole on every save/clear via the helpers in `integrations/status.ts`.
+const IntegrationStatusSchema = z.record(
+  z.string(),
+  z.object({
+    verifiedAt: z.number().int(),
+    accountLabel: z.string(),
+  }),
+);
 
 interface SettingDef<T> {
   schema: z.ZodType<T>;
@@ -51,6 +62,7 @@ export const SETTINGS = {
   density: def(DensitySchema, "comfortable" as z.infer<typeof DensitySchema>),
   mono_font: def(MonoFontSchema, "jetbrains" as z.infer<typeof MonoFontSchema>),
   ui_font_size: def(UiFontSizeSchema, 13),
+  integration_status: def(IntegrationStatusSchema, {} as z.infer<typeof IntegrationStatusSchema>),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;

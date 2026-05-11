@@ -51,19 +51,37 @@ import {
 } from "../../stores/appearance";
 import { getSetting, setSetting } from "../../db/settings";
 import { cliListAvailable, type CliInfo } from "../../ipc/cli";
+import {
+  CredentialsError,
+  DEFAULT_ACCOUNT,
+  Integration,
+  IntegrationVerifyError,
+  clearIntegrationStatus,
+  deleteCredential,
+  getCredential,
+  getIntegrationStatusMap,
+  hasCredential,
+  PLANFLOW_DEFAULT_BASE_URL,
+  setCredential,
+  setIntegrationStatus,
+  verifyIntegration,
+  type IntegrationId,
+  type IntegrationStatusEntry,
+} from "../../integrations";
 
 export interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
 }
 
-type SectionId = "general" | "appearance" | "keys" | "clis" | "privacy" | "about";
+type SectionId = "general" | "appearance" | "keys" | "clis" | "integrations" | "privacy" | "about";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "general", label: "General" },
   { id: "appearance", label: "Appearance" },
   { id: "keys", label: "Keybindings" },
   { id: "clis", label: "CLIs" },
+  { id: "integrations", label: "Integrations" },
   { id: "privacy", label: "Privacy" },
   { id: "about", label: "About" },
 ];
@@ -146,6 +164,9 @@ export function SettingsPanel(props: SettingsPanelProps): JSX.Element {
                   </Match>
                   <Match when={section() === "clis"}>
                     <CliSection />
+                  </Match>
+                  <Match when={section() === "integrations"}>
+                    <IntegrationsSection />
                   </Match>
                   <Match when={section() === "privacy"}>
                     <PrivacySection />
@@ -679,6 +700,298 @@ function CliSection(): JSX.Element {
       </div>
     </>
   );
+}
+
+/* ─── Integrations (T11.3) ──────────────────────────────────────────── */
+
+interface IntegrationDef {
+  id: IntegrationId;
+  label: string;
+  description: string;
+  endpoint: string;
+}
+
+// T11.6 — every integration now ships a minimal authenticated GET (or the
+// equivalent GraphQL query for Railway). The dispatcher in
+// `integrations/verifiers` owns the per-service request shape; the panel only
+// passes the token through.
+const INTEGRATIONS: readonly IntegrationDef[] = [
+  {
+    id: Integration.PlanFlow,
+    label: "PlanFlow",
+    description: "Tasks, knowledge, and activity sync for this project.",
+    endpoint: PLANFLOW_DEFAULT_BASE_URL,
+  },
+  {
+    id: Integration.GitHub,
+    label: "GitHub",
+    description: "Repository overview, pull requests, and workflow runs.",
+    endpoint: "api.github.com",
+  },
+  {
+    id: Integration.Vercel,
+    label: "Vercel",
+    description: "Deployments, build logs, and environment variables.",
+    endpoint: "api.vercel.com",
+  },
+  {
+    id: Integration.Neon,
+    label: "Neon",
+    description: "Branches, connection strings, and SQL queries.",
+    endpoint: "console.neon.tech",
+  },
+  {
+    id: Integration.Railway,
+    label: "Railway",
+    description: "Services, deployments, and live log streams.",
+    endpoint: "backboard.railway.app",
+  },
+];
+
+type Phase =
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "verifying" }
+  | { kind: "error"; message: string };
+
+interface RowState {
+  hasToken: boolean;
+  status: IntegrationStatusEntry | null;
+  draft: string;
+  reveal: boolean;
+  phase: Phase;
+}
+
+function IntegrationsSection(): JSX.Element {
+  const [rows, setRows] = createSignal<Record<string, RowState>>({});
+
+  const emptyRow = (): RowState => ({
+    hasToken: false,
+    status: null,
+    draft: "",
+    reveal: false,
+    phase: { kind: "idle" },
+  });
+
+  const patch = (id: string, updates: Partial<RowState>): void => {
+    setRows((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] ?? emptyRow()), ...updates },
+    }));
+  };
+
+  const hydrate = async (): Promise<void> => {
+    const statusMap = await getIntegrationStatusMap();
+    const entries = await Promise.all(
+      INTEGRATIONS.map(async (def) => {
+        let hasToken = false;
+        try {
+          hasToken = await hasCredential(def.id, DEFAULT_ACCOUNT);
+        } catch (err) {
+          console.warn("[integrations] hasCredential failed", def.id, err);
+        }
+        const row: RowState = {
+          hasToken,
+          status: statusMap[def.id] ?? null,
+          draft: "",
+          reveal: false,
+          phase: { kind: "idle" },
+        };
+        return [def.id, row] as const;
+      }),
+    );
+    setRows(Object.fromEntries(entries));
+  };
+
+  onMount(() => {
+    void hydrate();
+  });
+
+  const save = async (def: IntegrationDef): Promise<void> => {
+    const row = rows()[def.id];
+    const token = row?.draft.trim() ?? "";
+    if (!token) return;
+    patch(def.id, { phase: { kind: "saving" } });
+    try {
+      await setCredential(def.id, DEFAULT_ACCOUNT, token);
+      // Saving a new token invalidates any cached "Connected as …" — the
+      // user must re-verify to prove the fresh token works.
+      await clearIntegrationStatus(def.id);
+      patch(def.id, {
+        hasToken: true,
+        status: null,
+        draft: "",
+        reveal: false,
+        phase: { kind: "idle" },
+      });
+    } catch (err) {
+      patch(def.id, { phase: { kind: "error", message: describeError(err) } });
+    }
+  };
+
+  const disconnect = async (def: IntegrationDef): Promise<void> => {
+    patch(def.id, { phase: { kind: "saving" } });
+    try {
+      await deleteCredential(def.id, DEFAULT_ACCOUNT);
+      await clearIntegrationStatus(def.id);
+      patch(def.id, {
+        hasToken: false,
+        status: null,
+        draft: "",
+        reveal: false,
+        phase: { kind: "idle" },
+      });
+    } catch (err) {
+      patch(def.id, { phase: { kind: "error", message: describeError(err) } });
+    }
+  };
+
+  const verify = async (def: IntegrationDef): Promise<void> => {
+    patch(def.id, { phase: { kind: "verifying" } });
+    try {
+      const token = await getCredential(def.id, DEFAULT_ACCOUNT);
+      if (!token) {
+        patch(def.id, {
+          phase: { kind: "error", message: "No token saved. Paste one and Save first." },
+        });
+        return;
+      }
+      const { accountLabel } = await verifyIntegration(def.id, token);
+      const entry: IntegrationStatusEntry = {
+        verifiedAt: Date.now(),
+        accountLabel,
+      };
+      await setIntegrationStatus(def.id, entry);
+      patch(def.id, { status: entry, phase: { kind: "idle" } });
+    } catch (err) {
+      patch(def.id, { phase: { kind: "error", message: describeError(err) } });
+    }
+  };
+
+  return (
+    <>
+      <h2 class="ws-settings-page__section-title">Integrations</h2>
+      <div class="ws-settings-page__group ws-settings-page__integrations">
+        <For each={INTEGRATIONS}>
+          {(def) => {
+            const row = (): RowState => rows()[def.id] ?? emptyRow();
+            const phase = (): Phase => row().phase;
+            const busy = (): boolean => phase().kind === "saving" || phase().kind === "verifying";
+            const canSave = (): boolean => row().draft.trim().length > 0 && !busy();
+            const canVerify = (): boolean => row().hasToken && !busy();
+            return (
+              <div class="ws-integration" role="group" aria-label={`${def.label} integration`}>
+                <div class="ws-integration__head">
+                  <div class="ws-integration__title">
+                    <div class="ws-settings-page__lbl">{def.label}</div>
+                    <div class="ws-settings-page__hint">
+                      {def.description} · {def.endpoint}
+                    </div>
+                  </div>
+                  <IntegrationStatusPill row={row()} />
+                </div>
+
+                <div class="ws-integration__token">
+                  <input
+                    type={row().reveal ? "text" : "password"}
+                    class="ws-settings-page__input ws-integration__input"
+                    placeholder={
+                      row().hasToken ? "Paste a new token to replace…" : "Paste API token"
+                    }
+                    value={row().draft}
+                    onInput={(e) => patch(def.id, { draft: e.currentTarget.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && canSave()) {
+                        e.preventDefault();
+                        void save(def);
+                      }
+                    }}
+                    spellcheck={false}
+                    autocomplete="off"
+                    aria-label={`${def.label} API token`}
+                  />
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn ws-settings-page__btn--ghost"
+                    onClick={() => patch(def.id, { reveal: !row().reveal })}
+                    disabled={row().draft.length === 0}
+                    aria-pressed={row().reveal}
+                  >
+                    {row().reveal ? "Hide" : "Show"}
+                  </button>
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn"
+                    disabled={!canSave()}
+                    onClick={() => void save(def)}
+                  >
+                    {phase().kind === "saving" ? "Saving…" : "Save"}
+                  </button>
+                </div>
+
+                <div class="ws-integration__actions">
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn"
+                    disabled={!canVerify()}
+                    onClick={() => void verify(def)}
+                  >
+                    {phase().kind === "verifying" ? "Verifying…" : "Verify connection"}
+                  </button>
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn ws-settings-page__btn--ghost"
+                    disabled={!row().hasToken || busy()}
+                    onClick={() => void disconnect(def)}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+
+                <Show when={phase().kind === "error" ? phase() : null}>
+                  {(p) => (
+                    <div class="ws-integration__error" role="alert">
+                      <span aria-hidden="true">⚠</span>{" "}
+                      {(p() as Extract<Phase, { kind: "error" }>).message}
+                    </div>
+                  )}
+                </Show>
+              </div>
+            );
+          }}
+        </For>
+      </div>
+    </>
+  );
+}
+
+function IntegrationStatusPill(props: { row: RowState }): JSX.Element {
+  const verifying = (): boolean => props.row.phase.kind === "verifying";
+  const label = (): string => {
+    if (verifying()) return "Checking…";
+    if (props.row.status) return `Connected · ${props.row.status.accountLabel}`;
+    if (props.row.hasToken) return "Saved · not verified";
+    return "Not connected";
+  };
+  const tone = (): string => {
+    if (verifying()) return "checking";
+    if (props.row.status) return "ok";
+    if (props.row.hasToken) return "saved";
+    return "off";
+  };
+  return (
+    <span class="ws-integration__pill" data-tone={tone()}>
+      <span class="ws-integration__dot" aria-hidden="true" />
+      {label()}
+    </span>
+  );
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof IntegrationVerifyError) return err.userMessage;
+  if (err instanceof CredentialsError) return err.userMessage;
+  if (err instanceof Error) return err.message;
+  return "Unexpected error.";
 }
 
 /* ─── Privacy ───────────────────────────────────────────────────────── */
