@@ -16,6 +16,10 @@ Cross-platform desktop hub for managing multiple Claude Code / Kimi / Codex term
 
 v0.1 in progress — see Phase tracker in `PROJECT_PLAN.md`.
 
+## Build & install
+
+See [`BUILD.md`](./BUILD.md) for local macOS builds, retrieving Windows artifacts from GitHub Actions, and installing the unsigned bundles on each OS.
+
 ## Develop
 
 Toolchain (macOS):
