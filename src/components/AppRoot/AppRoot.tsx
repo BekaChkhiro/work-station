@@ -37,6 +37,7 @@ import { AddProjectModal } from "../AddProjectModal";
 import type { AddProjectFormValue, ProjectEnvVars } from "../AddProjectModal";
 import { DeleteProjectConfirm } from "../DeleteProjectConfirm";
 import { ProjectContextMenu } from "../ProjectContextMenu";
+import { SettingsPanel } from "../SettingsPanel";
 import { Terminal } from "../Terminal/Terminal";
 import {
   createProject,
@@ -76,8 +77,10 @@ import {
 import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "../../db/sessions";
 import type { LayoutPersister } from "../../db/sessions";
 import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
+import { eventMatchesBinding, getBinding, loadPersistedBindings } from "../../hotkeys";
 import { addMenuActionListener } from "../../menu";
 import { isMac, isWindows } from "../../utils/platform";
+import "../../stores/appearance";
 
 interface EditTarget {
   id: string;
@@ -113,6 +116,7 @@ export function AppRoot(): JSX.Element {
   const [editTarget, setEditTarget] = createSignal<EditTarget | null>(null);
   const [deleteTarget, setDeleteTarget] = createSignal<EditTarget | null>(null);
   const [contextTarget, setContextTarget] = createSignal<ContextTarget | null>(null);
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [updateVersion, setUpdateVersion] = createSignal<string | null>(null);
   const [updateInstalling, setUpdateInstalling] = createSignal(false);
@@ -251,6 +255,10 @@ export function AppRoot(): JSX.Element {
         void launchMenuTerminal();
         return;
       }
+      if (id === "open-settings") {
+        setSettingsOpen(true);
+        return;
+      }
       if (id === "copy") {
         document.execCommand("copy");
         return;
@@ -260,6 +268,18 @@ export function AppRoot(): JSX.Element {
       }
     });
     onCleanup(dispose);
+  });
+
+  onMount(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (document.body.dataset.wsRebindCapture === "1") return;
+      const binding = getBinding("open-settings");
+      if (!binding || !eventMatchesBinding(event, binding)) return;
+      event.preventDefault();
+      setSettingsOpen(true);
+    };
+    document.addEventListener("keydown", onKeyDown, { capture: true });
+    onCleanup(() => document.removeEventListener("keydown", onKeyDown, { capture: true }));
   });
 
   // T2.12 — spawn a fresh PTY for every pane in `savedLayout`, replace the
@@ -339,6 +359,7 @@ export function AppRoot(): JSX.Element {
         } catch (err) {
           console.error("[T8.3] theme restore failed:", err);
         }
+        await loadPersistedBindings();
         try {
           setAvailableClis(await cliListAvailable());
         } catch (err) {
@@ -857,6 +878,7 @@ export function AppRoot(): JSX.Element {
           });
         }}
       />
+      <SettingsPanel open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
 
       {updateVersion() ? (
         <div class="pointer-events-none fixed inset-0 z-50 flex items-end justify-end p-4">

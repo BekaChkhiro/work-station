@@ -17,16 +17,15 @@
 // scoped search metadata, etc.) stays out of this file — it just deals
 // in layout trees and sessionIds.
 
-import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
+import { For, Show, createEffect, onCleanup, onMount, untrack } from "solid-js";
 import type { JSX } from "solid-js";
 import { LayoutTree } from "../LayoutTree";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import type { CliMeta } from "../../types/tab";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
-import { SettingsMenu } from "../SettingsMenu";
 import { Sidebar } from "../Sidebar";
 import { WindowsAppMenu } from "../WindowsAppMenu";
-import { addMenuActionListener } from "../../menu";
+import { addMenuActionListener, dispatchMenuAction } from "../../menu";
 import type { LayoutPath } from "../../types/layout";
 import {
   activeProjectId,
@@ -63,7 +62,6 @@ export interface AppShellProps {
    *  ordering (DB `position` column) and updates the workspace store so
    *  the next render reflects the change. */
   onReorderProjects?: (nextIds: string[]) => void;
-  onOpenSettings?: () => void;
   clis?: readonly PaneCliOption[];
   onLaunchCli?: (
     projectId: string,
@@ -109,20 +107,14 @@ export function AppShell(props: AppShellProps): JSX.Element {
   // project. Geometry-based; see hotkeys/paneNavHotkeys.ts.
   usePaneNavHotkeys();
 
-  // Settings popover anchored to the sidebar's footer cog.
-  const [settingsOpen, setSettingsOpen] = createSignal(false);
-  const [settingsAnchor, setSettingsAnchor] = createSignal<HTMLButtonElement | null>(null);
-
+  // Settings UI moved to the full-window `SettingsPanel` (T8.7). The
+  // shell only listens for navigation-relevant menu actions here;
+  // `open-settings` is owned by `App.tsx`, which mounts the panel.
   onMount(() => {
     const dispose = addMenuActionListener((id) =>
       untrack(() => {
         if (id === "new-project") {
           props.onAddProject?.();
-          return;
-        }
-        if (id === "open-settings") {
-          setSettingsOpen(true);
-          props.onOpenSettings?.();
           return;
         }
         if (id === "toggle-sidebar") {
@@ -215,18 +207,9 @@ export function AppShell(props: AppShellProps): JSX.Element {
         onEdit={props.onEditProject}
         onContextMenu={props.onProjectContextMenu}
         onReorder={props.onReorderProjects}
-        onSettings={() => {
-          setSettingsOpen((open) => !open);
-          props.onOpenSettings?.();
-        }}
-        onSettingsAnchor={setSettingsAnchor}
+        onSettings={() => dispatchMenuAction("open-settings")}
         onToggleCollapse={() => props.onToggleSidebar?.()}
         newProjectShortcut="⌘N"
-      />
-      <SettingsMenu
-        open={settingsOpen()}
-        anchor={settingsAnchor()}
-        onClose={() => setSettingsOpen(false)}
       />
     </div>
   );

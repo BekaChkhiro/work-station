@@ -23,6 +23,7 @@
 
 import { createStore } from "solid-js/store";
 import { isMac } from "../utils/platform";
+import { getSetting, setSetting } from "../db/settings";
 
 /** A logical modifier. `mod` resolves to Cmd on macOS, Ctrl elsewhere —
  *  binding authors never need to care about the host OS. */
@@ -126,6 +127,40 @@ const [actions, setActions] = createStore<HotkeyAction[]>(
   })),
 );
 
+// T8.7 — Persisted hotkey overrides. The on-disk format is a flat map of
+// `actionId → serialized binding` (see `serializeBinding`); a missing entry
+// falls back to the registry default. `setBinding` writes through to SQL,
+// `loadPersistedBindings` rehydrates on app boot, and `resetBindingsToDefaults`
+// wipes the override map back to the empty object.
+//
+// Suppress write-through during the initial hydrate so we don't echo the
+// freshly-loaded value straight back to SQL.
+let persistEnabled = false;
+
+const MODIFIER_TOKENS: readonly Modifier[] = ["mod", "shift", "alt"];
+
+function serializeBinding(b: Binding): string {
+  const mods = MODIFIER_TOKENS.filter((m) => b.modifiers.includes(m));
+  return [...mods, b.key].join("+");
+}
+
+function parseBinding(s: string): Binding | null {
+  const parts = s.split("+");
+  if (parts.length === 0) return null;
+  const key = parts[parts.length - 1];
+  if (!key) return null;
+  const mods: Modifier[] = [];
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const tok = parts[i];
+    if (tok === "mod" || tok === "shift" || tok === "alt") {
+      if (!mods.includes(tok)) mods.push(tok);
+    } else {
+      return null;
+    }
+  }
+  return { modifiers: mods, key };
+}
+
 /** Read the current binding for an action id. Handlers call this lazily
  *  inside their event listener so a rebinding (T8.7) takes effect on the
  *  next keystroke without re-installing the listener. */
@@ -134,11 +169,79 @@ export function getBinding(id: string): Binding | undefined {
 }
 
 /** Replace the binding for an existing action. No-op if `id` is unknown.
- *  Reactive — UI consumers (T8.2 cheatsheet, T8.7 rebinder) re-render. */
+ *  Reactive — UI consumers (T8.2 cheatsheet, T8.7 rebinder) re-render.
+ *  Writes through to `app_settings.hotkeys` once persistence is enabled. */
 export function setBinding(id: string, binding: Binding): void {
   const idx = actions.findIndex((a) => a.id === id);
   if (idx === -1) return;
-  setActions(idx, "binding", { ...binding, modifiers: [...binding.modifiers] });
+  const next: Binding = { ...binding, modifiers: [...binding.modifiers] };
+  setActions(idx, "binding", next);
+  if (!persistEnabled) return;
+  void persistBinding(id, next).catch((err) =>
+    console.warn("[hotkeys] persist binding failed", err),
+  );
+}
+
+async function persistBinding(id: string, binding: Binding): Promise<void> {
+  const existing = await getSetting("hotkeys");
+  const def = DEFAULT_ACTIONS.find((a) => a.id === id);
+  // If the new binding matches the default, drop the override so a future
+  // default change can flow through automatically.
+  if (def && bindingsEqual(def.binding, binding)) {
+    if (id in existing) {
+      const next = Object.fromEntries(
+        Object.entries(existing).filter(([actionId]) => actionId !== id),
+      );
+      await setSetting("hotkeys", next);
+    }
+    return;
+  }
+  await setSetting("hotkeys", { ...existing, [id]: serializeBinding(binding) });
+}
+
+/** T8.7 — Load persisted overrides on app boot and enable write-through.
+ *  Idempotent: a second call is a no-op. */
+export async function loadPersistedBindings(): Promise<void> {
+  if (persistEnabled) return;
+  try {
+    const overrides = await getSetting("hotkeys");
+    for (const [id, serialized] of Object.entries(overrides)) {
+      const parsed = parseBinding(serialized);
+      if (!parsed) continue;
+      const idx = actions.findIndex((a) => a.id === id);
+      if (idx === -1) continue;
+      setActions(idx, "binding", parsed);
+    }
+  } catch (err) {
+    console.warn("[hotkeys] load persisted bindings failed", err);
+  } finally {
+    persistEnabled = true;
+  }
+}
+
+/** T8.7 — Restore every action to its registered default and clear the
+ *  on-disk override map. Used by the "Reset to defaults" affordance in the
+ *  Keybindings settings section. */
+export async function resetBindingsToDefaults(): Promise<void> {
+  for (let i = 0; i < DEFAULT_ACTIONS.length; i += 1) {
+    const def = DEFAULT_ACTIONS[i];
+    if (!def) continue;
+    setActions(i, "binding", {
+      ...def.binding,
+      modifiers: [...def.binding.modifiers],
+    });
+  }
+  if (persistEnabled) {
+    await setSetting("hotkeys", {});
+  }
+}
+
+/** T8.7 — Default binding for an action id, for "is overridden?" checks
+ *  in the rebinder UI and the reset affordance. */
+export function getDefaultBinding(id: string): Binding | undefined {
+  const def = DEFAULT_ACTIONS.find((a) => a.id === id);
+  if (!def) return undefined;
+  return { ...def.binding, modifiers: [...def.binding.modifiers] };
 }
 
 /** All registered actions, in declaration order. For T8.2 cheatsheet UI. */

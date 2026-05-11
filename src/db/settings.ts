@@ -17,10 +17,18 @@ import { z } from "zod";
 import { db } from "./index";
 
 const ThemeSchema = z.enum(["light", "dark", "system"]);
+// T8.7: rebound hotkeys live as `{ actionId: serializedBinding }`. The
+// serialized form is the hotkey registry's compact wire format —
+// `mod+shift+w` / `mod+alt+ArrowLeft` etc. The registry parses on load
+// and writes back on every rebind, so an entry here always reflects the
+// user override; an absent entry falls back to the registry default.
 const HotkeysSchema = z.record(z.string(), z.string());
 const ScrollbackSchema = z.number().int().positive().max(1_000_000);
 const ProjectIdSchema = z.string().min(1).nullable();
 const FallbackCliSchema = z.string().min(1).nullable();
+const DensitySchema = z.enum(["compact", "comfortable"]);
+const MonoFontSchema = z.enum(["jetbrains", "geist", "berkeley", "system"]);
+const UiFontSizeSchema = z.number().int().min(12).max(16);
 
 interface SettingDef<T> {
   schema: z.ZodType<T>;
@@ -40,6 +48,9 @@ export const SETTINGS = {
   last_active_project: def(ProjectIdSchema, null as z.infer<typeof ProjectIdSchema>),
   scrollback_size: def(ScrollbackSchema, 10_000),
   default_fallback_cli: def(FallbackCliSchema, null as z.infer<typeof FallbackCliSchema>),
+  density: def(DensitySchema, "comfortable" as z.infer<typeof DensitySchema>),
+  mono_font: def(MonoFontSchema, "jetbrains" as z.infer<typeof MonoFontSchema>),
+  ui_font_size: def(UiFontSizeSchema, 13),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;

@@ -8,7 +8,10 @@ export {
   findConflicts,
   formatBinding,
   getBinding,
+  getDefaultBinding,
   listActions,
+  loadPersistedBindings,
+  resetBindingsToDefaults,
   setBinding,
 } from "./registry";
 export type { Binding, BindingConflict, HotkeyAction, Modifier } from "./registry";

@@ -877,56 +877,6 @@ button {
   font-size: var(--fs-12);
 }
 
-/* Settings popover anchored to the sidebar footer cog. Positioned in
- * viewport coordinates by `SettingsMenu`; the rule below provides shell
- * styling only. */
-.ws-settings {
-  position: fixed;
-  z-index: 90;
-  border: 1px solid var(--border-default);
-  border-radius: var(--r-md);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-popover);
-  padding: var(--sp-1);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-}
-.ws-settings__head {
-  padding: 6px 10px 4px;
-  color: var(--text-tertiary);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.ws-settings__group {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
-  background: var(--bg-surface);
-}
-.ws-settings__opt {
-  flex: 1;
-  padding: 6px 10px;
-  border-radius: calc(var(--r-sm) - 1px);
-  color: var(--text-secondary);
-  font-size: var(--fs-12);
-  text-align: center;
-  transition:
-    background var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease);
-}
-.ws-settings__opt:hover {
-  color: var(--text-primary);
-}
-.ws-settings__opt[data-selected="true"] {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
 /* Project-level terminal empty state shown after the last pane closes. */
 .ws-project-empty {
   display: grid;
@@ -2580,4 +2530,522 @@ button {
 .ws-titlebar__btn--close:hover {
   background: var(--error, #e5484d);
   color: #fff;
+}
+
+/* T8.7 — Settings page (full-window modal) */
+.ws-settings-page__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  z-index: 1000;
+  animation: ws-settings-fade var(--dur-modal) var(--ease);
+}
+
+@keyframes ws-settings-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.ws-settings-page {
+  display: grid;
+  grid-template-rows: 40px 1fr;
+  background: var(--bg-canvas);
+  width: min(960px, 100%);
+  height: min(720px, 100%);
+  margin: auto;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-popover);
+  overflow: hidden;
+}
+
+.ws-settings-page__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  border-bottom: 1px solid var(--border-default);
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+}
+
+.ws-settings-page__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: 26px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+}
+
+.ws-settings-page__back:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ws-settings-page__hint {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: var(--fs-11);
+}
+
+.ws-settings-page__body {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ws-settings-page__rail {
+  border-right: 1px solid var(--border-subtle);
+  padding: var(--sp-3) var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bg-surface);
+  overflow-y: auto;
+}
+
+.ws-settings-page__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  border-radius: var(--r-md);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+  text-align: left;
+  position: relative;
+}
+
+.ws-settings-page__nav:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ws-settings-page__nav[data-active="true"] {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.ws-settings-page__nav[data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+.ws-settings-page__content {
+  overflow-y: auto;
+  padding: var(--sp-6) 28px 60px;
+}
+
+.ws-settings-page__inner {
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+
+.ws-settings-page__section-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin: 0 0 var(--sp-1);
+}
+
+.ws-settings-page__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-6);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ws-settings-page__group:last-child {
+  border-bottom: 0;
+}
+
+.ws-settings-page__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: var(--sp-4);
+}
+
+.ws-settings-page__row.col {
+  grid-template-columns: 1fr;
+}
+
+.ws-settings-page__lbl {
+  font-size: var(--fs-13);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.ws-settings-page__hint {
+  font-size: var(--fs-12);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  max-width: 460px;
+  line-height: 1.45;
+}
+
+.ws-settings-page__badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  background: var(--bg-active, var(--bg-elevated));
+  border-radius: 3px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
+.ws-settings-page__input {
+  height: 28px;
+  padding: 0 10px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-12);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.ws-settings-page__input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.ws-settings-page__slider-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.ws-settings-page__slider {
+  width: 220px;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--bg-active, var(--bg-elevated));
+  border-radius: 2px;
+  outline: none;
+}
+
+.ws-settings-page__slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--bg-canvas);
+}
+
+.ws-settings-page__slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--bg-canvas);
+}
+
+.ws-settings-page__slider-val {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  min-width: 36px;
+  text-align: right;
+}
+
+.ws-settings-page__seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  padding: 2px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  gap: 2px;
+}
+
+.ws-settings-page__seg-btn {
+  height: 24px;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ws-settings-page__seg-btn:hover {
+  color: var(--text-primary);
+}
+
+.ws-settings-page__seg-btn[data-on="true"] {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--border-default);
+}
+
+.ws-settings-page__toggle {
+  width: 32px;
+  height: 18px;
+  border-radius: 10px;
+  background: var(--bg-active, var(--bg-elevated));
+  border: 1px solid var(--border-default);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--dur-base) var(--ease);
+  padding: 0;
+}
+
+.ws-settings-page__toggle::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: all var(--dur-base) var(--ease);
+}
+
+.ws-settings-page__toggle[data-on="true"] {
+  background: var(--accent);
+  border-color: transparent;
+}
+
+.ws-settings-page__toggle[data-on="true"]::after {
+  left: 16px;
+  background: #fff;
+}
+
+.ws-settings-page__toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ws-settings-page__btn {
+  height: 26px;
+  padding: 0 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+}
+
+.ws-settings-page__btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ws-settings-page__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ws-settings-page__btn--ghost {
+  background: transparent;
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.ws-settings-page__btn--ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ws-settings-page__warn {
+  padding: 8px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--warning, #d4a017);
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: var(--fs-12);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ws-settings-page__hk-table {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+
+.ws-settings-page__hk-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--fs-12);
+}
+
+.ws-settings-page__hk-row:last-child {
+  border-bottom: 0;
+}
+
+.ws-settings-page__hk-row:hover {
+  background: var(--bg-hover);
+}
+
+.ws-settings-page__hk-label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.ws-settings-page__hk-sub {
+  font-size: var(--fs-11);
+  color: var(--accent);
+  margin-top: 1px;
+}
+
+.ws-settings-page__hk-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.ws-settings-page__hk-capture {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-style: italic;
+  color: var(--text-tertiary);
+}
+
+.ws-settings-page__hk-capture em {
+  font-style: italic;
+}
+
+.ws-settings-page__hk-warn {
+  color: var(--warning, #d4a017);
+  font-size: var(--fs-11);
+  font-style: normal;
+}
+
+.ws-settings-page__hk-actions {
+  display: inline-flex;
+  gap: var(--sp-1);
+}
+
+.ws-settings-page__empty {
+  padding: var(--sp-4);
+  text-align: center;
+  font-size: var(--fs-12);
+  color: var(--text-tertiary);
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--r-md);
+}
+
+.ws-settings-page__cli-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.ws-settings-page__cli-row {
+  display: grid;
+  grid-template-columns: 1fr auto 2fr;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--fs-12);
+}
+
+.ws-settings-page__cli-row:last-child {
+  border-bottom: 0;
+}
+
+.ws-settings-page__cli-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.ws-settings-page__cli-version {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+.ws-settings-page__cli-path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-settings-page__about {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--sp-3) 0;
+}
+
+.ws-settings-page__about-title {
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ws-settings-page__about-version {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+}
+
+.ws-settings-page__about-meta {
+  font-size: var(--fs-12);
+  color: var(--text-tertiary);
 }
