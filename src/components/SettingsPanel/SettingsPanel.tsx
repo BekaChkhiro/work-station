@@ -795,6 +795,9 @@ interface RowState {
 
 function IntegrationsSection(): JSX.Element {
   const [rows, setRows] = createSignal<Record<string, RowState>>({});
+  // T11.10 — first-run reassurance card. Starts hidden until the stored
+  // flag resolves so we never render-then-yank it on dismissed users.
+  const [introState, setIntroState] = createSignal<"loading" | "shown" | "dismissed">("loading");
 
   const emptyRow = (): RowState => ({
     hasToken: false,
@@ -840,7 +843,20 @@ function IntegrationsSection(): JSX.Element {
     // again here is cheap (idempotent) and guarantees the panel is
     // never the first reader.
     void hydrateReauthState();
+    void getSetting("integrations_intro_dismissed").then((dismissed) => {
+      setIntroState(dismissed ? "dismissed" : "shown");
+    });
   });
+
+  const dismissIntro = (): void => {
+    setIntroState("dismissed");
+    // Best-effort write — a transient SQLite failure shouldn't keep the
+    // card on screen, the in-memory flag is the source of truth for this
+    // session and the next mount will re-read the row.
+    void setSetting("integrations_intro_dismissed", true).catch((err: unknown) => {
+      console.warn("[T11.10] failed to persist integrations intro dismissal", err);
+    });
+  };
 
   const save = async (def: IntegrationDef): Promise<void> => {
     const row = rows()[def.id];
@@ -916,6 +932,26 @@ function IntegrationsSection(): JSX.Element {
     <>
       <h2 class="ws-settings-page__section-title">Integrations</h2>
       <div class="ws-settings-page__group ws-settings-page__integrations">
+        <Show when={introState() === "shown"}>
+          <div class="ws-integration-intro" role="note" aria-label="Integrations privacy note">
+            <div class="ws-integration-intro__body">
+              <div class="ws-integration-intro__title">Your tokens stay on this device</div>
+              <div class="ws-integration-intro__text">
+                Work Station saves API tokens in your OS keychain — no servers, no middleman. Each
+                card below links straight to the right tokens page for the service. Paste a token,
+                Verify, and you're connected.
+              </div>
+            </div>
+            <button
+              type="button"
+              class="ws-integration-intro__dismiss"
+              onClick={dismissIntro}
+              aria-label="Dismiss intro"
+            >
+              Got it
+            </button>
+          </div>
+        </Show>
         <For each={INTEGRATIONS}>
           {(def) => {
             const row = (): RowState => rows()[def.id] ?? emptyRow();

@@ -51,6 +51,10 @@ const IntegrationStatusSchema = z.record(
     needsReauthAt: z.number().int().nullable().optional(),
   }),
 );
+// T11.10: a one-time intro card sits on top of the Integrations panel
+// reassuring the user that tokens never leave the device. Once dismissed
+// we don't show it again — toggled back on by clearing the flag.
+const IntegrationsIntroDismissedSchema = z.boolean();
 
 interface SettingDef<T> {
   schema: z.ZodType<T>;
@@ -74,6 +78,7 @@ export const SETTINGS = {
   mono_font: def(MonoFontSchema, "jetbrains" as z.infer<typeof MonoFontSchema>),
   ui_font_size: def(UiFontSizeSchema, 13),
   integration_status: def(IntegrationStatusSchema, {} as z.infer<typeof IntegrationStatusSchema>),
+  integrations_intro_dismissed: def(IntegrationsIntroDismissedSchema, false),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;
