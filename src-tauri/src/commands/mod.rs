@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod clipboard;
 pub mod credentials;
+pub mod files;
 pub mod integration_queue;
 pub mod log;
 pub mod picker;

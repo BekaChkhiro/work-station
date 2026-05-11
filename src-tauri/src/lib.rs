@@ -171,6 +171,7 @@ pub fn run() {
             commands::project_links::project_link_set,
             commands::project_links::project_link_delete,
             commands::picker::pick_project_folder,
+            commands::files::read_text_file,
             commands::cli::cli_list_available,
             commands::clipboard::save_clipboard_image,
             commands::credentials::credentials_set,
