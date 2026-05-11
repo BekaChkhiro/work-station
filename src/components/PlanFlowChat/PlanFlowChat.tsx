@@ -50,6 +50,7 @@ import {
 import { cliListAvailable } from "../../ipc/cli";
 import type { CliInfo } from "../../ipc/cli";
 import { Tooltip } from "../Tooltip";
+import { renderChatMarkdown } from "./markdown";
 
 export interface PlanFlowChatProps {
   /** Workspace projectId — the local row, used as the chat's primary key. */
@@ -362,6 +363,12 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
 function ChatBubble(props: { message: ChatMessage }): JSX.Element {
   const isUser = (): boolean => props.message.role === "user";
   const isSystem = (): boolean => props.message.role === "system";
+  // Assistant content is rendered through the minimal markdown helper
+  // so backticks, **bold**, lists, and fenced code blocks come out
+  // legible. User messages stay plain text — the user typed them and
+  // we don't want to render their own asterisks as formatting.
+  const renderedHtml = (): string =>
+    isUser() || isSystem() ? "" : renderChatMarkdown(props.message.content);
   return (
     <div
       class="ws-pf-chat__bubble"
@@ -371,7 +378,16 @@ function ChatBubble(props: { message: ChatMessage }): JSX.Element {
       <Show when={!isUser() && !isSystem() && props.message.cli}>
         {(cli) => <span class="ws-pf-chat__bubble-author">{cli()}</span>}
       </Show>
-      <div class="ws-pf-chat__bubble-content">{props.message.content}</div>
+      <Show
+        when={!isUser() && !isSystem()}
+        fallback={<div class="ws-pf-chat__bubble-content">{props.message.content}</div>}
+      >
+        <div
+          class="ws-pf-chat__bubble-content ws-pf-chat__bubble-content--md"
+          // eslint-disable-next-line solid/no-innerhtml
+          innerHTML={renderedHtml()}
+        />
+      </Show>
       <Show when={(props.message.toolCalls ?? []).length > 0}>
         <ul class="ws-pf-chat__tools" role="list">
           <For each={props.message.toolCalls ?? []}>

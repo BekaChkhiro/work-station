@@ -5705,6 +5705,60 @@ button {
   font-weight: 600;
 }
 
+.ws-pf-chat__bubble-content--md p {
+  margin: 0 0 6px;
+}
+
+.ws-pf-chat__bubble-content--md p:last-child {
+  margin-bottom: 0;
+}
+
+.ws-pf-chat__bubble-content--md strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ws-pf-chat__bubble-content--md em {
+  font-style: italic;
+}
+
+.ws-pf-chat__md-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.ws-pf-chat__md-pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-xs, 4px);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.ws-pf-chat__md-pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+}
+
+.ws-pf-chat__md-ul,
+.ws-pf-chat__md-ol {
+  margin: 4px 0 6px;
+  padding-left: 20px;
+}
+
+.ws-pf-chat__md-ul li,
+.ws-pf-chat__md-ol li {
+  margin: 1px 0;
+}
+
 .ws-pf-chat__tools {
   list-style: none;
   margin: 4px 0 0;

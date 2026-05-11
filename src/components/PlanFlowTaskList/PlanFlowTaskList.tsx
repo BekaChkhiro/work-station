@@ -70,6 +70,7 @@ import {
 type MeUser = Me["user"];
 import { activeTaskId, setActiveTaskId } from "../../stores/activeTask";
 import { consumeTaskJump, pendingTaskJump } from "../../stores/pendingTaskJump";
+import { planflowChatRefetchTick } from "../../stores/planflowChatNotify";
 import { ActiveWorkPanel } from "./ActiveWorkPanel";
 import { ActivityFeed } from "./ActivityFeed";
 import { TaskDetailPanel } from "./TaskDetailPanel";
@@ -165,7 +166,15 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
   const [reloadKey, setReloadKey] = createSignal(0);
 
   const [tasks, { refetch }] = createResource(
-    () => ({ externalId: props.externalId, reloadKey: reloadKey() }),
+    () => ({
+      externalId: props.externalId,
+      reloadKey: reloadKey(),
+      // Phase 5 — re-run whenever the chat bridge bumps the per-project
+      // refetch tick. The tick fires after an assistant turn that
+      // invoked a planflow_* tool, so any plan/task mutation the CLI
+      // made shows up here without the user manually pressing refresh.
+      chatTick: planflowChatRefetchTick(props.workspaceProjectId),
+    }),
     async (input): Promise<Task[]> => {
       return await client.listTasks(input.externalId);
     },

@@ -25,11 +25,13 @@
 // existing onCleanup that runs through `setChatBridge(null)`.
 
 import { ptyKill, ptySpawn, ptySubscribe, ptyWrite, type PtySubscription } from "../../ipc/pty";
+import { bumpPlanflowChatRefetch } from "../../stores/planflowChatNotify";
 import {
   setChatBridge,
   type ChatSessionResult,
   type SendChatMessageInput,
 } from "../../stores/planflowChatBridge";
+import type { ToolCall } from "../../db/planflowChats";
 
 /** Wait this long after the last stdout chunk before treating the
  *  assistant's turn as finished. 1500ms is long enough to ride out a
@@ -115,6 +117,27 @@ function stripAnsi(input: string): string {
     .replace(/\r/g, "");
 }
 /* eslint-enable no-control-regex */
+
+/** Detect tool calls the assistant made during this turn. We can't
+ *  reliably parse a tool-call JSON out of an interactive REPL's
+ *  output, so we use a heuristic: every distinct `planflow_<name>`
+ *  mention is recorded as a tool call (with empty args). This gives
+ *  the UI a "✏ planflow_task_progress" chip without claiming to know
+ *  the arguments. False positives are harmless — the chip just hints
+ *  at what the assistant did. */
+function detectToolCalls(text: string): ToolCall[] {
+  const seen = new Set<string>();
+  const calls: ToolCall[] = [];
+  const regex = /\bplanflow_[a-z_]+/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    const name = match[0];
+    if (seen.has(name)) continue;
+    seen.add(name);
+    calls.push({ name });
+  }
+  return calls;
+}
 
 /** Trim leading echoes of the user's own input and trailing CLI prompts
  *  (lines like `> `, `Claude > `, etc.) so the chat shows only the
@@ -287,12 +310,13 @@ export function installChatBridge(options: ChatBridgeOptions): () => void {
     await Promise.race([idle, new Promise<void>((resolve) => setTimeout(resolve, MAX_TURN_MS))]);
 
     const tidied = tidyOutput(stripAnsi(session.buffer), userInput);
+    const toolCalls = detectToolCalls(tidied);
     return {
       content:
         tidied.length > 0
           ? tidied
           : "(no output — the CLI may need an interactive session, try opening a terminal pane)",
-      toolCalls: null,
+      toolCalls: toolCalls.length > 0 ? toolCalls : null,
     };
   };
 
@@ -311,7 +335,15 @@ export function installChatBridge(options: ChatBridgeOptions): () => void {
       // assistant bubble contains the answer to the user's question,
       // not the tail of the primer's acknowledgement.
       await session.ready;
-      return await runTurn(session, input.content);
+      const result = await runTurn(session, input.content);
+      // Phase 5 — if the assistant invoked any planflow_* tool, the
+      // local task list is stale. Bumping the per-project refetch tick
+      // makes LinkedTaskList re-run its task resource on the next
+      // microtask so the user sees the edit without manual refresh.
+      if (result.toolCalls && result.toolCalls.length > 0) {
+        bumpPlanflowChatRefetch(input.projectId);
+      }
+      return result;
     } finally {
       release();
       if (session.busy != null) session.busy = null;
