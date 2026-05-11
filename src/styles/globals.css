@@ -5553,6 +5553,17 @@ button {
   border-color: rgba(106, 170, 100, 0.45);
 }
 
+.ws-pf-chat__chip-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.ws-pf-chat__chip:hover .ws-pf-chat__chip-icon {
+  color: var(--text-primary);
+}
+
 .ws-pf-chat__chip-dot {
   width: 6px;
   height: 6px;
@@ -5621,6 +5632,10 @@ button {
   display: grid;
   place-items: center;
   font-size: 12px;
+}
+
+.ws-pf-chat__head-btn svg {
+  display: block;
 }
 
 .ws-pf-chat__head-btn:hover {

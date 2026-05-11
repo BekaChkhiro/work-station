@@ -243,9 +243,9 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
   const chipLabel = createMemo<string>(() => {
     const cli = chatCli(props.projectId);
     if (cli != null && cli.length > 0) {
-      return `💬 ${cli.charAt(0).toUpperCase() + cli.slice(1)}`;
+      return `${cli.charAt(0).toUpperCase() + cli.slice(1)}`;
     }
-    return "💬 Plan chat";
+    return "Plan chat";
   });
 
   return (
@@ -262,6 +262,9 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
           onClick={expand}
           aria-label="Open PlanFlow chat"
         >
+          <span class="ws-pf-chat__chip-icon" aria-hidden="true">
+            <IconChat />
+          </span>
           <span class="ws-pf-chat__chip-dot" data-on={sessionId() != null ? "true" : undefined} />
           <span class="ws-pf-chat__chip-label">{chipLabel()}</span>
         </button>
@@ -300,7 +303,7 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
                 onClick={refreshTasks}
                 aria-label="Refresh task list"
               >
-                ↻
+                <IconRefresh />
               </button>
             </Tooltip>
             <Show when={sessionId() != null}>
@@ -311,7 +314,7 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
                   onClick={() => void closeSession()}
                   aria-label="Close CLI session"
                 >
-                  ⏹
+                  <IconStop />
                 </button>
               </Tooltip>
             </Show>
@@ -325,7 +328,9 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
                   chatPanel(props.projectId) === "pinned" ? "Unpin chat" : "Pin chat open"
                 }
               >
-                {chatPanel(props.projectId) === "pinned" ? "📌" : "📍"}
+                <Show when={chatPanel(props.projectId) === "pinned"} fallback={<IconPin />}>
+                  <IconPinOff />
+                </Show>
               </button>
             </Tooltip>
             <Tooltip label="Minimize">
@@ -335,7 +340,7 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
                 onClick={collapse}
                 aria-label="Minimize chat"
               >
-                ✕
+                <IconMinimize />
               </button>
             </Tooltip>
           </header>
@@ -381,3 +386,79 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
 }
 
 export default PlanFlowChat;
+
+/* ─── Inline icon components ─────────────────────────────────────────
+ *
+ * Lucide-style strokes, currentColor so they inherit the surrounding
+ * text colour (which lets the data-on / data-danger button styles
+ * tint them without per-icon overrides). 14×14 viewport keeps them
+ * proportionate to the 22px header buttons. */
+
+function iconProps(size?: number): JSX.IntrinsicElements["svg"] {
+  return {
+    width: size ?? 14,
+    height: size ?? 14,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": 1.8,
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+  };
+}
+
+function IconChat(props: { size?: number } = {}): JSX.Element {
+  return (
+    <svg {...iconProps(props.size)}>
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    </svg>
+  );
+}
+
+function IconRefresh(props: { size?: number } = {}): JSX.Element {
+  return (
+    <svg {...iconProps(props.size)}>
+      <polyline points="23 4 23 10 17 10" />
+      <polyline points="1 20 1 14 7 14" />
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+    </svg>
+  );
+}
+
+function IconStop(props: { size?: number } = {}): JSX.Element {
+  return (
+    <svg {...iconProps(props.size)}>
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </svg>
+  );
+}
+
+function IconPin(props: { size?: number } = {}): JSX.Element {
+  return (
+    <svg {...iconProps(props.size)}>
+      <line x1="12" y1="17" x2="12" y2="22" />
+      <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1V4H8v2h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24z" />
+    </svg>
+  );
+}
+
+function IconPinOff(props: { size?: number } = {}): JSX.Element {
+  return (
+    <svg {...iconProps(props.size)}>
+      <line x1="2" y1="2" x2="22" y2="22" />
+      <line x1="12" y1="17" x2="12" y2="22" />
+      <path d="M9 4h7v2h-1v4.76a2 2 0 0 0 1.11 1.79l1.78.9A2 2 0 0 1 19 15.24V17h-9" />
+      <path d="M9 6v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17" />
+    </svg>
+  );
+}
+
+function IconMinimize(props: { size?: number } = {}): JSX.Element {
+  return (
+    <svg {...iconProps(props.size)}>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
