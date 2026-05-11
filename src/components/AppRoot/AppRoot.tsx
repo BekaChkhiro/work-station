@@ -74,6 +74,7 @@ import {
 import { listProjectLinks } from "../../db/projectLinks";
 import { Integration } from "../../integrations";
 import { setFocusedSessionCliResolver, setTaskCliLauncher } from "../../stores/taskCliLauncher";
+import { closeAllPlanflowChatSessions } from "../../stores/planflowChatSessions";
 import type { WorkspaceTabKind } from "../../types/workspaceTab";
 import {
   collectPanes,
@@ -488,6 +489,11 @@ export function AppRoot(): JSX.Element {
       // outlive this mount during HMR.
       setTaskCliLauncher(null);
       setFocusedSessionCliResolver(null);
+      // PlanFlow chat sessions live in a module-level registry so
+      // they survive panel collapses + project switches. They DON'T
+      // get to outlive the app though — kill every tracked PTY on
+      // teardown so we don't leak claude/kimi/codex processes.
+      void closeAllPlanflowChatSessions();
       // Best-effort — if the window is closing the OS will reap them
       // anyway, but explicit kills help during HMR-style remounts.
       for (const list of Object.values(sessionsByProject)) {

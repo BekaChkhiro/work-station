@@ -41,10 +41,15 @@ import {
 } from "../../stores/planflowChatPrefs";
 import { cliListAvailable } from "../../ipc/cli";
 import type { CliInfo } from "../../ipc/cli";
-import { ptyKill, ptySpawn } from "../../ipc/pty";
+import { ptySpawn } from "../../ipc/pty";
 import { Terminal } from "../Terminal/Terminal";
 import { Tooltip } from "../Tooltip";
 import { bumpPlanflowChatRefetch } from "../../stores/planflowChatNotify";
+import {
+  closePlanflowChatSession,
+  planflowChatSession,
+  setPlanflowChatSession,
+} from "../../stores/planflowChatSessions";
 import { listProjects, type Project } from "../../db/projects";
 
 export interface PlanFlowChatProps {
@@ -56,8 +61,16 @@ export interface PlanFlowChatProps {
 }
 
 export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
-  const [sessionId, setSessionId] = createSignal<string | null>(null);
+  // Reactive read of the project's session from the module-level
+  // registry. Keeping the source of truth outside the component is
+  // what lets the PTY live through panel collapses and project
+  // switches — see planflowChatSessions for the lifecycle contract.
+  const session = (): ReturnType<typeof planflowChatSession> =>
+    planflowChatSession(props.projectId);
+  const sessionId = (): string | null => session()?.sessionId ?? null;
+  const sessionCli = (): string | null => session()?.cliId ?? null;
   const [spawnError, setSpawnError] = createSignal<string | null>(null);
+  const [spawning, setSpawning] = createSignal(false);
 
   const [availableClis] = createResource<CliInfo[]>(async () => {
     try {
@@ -107,26 +120,27 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
     return availableClis()?.find((c) => c.name === cliId)?.path ?? null;
   };
 
-  // Spawn / re-spawn the PTY when the *trigger inputs* — panel state +
-  // chosen CLI — change. We use `on(...)` with explicit deps so the
-  // effect re-runs ONLY when those signals change, not when the body
-  // happens to read other reactive values (like `sessionId`). Without
-  // this guard the previous version looped: setSessionId inside the
-  // async block was tracked by the surrounding effect, which spawned
-  // again, ad infinitum — hence the "session EOF; removing" log spam.
+  // Spawn / swap / preserve the PTY based on panel state + selected
+  // CLI. Lifecycle contract:
+  //   * panel collapsed → DO NOTHING (session keeps running). The
+  //     xterm renderer is unmounted, but the underlying PTY is alive
+  //     in the registry so re-opening just re-attaches.
+  //   * panel expanded/pinned + no session yet → spawn fresh CLI.
+  //   * panel expanded/pinned + existing session for a DIFFERENT cli
+  //     → kill the old one and spawn the new one (user-driven CLI
+  //     swap).
+  //   * panel expanded/pinned + matching session → noop, the existing
+  //     PTY stays.
+  // We use `on(...)` with explicit deps so reads of `session()`,
+  // `projectCwd()` etc. inside the body don't add reactive deps that
+  // would trigger redundant re-runs.
   createEffect(
     on([() => chatPanel(props.projectId), () => chatCli(props.projectId)], ([panel, cli]) => {
       if (panel === "collapsed") {
-        const id = untrack(sessionId);
-        if (id != null) {
-          void ptyKill(id);
-          setSessionId(null);
-          // When the panel closes we ALSO bump the refetch tick so
-          // any task changes the assistant made show up. Guarded by
-          // the "had-a-session" check so collapsed → collapsed
-          // re-renders don't spam refetches.
-          bumpPlanflowChatRefetch(props.projectId);
-        }
+        // Bump the task list refetch tick once whenever the panel
+        // collapses with an active session — likely the assistant
+        // edited something while it was open.
+        if (untrack(session) != null) bumpPlanflowChatRefetch(props.projectId);
         return;
       }
 
@@ -139,18 +153,25 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
         setSpawnError(`CLI "${cli}" is not on PATH.`);
         return;
       }
+
+      const existing = untrack(session);
+      if (existing && existing.cliId === cli) {
+        // Same CLI is already running — leave it. Clears any stale
+        // spawn error from a previous attempt.
+        setSpawnError(null);
+        return;
+      }
+
       setSpawnError(null);
+      setSpawning(true);
 
       void (async () => {
-        // Read + clear the previous session id before awaiting the
-        // new spawn so a fast CLI swap doesn't double-spawn. Both
-        // reads are untracked because Solid's tracking of async
-        // continuations would otherwise re-arm the outer effect.
-        const previousId = untrack(sessionId);
-        if (previousId != null) {
-          void ptyKill(previousId);
+        if (existing) {
+          // CLI changed → tear down the previous session before
+          // spawning the new one. closePlanflowChatSession kills the
+          // PTY and removes the registry entry.
+          await closePlanflowChatSession(props.projectId);
         }
-        setSessionId(null);
         const cwd = untrack(projectCwd);
         try {
           const resp = await ptySpawn({
@@ -169,20 +190,23 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
             cols: 80,
             rows: 24,
           });
-          setSessionId(resp.sessionId);
+          setPlanflowChatSession(props.projectId, {
+            sessionId: resp.sessionId,
+            cliId: cli,
+          });
         } catch (error) {
           setSpawnError(error instanceof Error ? error.message : "Couldn't start the CLI.");
+        } finally {
+          setSpawning(false);
         }
       })();
     }),
   );
 
-  onCleanup(() => {
-    const id = untrack(sessionId);
-    if (id != null) {
-      void ptyKill(id);
-    }
-  });
+  // No onCleanup tear-down — the session is owned by the registry,
+  // not by this component. AppRoot calls closeAllPlanflowChatSessions
+  // on app exit. A component remount (HMR, project switch) leaves the
+  // PTY running so the user keeps their conversation.
 
   const expand = (): void => {
     if (chatPanel(props.projectId) === "collapsed") {
@@ -198,6 +222,9 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
   };
   const refreshTasks = (): void => {
     bumpPlanflowChatRefetch(props.projectId);
+  };
+  const closeSession = async (): Promise<void> => {
+    await closePlanflowChatSession(props.projectId);
   };
 
   // Outside-click closes the expanded panel — unless it's pinned.
@@ -276,6 +303,18 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
                 ↻
               </button>
             </Tooltip>
+            <Show when={sessionId() != null}>
+              <Tooltip label="Close CLI session">
+                <button
+                  type="button"
+                  class="ws-pf-chat__head-btn ws-pf-chat__head-btn--danger"
+                  onClick={() => void closeSession()}
+                  aria-label="Close CLI session"
+                >
+                  ⏹
+                </button>
+              </Tooltip>
+            </Show>
             <Tooltip label={chatPanel(props.projectId) === "pinned" ? "Unpin" : "Pin open"}>
               <button
                 type="button"
@@ -315,7 +354,12 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
               fallback={
                 <div class="ws-pf-chat__empty">
                   <Show when={spawnError() == null} fallback={<span>{spawnError()}</span>}>
-                    Starting {chatCli(props.projectId) ?? "CLI"}…
+                    <Show
+                      when={spawning()}
+                      fallback={<span>No session — pick a CLI to start.</span>}
+                    >
+                      Starting {chatCli(props.projectId) ?? "CLI"}…
+                    </Show>
                   </Show>
                 </div>
               }
@@ -324,7 +368,7 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
                 <Terminal
                   sessionId={id()}
                   projectId={props.projectId}
-                  title={`planflow-chat:${chatCli(props.projectId) ?? "cli"}`}
+                  title={`planflow-chat:${sessionCli() ?? "cli"}`}
                   fontSize={12}
                 />
               )}

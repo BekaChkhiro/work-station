@@ -5632,6 +5632,15 @@ button {
   color: var(--accent, #6aaa64);
 }
 
+.ws-pf-chat__head-btn--danger {
+  color: var(--danger, #e5484d);
+}
+
+.ws-pf-chat__head-btn--danger:hover {
+  background: rgba(229, 72, 77, 0.12);
+  color: var(--danger, #e5484d);
+}
+
 .ws-pf-chat__notice {
   padding: 8px 12px;
   font-size: 11px;
