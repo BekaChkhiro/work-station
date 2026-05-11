@@ -255,7 +255,12 @@ export function installChatBridge(options: ChatBridgeOptions): () => void {
     // `ready` after MAX_TURN_MS even if the CLI never goes idle.
     const externalId = options.resolveExternalId?.(projectId) ?? null;
     const primer = scopePrimer(externalId);
-    const payload = new TextEncoder().encode(`${primer}\n`);
+    // Claude Code (and most Ink-based TUIs) read raw key events: Enter
+    // arrives as CR (`\r`), not LF (`\n`). Sending `\n` types a literal
+    // newline into the input field but never submits. Use `\r` for the
+    // submit keystroke; embedded `\n`s in the message body stay as
+    // shift+enter newlines.
+    const payload = new TextEncoder().encode(`${primer}\r`);
     await ptyWrite(resp.sessionId, payload);
     primerTimer = setTimeout(() => {
       const resolve = primerResolve;
@@ -302,7 +307,9 @@ export function installChatBridge(options: ChatBridgeOptions): () => void {
     });
 
     // Send the user's message + Enter so the CLI processes it.
-    const payload = new TextEncoder().encode(`${userInput.replace(/\r/g, "")}\n`);
+    // Same CR-as-Enter convention as the primer write. Strip CRs from
+    // the body so they don't get treated as multiple submits.
+    const payload = new TextEncoder().encode(`${userInput.replace(/\r/g, "")}\r`);
     await ptyWrite(session.sessionId, payload);
 
     // Race the idle promise against the hard ceiling so a stuck CLI
