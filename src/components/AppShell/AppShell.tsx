@@ -25,16 +25,21 @@ import type { CliMeta } from "../../types/tab";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
 import { Sidebar } from "../Sidebar";
 import { WindowsAppMenu } from "../WindowsAppMenu";
+import { IntegrationTabPlaceholder, WorkspaceTabStrip } from "../WorkspaceTabStrip";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
 import type { LayoutPath } from "../../types/layout";
+import type { WorkspaceTabKind } from "../../types/workspaceTab";
 import {
   activeProjectId,
+  activeTab,
   projects,
   sessionCount,
   setActiveProject,
+  setActiveTab,
   setFocusedSession,
   updateLayoutRatio,
   getWorkspace,
+  visibleTabs,
 } from "../../stores/workspace";
 import { sessionList } from "../../stores/sessions";
 import { useNumericProjectHotkeys } from "../../hotkeys/numericProjectHotkeys";
@@ -89,6 +94,13 @@ export interface AppShellProps {
    *  caller can return a "spawn first pane" CTA, an empty illustration,
    *  whatever. Defaults to a quiet hint. */
   renderEmptyWorkspace?: (projectId: string) => JSX.Element;
+  /** T11.1 — fires when the user clicks a workspace tab (Terminal / Editor /
+   *  integrations). The shell updates the store synchronously so the body
+   *  switches without waiting; the caller hooks this to debounce-persist the
+   *  active tab. */
+  onWorkspaceTabChange?: (projectId: string, kind: WorkspaceTabKind) => void;
+  /** T11.1 — open Settings (used by the integration-tab placeholder CTA). */
+  onOpenSettings?: () => void;
 }
 
 const defaultEmptyWorkspace = (): JSX.Element => (
@@ -185,6 +197,14 @@ export function AppShell(props: AppShellProps): JSX.Element {
                   onDismissCliWarning={() => props.onDismissCliWarning?.(project.id)}
                   onInstallHint={props.onInstallHint}
                   hasInstallUrl={props.hasInstallUrl}
+                  onWorkspaceTabChange={
+                    props.onWorkspaceTabChange
+                      ? (kind) => props.onWorkspaceTabChange?.(project.id, kind)
+                      : undefined
+                  }
+                  onOpenSettings={
+                    props.onOpenSettings ?? (() => dispatchMenuAction("open-settings"))
+                  }
                 />
               </div>
             );
@@ -232,6 +252,8 @@ interface ProjectWorkspaceViewProps {
   onDismissCliWarning?: () => void;
   onInstallHint?: (cliName: string) => void;
   hasInstallUrl?: (cliName: string) => boolean;
+  onWorkspaceTabChange?: (kind: WorkspaceTabKind) => void;
+  onOpenSettings?: () => void;
 }
 
 function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
@@ -247,6 +269,8 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
     const ws = workspace();
     return ws ? ws.focusedSessionId : null;
   };
+  const tabs = (): readonly WorkspaceTabKind[] => visibleTabs(props.projectId);
+  const currentTab = (): WorkspaceTabKind => activeTab(props.projectId);
 
   const handleRatio = (path: LayoutPath, ratio: number): void => {
     updateLayoutRatio(props.projectId, path, ratio);
@@ -256,11 +280,17 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
     setFocusedSession(props.projectId, sessionId);
   };
 
+  const handleTabActivate = (kind: WorkspaceTabKind): void => {
+    setActiveTab(props.projectId, kind);
+    props.onWorkspaceTabChange?.(kind);
+  };
+
   const renderLeaf = (sessionId: string): JSX.Element =>
     props.renderPane(props.projectId, sessionId);
 
   return (
     <div class="ws-appshell__pane-host relative flex min-h-0 flex-1 flex-col">
+      <WorkspaceTabStrip tabs={tabs()} activeKind={currentTab()} onActivate={handleTabActivate} />
       <Show when={props.cliWarning}>
         {(missingCli) => (
           <div class="ws-cli-warning" role="alert" aria-live="polite">
@@ -292,39 +322,56 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
           </div>
         )}
       </Show>
+      {/* Body switches by active tab. Non-terminal tabs render their
+       *  placeholder while the real content lands in T12.x–T17.x. The
+       *  terminal body stays mounted across tab flips so xterm state and
+       *  PTY subscriptions survive — hiding via display:none would also
+       *  pause xterm via T4.12's IntersectionObserver, which is undesired
+       *  here (the layout is still semantically "active" inside the
+       *  project, just visually behind another tab). For T11.1 we
+       *  conditionally render instead since switching to an integration
+       *  tab is rare; a future revisit can switch to display:none if PTY
+       *  output during off-tab time becomes load-bearing. */}
       <Show
-        when={layout()}
+        when={currentTab() === "terminal"}
         fallback={
-          props.onLaunchFirstCli ? (
-            <ProjectTerminalEmptyState
-              clis={props.clis ?? []}
-              onLaunch={(cli) => props.onLaunchFirstCli?.(props.projectId, cli)}
-            />
-          ) : (
-            props.renderEmpty(props.projectId)
-          )
+          <IntegrationTabPlaceholder kind={currentTab()} onOpenSettings={props.onOpenSettings} />
         }
       >
-        {(node) => (
-          <div class="min-h-0 flex-1">
-            <LayoutTree
-              node={node()}
-              renderPane={renderLeaf}
-              onRatioChange={handleRatio}
-              focusedSessionId={focusedSessionId()}
-              onFocusPane={handleFocus}
-              clis={props.clis}
-              onLaunchCli={(sessionId, cli, mode) =>
-                props.onLaunchCli?.(props.projectId, sessionId, cli, mode)
-              }
-              resolveCli={
-                props.resolveCli
-                  ? (sessionId) => props.resolveCli?.(props.projectId, sessionId) ?? null
-                  : undefined
-              }
-            />
-          </div>
-        )}
+        <Show
+          when={layout()}
+          fallback={
+            props.onLaunchFirstCli ? (
+              <ProjectTerminalEmptyState
+                clis={props.clis ?? []}
+                onLaunch={(cli) => props.onLaunchFirstCli?.(props.projectId, cli)}
+              />
+            ) : (
+              props.renderEmpty(props.projectId)
+            )
+          }
+        >
+          {(node) => (
+            <div class="min-h-0 flex-1">
+              <LayoutTree
+                node={node()}
+                renderPane={renderLeaf}
+                onRatioChange={handleRatio}
+                focusedSessionId={focusedSessionId()}
+                onFocusPane={handleFocus}
+                clis={props.clis}
+                onLaunchCli={(sessionId, cli, mode) =>
+                  props.onLaunchCli?.(props.projectId, sessionId, cli, mode)
+                }
+                resolveCli={
+                  props.resolveCli
+                    ? (sessionId) => props.resolveCli?.(props.projectId, sessionId) ?? null
+                    : undefined
+                }
+              />
+            </div>
+          )}
+        </Show>
       </Show>
     </div>
   );

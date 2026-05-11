@@ -33,6 +33,11 @@ import {
   splitPaneAt,
   updateSplitRatio,
 } from "../types/layout";
+import {
+  DEFAULT_ACTIVE_TAB,
+  DEFAULT_VISIBLE_TABS,
+  type WorkspaceTabKind,
+} from "../types/workspaceTab";
 
 export interface ProjectMeta {
   id: string;
@@ -50,6 +55,13 @@ export interface ProjectWorkspace {
   /** Currently focused pane within this project. Cleared when the focused
    *  pane is closed and there are no other panes. */
   focusedSessionId: string | null;
+  /** T11.1: ordered list of workspace tab kinds visible in this project's
+   *  tab strip. Always includes `terminal`. Integration kinds appear here
+   *  once the user links the service (T11.5). */
+  visibleTabs: WorkspaceTabKind[];
+  /** T11.1: which workspace tab body is currently rendered. Persisted per
+   *  project (see AppRoot) so a launch lands on the same view. */
+  activeTab: WorkspaceTabKind;
 }
 
 interface WorkspaceState {
@@ -94,8 +106,27 @@ export function sessionCount(projectId: string): number {
 }
 
 /** Register a project + its initial workspace. Idempotent on `id`: a second
- *  call with the same id replaces the metadata and resets the workspace. */
-export function addProject(meta: ProjectMeta, initial: ProjectWorkspace): void {
+ *  call with the same id replaces the metadata and resets the workspace.
+ *  When `initial` omits `visibleTabs` / `activeTab`, defaults are filled in
+ *  so AppRoot can keep most call sites passing the layout-only shape. */
+export function addProject(meta: ProjectMeta, initial: PartialWorkspaceInit): void {
+  const normalised: ProjectWorkspace = {
+    layout: initial.layout,
+    focusedSessionId: initial.focusedSessionId,
+    visibleTabs:
+      initial.visibleTabs && initial.visibleTabs.length > 0
+        ? [...initial.visibleTabs]
+        : [...DEFAULT_VISIBLE_TABS],
+    activeTab: initial.activeTab ?? DEFAULT_ACTIVE_TAB,
+  };
+  // Terminal is always part of the visible-tab list — the store is the
+  // last line of defence against a corrupt DB payload sneaking in here.
+  if (!normalised.visibleTabs.includes("terminal")) {
+    normalised.visibleTabs.unshift("terminal");
+  }
+  if (!normalised.visibleTabs.includes(normalised.activeTab)) {
+    normalised.activeTab = DEFAULT_ACTIVE_TAB;
+  }
   setState(
     produce((s) => {
       const existing = s.projects.findIndex((p) => p.id === meta.id);
@@ -104,10 +135,19 @@ export function addProject(meta: ProjectMeta, initial: ProjectWorkspace): void {
       } else {
         s.projects.push(meta);
       }
-      s.workspacesByProjectId[meta.id] = initial;
+      s.workspacesByProjectId[meta.id] = normalised;
       if (s.activeProjectId === null) s.activeProjectId = meta.id;
     }),
   );
+}
+
+/** Shape accepted by `addProject`. The tab fields are optional so old call
+ *  sites (and tests) that only set the layout/focus pair keep working. */
+export interface PartialWorkspaceInit {
+  layout: LayoutNode | null;
+  focusedSessionId: string | null;
+  visibleTabs?: readonly WorkspaceTabKind[];
+  activeTab?: WorkspaceTabKind;
 }
 
 /** Update an already-registered project's metadata in place (T6.6).
@@ -293,6 +333,57 @@ export function setFocusedSession(projectId: string, sessionId: string | null): 
     if (!ws.layout || !findPane(ws.layout, sessionId)) return;
   }
   setState("workspacesByProjectId", projectId, "focusedSessionId", sessionId);
+}
+
+/** T11.1: change the active workspace tab for `projectId`. No-op when the
+ *  target kind isn't in the project's visible-tabs list — a stale hotkey or
+ *  menu action can't strand the user on a tab that isn't rendered. */
+export function setActiveTab(projectId: string, kind: WorkspaceTabKind): void {
+  const ws = state.workspacesByProjectId[projectId];
+  if (!ws) return;
+  if (ws.activeTab === kind) return;
+  if (!ws.visibleTabs.includes(kind)) return;
+  setState("workspacesByProjectId", projectId, "activeTab", kind);
+}
+
+/** T11.1: toggle visibility of a workspace tab kind. The Terminal tab
+ *  cannot be hidden — closing the last pane drops panes, not the tab.
+ *  Hiding the currently-active tab moves the active selection to the first
+ *  remaining visible tab so the body stays in sync. */
+export function setTabVisibility(
+  projectId: string,
+  kind: WorkspaceTabKind,
+  visible: boolean,
+): void {
+  if (kind === "terminal" && !visible) return;
+  const ws = state.workspacesByProjectId[projectId];
+  if (!ws) return;
+  const present = ws.visibleTabs.includes(kind);
+  if (present === visible) return;
+  setState(
+    produce((s) => {
+      const w = s.workspacesByProjectId[projectId];
+      if (!w) return;
+      if (visible) {
+        w.visibleTabs = [...w.visibleTabs, kind];
+        return;
+      }
+      w.visibleTabs = w.visibleTabs.filter((k) => k !== kind);
+      if (w.activeTab === kind) {
+        w.activeTab = w.visibleTabs[0] ?? DEFAULT_ACTIVE_TAB;
+      }
+    }),
+  );
+}
+
+/** T11.1: reactive accessor for a project's workspace tab list. */
+export function visibleTabs(projectId: string): WorkspaceTabKind[] {
+  return state.workspacesByProjectId[projectId]?.visibleTabs ?? [];
+}
+
+/** T11.1: reactive accessor for a project's active workspace tab. */
+export function activeTab(projectId: string): WorkspaceTabKind {
+  return state.workspacesByProjectId[projectId]?.activeTab ?? DEFAULT_ACTIVE_TAB;
 }
 
 /** Test-only — replace the full state. Not exported via the barrel. */

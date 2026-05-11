@@ -36,6 +36,13 @@ pub struct Project {
     pub default_cli: Option<String>,
     pub env: HashMap<String, String>,
     pub startup_commands: Vec<String>,
+    /// T11.1: ordered list of workspace tab kinds visible in this project.
+    /// Stored as a JSON string array; corrupt rows degrade to the default
+    /// set (`["terminal"]`) rather than failing the list query.
+    pub workspace_tabs: Vec<String>,
+    /// T11.1: which workspace tab body is currently rendered (one of
+    /// `workspace_tabs`).
+    pub active_workspace_tab: String,
     pub position: i64,
     pub created_at: i64,
 }
@@ -158,7 +165,7 @@ async fn validate_path_fs(path: &str) -> Result<String, ProjectError> {
 /// when two rows share the same position.
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Project>, ProjectError> {
     let rows = sqlx::query(
-        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands_json, workspace_tabs_json, active_workspace_tab, position, created_at
          FROM projects
          ORDER BY position ASC, created_at ASC",
     )
@@ -221,6 +228,11 @@ pub async fn create(pool: &SqlitePool, input: NewProject) -> Result<Project, Pro
         default_cli: input.default_cli,
         env: input.env,
         startup_commands: input.startup_commands,
+        // T11.1: new rows pick up the column DEFAULTs from the migration —
+        // mirror them here so the in-memory Project returned to the caller
+        // matches what `list` will read back on the next call.
+        workspace_tabs: vec!["terminal".to_string()],
+        active_workspace_tab: "terminal".to_string(),
         position,
         created_at,
     })
@@ -316,6 +328,35 @@ pub async fn reorder(pool: &SqlitePool, ids: &[String]) -> Result<(), ProjectErr
     Ok(())
 }
 
+/// T11.1: persist a project's workspace tab state (visible-tab list +
+/// currently-active tab). Separate from `update` so the frontend can keep
+/// per-tab toggles independent of the heavier project-form save path.
+///
+/// The frontend debounces calls (same pattern as the layout persister) so
+/// repeated tab clicks coalesce into one row update. Returns `NotFound`
+/// when `id` doesn't exist — the caller can safely ignore that case since a
+/// race with `delete` means the row is gone anyway.
+pub async fn update_workspace_tabs(
+    pool: &SqlitePool,
+    id: &str,
+    visible: &[String],
+    active: &str,
+) -> Result<(), ProjectError> {
+    let tabs_json = serde_json::to_string(visible)?;
+    let result = sqlx::query(
+        "UPDATE projects SET workspace_tabs_json = ?, active_workspace_tab = ? WHERE id = ?",
+    )
+    .bind(&tabs_json)
+    .bind(active)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ProjectError::NotFound(id.to_string()));
+    }
+    Ok(())
+}
+
 /// Hard-delete a project. Sessions cascade via the FK on
 /// `sessions.project_id` (see `migrations/0002_sessions.sql`).
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), ProjectError> {
@@ -331,7 +372,7 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), ProjectError> {
 
 async fn fetch_one(pool: &SqlitePool, id: &str) -> Result<Project, ProjectError> {
     let row = sqlx::query(
-        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands_json, position, created_at
+        "SELECT id, name, path, color, icon, default_cli, env_json, startup_commands_json, workspace_tabs_json, active_workspace_tab, position, created_at
          FROM projects WHERE id = ?",
     )
     .bind(id)
@@ -349,6 +390,14 @@ fn row_to_project(row: SqliteRow) -> Result<Project, ProjectError> {
     let startup_commands_json: String = row.try_get("startup_commands_json")?;
     let startup_commands: Vec<String> =
         serde_json::from_str(&startup_commands_json).unwrap_or_default();
+    // T11.1: workspace_tabs_json + active_workspace_tab — same tolerance as
+    // env_json. A corrupt array degrades to `["terminal"]` and an unknown
+    // active tab falls back to the same value. The frontend re-validates
+    // against the typed schema on the way in (parseWorkspaceTabsJson).
+    let workspace_tabs_json: String = row.try_get("workspace_tabs_json")?;
+    let workspace_tabs: Vec<String> =
+        serde_json::from_str(&workspace_tabs_json).unwrap_or_else(|_| vec!["terminal".to_string()]);
+    let active_workspace_tab: String = row.try_get("active_workspace_tab")?;
     Ok(Project {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -358,6 +407,8 @@ fn row_to_project(row: SqliteRow) -> Result<Project, ProjectError> {
         default_cli: row.try_get("default_cli")?,
         env,
         startup_commands,
+        workspace_tabs,
+        active_workspace_tab,
         position: row.try_get("position")?,
         created_at: row.try_get("created_at")?,
     })
@@ -396,6 +447,11 @@ mod tests {
         ))
         .await
         .expect("apply 0004");
+        pool.execute(include_str!(
+            "../../migrations/0006_project_workspace_tabs.sql"
+        ))
+        .await
+        .expect("apply 0006");
         pool
     }
 
@@ -823,5 +879,72 @@ mod tests {
         let listed = list(&pool).await.expect("list tolerates corrupt env");
         assert_eq!(listed.len(), 1);
         assert!(listed[0].env.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_seeds_default_workspace_tabs() {
+        let pool = migrated_pool().await;
+        let project = create(&pool, sample("alpha", &make_dir()))
+            .await
+            .expect("create");
+        assert_eq!(project.workspace_tabs, vec!["terminal".to_string()]);
+        assert_eq!(project.active_workspace_tab, "terminal");
+
+        let listed = list(&pool).await.expect("list");
+        assert_eq!(listed[0].workspace_tabs, vec!["terminal".to_string()]);
+        assert_eq!(listed[0].active_workspace_tab, "terminal");
+    }
+
+    #[tokio::test]
+    async fn update_workspace_tabs_persists_changes() {
+        let pool = migrated_pool().await;
+        let created = create(&pool, sample("alpha", &make_dir()))
+            .await
+            .expect("create");
+
+        update_workspace_tabs(
+            &pool,
+            &created.id,
+            &["terminal".to_string(), "planflow".to_string()],
+            "planflow",
+        )
+        .await
+        .expect("update tabs");
+
+        let reread = list(&pool).await.expect("list");
+        assert_eq!(reread[0].workspace_tabs, vec!["terminal", "planflow"]);
+        assert_eq!(reread[0].active_workspace_tab, "planflow");
+    }
+
+    #[tokio::test]
+    async fn update_workspace_tabs_missing_id_returns_not_found() {
+        let pool = migrated_pool().await;
+        let err = update_workspace_tabs(&pool, "ghost", &["terminal".to_string()], "terminal")
+            .await
+            .expect_err("missing");
+        assert!(matches!(err, ProjectError::NotFound(id) if id == "ghost"));
+    }
+
+    #[tokio::test]
+    async fn list_tolerates_corrupt_workspace_tabs_json() {
+        let pool = migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, env_json, workspace_tabs_json, active_workspace_tab, position, created_at)
+             VALUES (?, ?, ?, '{}', ?, ?, ?, ?)",
+        )
+        .bind("corrupt")
+        .bind("c")
+        .bind("/tmp/c")
+        .bind("{not json")
+        .bind("terminal")
+        .bind(0_i64)
+        .bind(1_700_000_000_i64)
+        .execute(&pool)
+        .await
+        .expect("seed corrupt row");
+
+        let listed = list(&pool).await.expect("list tolerates corrupt tabs");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].workspace_tabs, vec!["terminal".to_string()]);
     }
 }

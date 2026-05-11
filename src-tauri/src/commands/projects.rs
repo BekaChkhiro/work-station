@@ -60,6 +60,16 @@ pub struct DeleteProjectArgs {
     pub id: String,
 }
 
+/// T11.1: payload for `project_update_workspace_tabs`. The frontend debounces
+/// these so a click-storm coalesces into one round-trip per debounce window.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWorkspaceTabsArgs {
+    pub id: String,
+    pub visible: Vec<String>,
+    pub active: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReorderProjectsArgs {
@@ -226,5 +236,15 @@ pub async fn project_reorder<R: Runtime>(
 ) -> Result<(), ProjectCommandError> {
     let pool = db::pool(&app).await?;
     projects::reorder(&pool, &args.ids).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn project_update_workspace_tabs<R: Runtime>(
+    app: AppHandle<R>,
+    args: UpdateWorkspaceTabsArgs,
+) -> Result<(), ProjectCommandError> {
+    let pool = db::pool(&app).await?;
+    projects::update_workspace_tabs(&pool, &args.id, &args.visible, &args.active).await?;
     Ok(())
 }

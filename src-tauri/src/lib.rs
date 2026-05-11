@@ -132,6 +132,7 @@ pub fn run() {
             commands::projects::project_update,
             commands::projects::project_delete,
             commands::projects::project_reorder,
+            commands::projects::project_update_workspace_tabs,
             commands::picker::pick_project_folder,
             commands::cli::cli_list_available,
             commands::clipboard::save_clipboard_image,

@@ -45,6 +45,7 @@ import {
   listProjects,
   reorderProjects,
   updateProject,
+  updateProjectWorkspaceTabs,
   type Project,
 } from "../../db/projects";
 import { getSetting, setSetting } from "../../db/settings";
@@ -54,6 +55,7 @@ import { ptyKill, ptySpawn } from "../../ipc/pty";
 import { setThemeMode, themeMode, type ThemeMode } from "../../stores/theme";
 import {
   activeProjectId,
+  activeTab,
   addProject,
   getWorkspace,
   projects,
@@ -66,7 +68,9 @@ import {
   splitPane,
   closePane as closePaneInStore,
   updateProjectMeta,
+  visibleTabs,
 } from "../../stores/workspace";
+import type { WorkspaceTabKind } from "../../types/workspaceTab";
 import {
   collectPanes,
   isEmptyLayout,
@@ -338,8 +342,41 @@ export function AppRoot(): JSX.Element {
       {
         layout: null,
         focusedSessionId: null,
+        visibleTabs: persisted.workspaceTabs,
+        activeTab: persisted.activeWorkspaceTab,
       },
     );
+  };
+
+  // T11.1: debounced persistence for the workspace tab state. Repeated tab
+  // clicks coalesce into one round-trip per project per debounce window so
+  // a click-storm doesn't hammer SQLite. Same shape as the T2.12 layout
+  // persister but inline because the payload is trivial.
+  const TAB_PERSIST_DEBOUNCE_MS = 300;
+  const tabPersistTimers: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+
+  const persistWorkspaceTabs = (projectId: string): void => {
+    const existing = tabPersistTimers[projectId];
+    if (existing !== undefined) clearTimeout(existing);
+    tabPersistTimers[projectId] = setTimeout(() => {
+      tabPersistTimers[projectId] = undefined;
+      const tabs = visibleTabs(projectId);
+      const active = activeTab(projectId);
+      if (tabs.length === 0) return;
+      void updateProjectWorkspaceTabs(projectId, tabs, active).catch((err: unknown) => {
+        console.error("[T11.1] workspace tab persist failed:", err);
+      });
+    }, TAB_PERSIST_DEBOUNCE_MS);
+  };
+
+  const handleWorkspaceTabChange = (projectId: string, kind: WorkspaceTabKind): void => {
+    // Store mutation already happened inside AppShell (setActiveTab). We
+    // just need to schedule the write. `kind` is logged for the debug
+    // overlay's activity feed (T8.7 wires it later); reading it here
+    // satisfies the no-unused-vars rule and gives the rule a sticking
+    // point if a future refactor stops passing the value.
+    void kind;
+    persistWorkspaceTabs(projectId);
   };
 
   onMount(() => {
@@ -420,6 +457,21 @@ export function AppRoot(): JSX.Element {
       // anyway, but explicit kills help during HMR-style remounts.
       for (const list of Object.values(sessionsByProject)) {
         for (const id of list) void ptyKill(id);
+      }
+      // T11.1 — flush any pending tab persist windows. We deliberately do
+      // not await the writes here: HMR remounts shouldn't block, and a
+      // real shutdown loses at most the most recent tab click.
+      for (const [projectId, timer] of Object.entries(tabPersistTimers)) {
+        if (timer === undefined) continue;
+        clearTimeout(timer);
+        tabPersistTimers[projectId] = undefined;
+        const tabs = visibleTabs(projectId);
+        const active = activeTab(projectId);
+        if (tabs.length > 0) {
+          void updateProjectWorkspaceTabs(projectId, tabs, active).catch((err: unknown) => {
+            console.error("[T11.1] workspace tab flush failed:", err);
+          });
+        }
       }
     });
   });
@@ -811,6 +863,8 @@ export function AppRoot(): JSX.Element {
               onDismissCliWarning={dismissCliWarning}
               onInstallHint={handleInstallHint}
               hasInstallUrl={(cliName) => cliName in CLI_INSTALL_URLS}
+              onWorkspaceTabChange={handleWorkspaceTabChange}
+              onOpenSettings={() => setSettingsOpen(true)}
             />
           </Match>
         </Switch>

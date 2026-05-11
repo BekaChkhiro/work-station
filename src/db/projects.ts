@@ -8,11 +8,52 @@
 import { invoke } from "@tauri-apps/api/core";
 import { z } from "zod";
 
+import {
+  DEFAULT_ACTIVE_TAB,
+  DEFAULT_VISIBLE_TABS,
+  WORKSPACE_TAB_KINDS,
+  type WorkspaceTabKind,
+} from "../types/workspaceTab";
+
 export const ProjectEnvSchema = z.record(z.string(), z.string());
 export type ProjectEnv = z.infer<typeof ProjectEnvSchema>;
 
 export const ProjectStartupCommandsSchema = z.array(z.string());
 export type ProjectStartupCommands = z.infer<typeof ProjectStartupCommandsSchema>;
+
+const WorkspaceTabKindLoose = z.string().transform((value, ctx): WorkspaceTabKind => {
+  if ((WORKSPACE_TAB_KINDS as readonly string[]).includes(value)) {
+    return value as WorkspaceTabKind;
+  }
+  ctx.addIssue({ code: z.ZodIssueCode.custom, message: `unknown tab kind: ${value}` });
+  return z.NEVER;
+});
+
+const ProjectWorkspaceTabsSchema = z
+  .array(WorkspaceTabKindLoose)
+  .optional()
+  .transform((kinds): WorkspaceTabKind[] => {
+    if (!kinds || kinds.length === 0) return [...DEFAULT_VISIBLE_TABS];
+    const seen = new Set<WorkspaceTabKind>();
+    const out: WorkspaceTabKind[] = [];
+    for (const k of kinds) {
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(k);
+    }
+    if (!seen.has("terminal")) out.unshift("terminal");
+    return out;
+  });
+
+const ActiveWorkspaceTabSchema = z
+  .string()
+  .optional()
+  .transform((value): WorkspaceTabKind => {
+    if (!value) return DEFAULT_ACTIVE_TAB;
+    return (WORKSPACE_TAB_KINDS as readonly string[]).includes(value)
+      ? (value as WorkspaceTabKind)
+      : DEFAULT_ACTIVE_TAB;
+  });
 
 export const ProjectSchema = z.object({
   id: z.string().min(1),
@@ -35,6 +76,8 @@ export const ProjectSchema = z.object({
     .transform((v) => v ?? null),
   env: ProjectEnvSchema,
   startupCommands: ProjectStartupCommandsSchema,
+  workspaceTabs: ProjectWorkspaceTabsSchema,
+  activeWorkspaceTab: ActiveWorkspaceTabSchema,
   position: z.number().int(),
   createdAt: z.number().int(),
 });
@@ -87,6 +130,21 @@ export async function deleteProject(id: string): Promise<void> {
  *  transaction. */
 export async function reorderProjects(ids: string[]): Promise<void> {
   await invoke("project_reorder", { args: { ids } });
+}
+
+/** T11.1: persist a project's workspace tab state (visible list + active
+ *  tab). The caller debounces — bursts of clicks coalesce into one
+ *  round-trip — so this wrapper is intentionally fire-and-forget shaped:
+ *  the backend returns void on success and a `ProjectCommandError` on
+ *  failure (e.g. NotFound when the project was deleted concurrently). */
+export async function updateProjectWorkspaceTabs(
+  id: string,
+  visible: WorkspaceTabKind[],
+  active: WorkspaceTabKind,
+): Promise<void> {
+  await invoke("project_update_workspace_tabs", {
+    args: { id, visible, active },
+  });
 }
 
 // Normalize undefined → null so the Rust side sees a consistent shape.

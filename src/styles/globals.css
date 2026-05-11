@@ -1131,6 +1131,122 @@ button {
   outline-offset: -2px;
 }
 
+/* T11.1 — Workspace tab strip. Sits above the per-terminal TabStrip and
+ * flips the workspace body between Terminal / Editor / integration views.
+ * Visual language mirrors `.ws-tabstrip` but slimmer (28px) and without
+ * close/new affordances — visibility is managed via Settings, not the
+ * strip itself. */
+.ws-workspace-tabs {
+  display: flex;
+  align-items: stretch;
+  height: 28px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  user-select: none;
+  flex-shrink: 0;
+}
+.ws-workspace-tabs__scroll {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  flex: 1;
+}
+.ws-workspace-tabs__scroll::-webkit-scrollbar {
+  display: none;
+}
+.ws-workspace-tabs__tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: default;
+  flex-shrink: 0;
+  outline: none;
+  transition:
+    background var(--dur-fast, 150ms) var(--ease, ease),
+    color var(--dur-fast, 150ms) var(--ease, ease);
+}
+.ws-workspace-tabs__tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ws-workspace-tabs__tab:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: -1px;
+}
+.ws-workspace-tabs__tab[data-active="true"] {
+  color: var(--text-primary);
+}
+.ws-workspace-tabs__tab[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+.ws-workspace-tabs__label {
+  white-space: nowrap;
+}
+
+.ws-workspace-tabs__placeholder {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  min-height: 0;
+  padding: 24px;
+}
+.ws-workspace-tabs__placeholder-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 28px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md, 6px);
+  max-width: 360px;
+  text-align: center;
+}
+.ws-workspace-tabs__placeholder-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ws-workspace-tabs__placeholder-body {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.ws-workspace-tabs__placeholder-cta {
+  margin-top: 4px;
+  padding: 6px 12px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm, 4px);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: default;
+  transition: background var(--dur-fast, 150ms) var(--ease, ease);
+}
+.ws-workspace-tabs__placeholder-cta:hover {
+  background: var(--bg-hover);
+}
+.ws-workspace-tabs__placeholder-cta:focus-visible {
+  outline: 1px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
 /* T6.1 — Sidebar. Right-side, collapsible project list. Mirrors the
  * prototype's `.sidebar` rules in work-station-design/styles.css with the
  * `ws-sb__*` prefix. Width is driven by the `--ws-sb-width` custom prop
