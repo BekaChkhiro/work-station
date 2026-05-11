@@ -1,6 +1,6 @@
 {
   "name": "work-station",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Cross-platform desktop hub for managing multiple Claude Code / Kimi / Codex terminal sessions across projects.",
   "private": true,
   "type": "module",
