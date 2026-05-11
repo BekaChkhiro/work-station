@@ -139,16 +139,100 @@ function detectToolCalls(text: string): ToolCall[] {
   return calls;
 }
 
+/** Spinner glyphs Claude Code / Ink-based TUIs use for "thinking" /
+ *  "calling tool" indicators. These get redrawn dozens of times per
+ *  second; the PTY buffer accumulates every frame which floods the
+ *  chat bubble with noise. We drop any line whose non-space content
+ *  is composed entirely of these characters. */
+const SPINNER_CHARS = new Set([
+  "✻",
+  "✶",
+  "✳",
+  "✢",
+  "·",
+  "*",
+  "⏺",
+  "•",
+  "◐",
+  "◑",
+  "◒",
+  "◓",
+  "⠁",
+  "⠂",
+  "⠄",
+  "⠠",
+]);
+
+/** Status / progress phrases the TUI emits while waiting on the LLM
+ *  or a tool. Matching is loose so variant capitalisation and trailing
+ *  ellipses still hit. */
+const STATUS_PHRASES = [
+  "warping",
+  "wrangling",
+  "thinking",
+  "churning",
+  "churned",
+  "loading",
+  "calling planflow-mcp",
+  "calling mcp",
+  "running",
+  "tokens",
+  "esc to interrupt",
+  "? for shortcuts",
+  "ctrl+",
+  "mcp servers failed",
+  "/mcp",
+];
+
+function isSpinnerLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return false;
+  let nonSpinner = 0;
+  for (const ch of trimmed) {
+    if (ch === " " || SPINNER_CHARS.has(ch)) continue;
+    nonSpinner += 1;
+    if (nonSpinner > 1) return false;
+  }
+  return true;
+}
+
+function isSeparatorLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length < 4) return false;
+  // Box-drawing horizontal rules used by the TUI between turns.
+  return /^[─━—-]+$/u.test(trimmed);
+}
+
+function isStatusLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  return STATUS_PHRASES.some((needle) => lower.includes(needle));
+}
+
 /** Trim leading echoes of the user's own input and trailing CLI prompts
  *  (lines like `> `, `Claude > `, etc.) so the chat shows only the
- *  assistant's prose. Heuristic: drop lines that exactly equal the user
- *  message or end with a single `>` / `›` glyph. */
+ *  assistant's prose. Plus filter out TUI animation artefacts — spinner
+ *  frames, status indicators, separator lines — that the PTY accumulates
+ *  while the assistant is "thinking". */
 function tidyOutput(raw: string, userInput: string): string {
   const userTrim = userInput.trim();
-  const lines = raw.split("\n").map((l) => l.replace(/\s+$/, ""));
+  // Each PTY chunk can carry partial frames from the TUI's redraw loop.
+  // Splitting by both \n and \r (carriage returns are how the TUI
+  // overwrites a line in-place) gives us clean candidates to filter.
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => !isSpinnerLine(l) && !isSeparatorLine(l) && !isStatusLine(l));
+
+  // Drop the leading echo of the user's input. The TUI sometimes prints
+  // the user's prompt back wrapped onto the next line, so the match
+  // checks for substring presence in addition to exact equality.
   while (lines.length > 0) {
     const head = lines[0]?.trim() ?? "";
     if (head.length === 0 || head === userTrim || /^>\s*$/.test(head)) {
+      lines.shift();
+      continue;
+    }
+    if (userTrim.length > 8 && head.includes(userTrim)) {
       lines.shift();
       continue;
     }
@@ -162,7 +246,20 @@ function tidyOutput(raw: string, userInput: string): string {
     }
     break;
   }
-  return lines.join("\n").trim();
+  // Collapse runs of 3+ blank lines that survive the filter (e.g. the
+  // TUI inserts vertical padding around tool-call panels).
+  const collapsed: string[] = [];
+  let blanks = 0;
+  for (const line of lines) {
+    if (line.trim().length === 0) {
+      blanks += 1;
+      if (blanks > 1) continue;
+    } else {
+      blanks = 0;
+    }
+    collapsed.push(line);
+  }
+  return collapsed.join("\n").trim();
 }
 
 export function installChatBridge(options: ChatBridgeOptions): () => void {
