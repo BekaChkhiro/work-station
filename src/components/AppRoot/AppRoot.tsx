@@ -51,7 +51,7 @@ import {
 import { getSetting, setSetting } from "../../db/settings";
 import { pickProjectFolder } from "../../ipc/picker";
 import { cliListAvailable } from "../../ipc/cli";
-import { ptyKill, ptySpawn, ptyWrite } from "../../ipc/pty";
+import { ptyKill, ptySpawn } from "../../ipc/pty";
 import { setThemeMode, themeMode, type ThemeMode } from "../../stores/theme";
 import {
   activeProjectId,
@@ -764,31 +764,17 @@ export function AppRoot(): JSX.Element {
     return availableClis()[0] ?? null;
   };
 
-  // Run `planflow_task_start(taskId: …)` against the project. Routing:
-  //   - Focused pane is already running a CLI → type the prompt straight
-  //     into that pane. No new split, no second Claude instance to swap
-  //     between. Adds a leading newline so a partially-typed line in
-  //     the CLI is committed first and the planflow_task_start call
-  //     lands on a fresh prompt.
-  //   - Focused pane is a shell, or no pane is focused → spawn the
-  //     project's default CLI in a new pane (vertical split next to
-  //     the focus, or first pane in an empty layout) with the prompt
-  //     queued as a startup command. The CLI receives it as user input
-  //     once subscribers are attached, so the tool call fires
-  //     immediately after the CLI boots.
+  // Run `planflow_task_start(taskId: …)` against the project. Always spawn
+  // a fresh CLI pane with the prompt queued as a startup command — never
+  // type into an existing CLI pane. Each Start press gets its own terminal
+  // so prior task sessions stay intact and side-by-side comparison is
+  // possible. When the project already has a layout, the new pane lands
+  // as a vertical split next to the focused pane; otherwise it becomes
+  // the first pane in an empty layout.
   const startTaskCliLauncher = async (projectId: string, taskId: string): Promise<void> => {
     const prompt = formatPlanFlowStartPrompt(taskId);
     const ws = getWorkspace(projectId);
     const focused = ws?.focusedSessionId ?? null;
-    const focusedCli = focused != null ? (sessionCli()[focused] ?? null) : null;
-    if (focused != null && focusedCli != null) {
-      // Existing CLI pane — type the prompt into it. Newline so the CLI
-      // executes the line; the user pressing Start consented to running
-      // the tool, just like the shell case auto-runs via startupCommand.
-      const bytes = new TextEncoder().encode(`${prompt}\n`);
-      await ptyWrite(focused, bytes);
-      return;
-    }
     const cli = resolveTaskCli(projectId);
     if (!cli) return;
     const sessionId = await spawnCli(projectId, cli, [prompt]);
