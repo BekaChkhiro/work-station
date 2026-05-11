@@ -71,6 +71,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "create integration_write_queue table",
         sql: include_str!("../../migrations/0008_integration_write_queue.sql"),
     },
+    Migration {
+        version: 9,
+        name: "create planflow_chats table",
+        sql: include_str!("../../migrations/0009_planflow_chats.sql"),
+    },
 ];
 
 #[derive(Debug, thiserror::Error)]

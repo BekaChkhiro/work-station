@@ -73,6 +73,7 @@ import { consumeTaskJump, pendingTaskJump } from "../../stores/pendingTaskJump";
 import { ActiveWorkPanel } from "./ActiveWorkPanel";
 import { ActivityFeed } from "./ActivityFeed";
 import { TaskDetailPanel } from "./TaskDetailPanel";
+import { PlanFlowChat } from "../PlanFlowChat";
 
 const ROW_FLASH_CLASS = "ws-pf-tasks__row--flash";
 const ROW_FLASH_DURATION_MS = 1400;
@@ -279,6 +280,7 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
         </Show>
       </div>
       <ActivityFeed externalId={props.externalId} onJumpToTask={handleJump} />
+      <PlanFlowChat projectId={props.workspaceProjectId} externalId={props.externalId} />
     </div>
   );
 }
