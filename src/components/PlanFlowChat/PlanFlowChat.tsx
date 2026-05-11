@@ -41,33 +41,18 @@ import {
 } from "../../stores/planflowChatPrefs";
 import { cliListAvailable } from "../../ipc/cli";
 import type { CliInfo } from "../../ipc/cli";
-import { ptyKill, ptySpawn, ptyWrite } from "../../ipc/pty";
+import { ptyKill, ptySpawn } from "../../ipc/pty";
 import { Terminal } from "../Terminal/Terminal";
 import { Tooltip } from "../Tooltip";
 import { bumpPlanflowChatRefetch } from "../../stores/planflowChatNotify";
+import { listProjects, type Project } from "../../db/projects";
 
 export interface PlanFlowChatProps {
   /** Workspace projectId — the local row, used as the chat's primary key. */
   projectId: string;
-  /** PlanFlow project UUID, from project_links. Passed to the CLI via
-   *  the scope primer so it knows which project to talk to via
-   *  planflow_* MCP tools. */
+  /** PlanFlow project UUID, from project_links. Exposed in env so the
+   *  CLI can pick it up if its own config does (CLAUDE.md, etc.). */
   externalId: string;
-}
-
-/** Initial keystrokes the CLI gets right after spawn. Pins the
- *  assistant to plan/task management for this project only. Sent with
- *  a CR terminator because TUI-style CLIs (Claude Code, Kimi) read
- *  Enter as `\r`, not `\n`. */
-function scopePrimer(externalId: string): string {
-  return [
-    "You are scoped to PlanFlow plan/task management for one project only.",
-    `Project UUID: ${externalId}. Use this id when calling planflow_* tools.`,
-    "Use the planflow_* MCP tools to read and edit the plan, tasks, comments, and knowledge.",
-    "Do NOT use Bash, Read, Write, or Edit. Do NOT modify code or files.",
-    "Confirm before destructive operations.",
-    "Acknowledge with one short sentence and wait for the user's first request.",
-  ].join(" ");
 }
 
 export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
@@ -81,6 +66,23 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
       return [];
     }
   });
+
+  // The project's working directory comes from the same `projects`
+  // table the sidebar reads. We fetch it once on mount so the spawn
+  // call lands the CLI in the right cwd — matches the convention
+  // every other CLI in this app uses (T7.4 default-CLI flow, T12.4
+  // task-start launcher).
+  const [projectsList] = createResource<Project[]>(async () => {
+    try {
+      return await listProjects();
+    } catch {
+      return [];
+    }
+  });
+  const projectCwd = (): string | null => {
+    const all = projectsList() ?? [];
+    return all.find((p) => p.id === props.projectId)?.path ?? null;
+  };
 
   // Hydrate persisted prefs (selected CLI + panel state) before the
   // first paint so opening the tab doesn't flash a "collapsed" frame
@@ -149,22 +151,25 @@ export function PlanFlowChat(props: PlanFlowChatProps): JSX.Element {
           void ptyKill(previousId);
         }
         setSessionId(null);
+        const cwd = untrack(projectCwd);
         try {
           const resp = await ptySpawn({
             command: path,
             args: [],
+            cwd: cwd && cwd.length > 0 ? cwd : undefined,
             env: {
               WS_PROJECT_ID: props.projectId,
               WS_CLI_NAME: cli,
               WS_PLANFLOW_SCOPE: "1",
+              // Exposed so the user's own CLAUDE.md / shell config
+              // can pick it up if they want planflow_* tools auto-
+              // scoped without seeing a wall of primer text.
+              WS_PLANFLOW_EXTERNAL_ID: props.externalId,
             },
             cols: 80,
             rows: 24,
           });
           setSessionId(resp.sessionId);
-          // CR terminator → TUI sees Enter.
-          const primer = `${scopePrimer(props.externalId)}\r`;
-          await ptyWrite(resp.sessionId, new TextEncoder().encode(primer));
         } catch (error) {
           setSpawnError(error instanceof Error ? error.message : "Couldn't start the CLI.");
         }
