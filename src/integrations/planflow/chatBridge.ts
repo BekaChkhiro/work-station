@@ -165,13 +165,20 @@ const SPINNER_CHARS = new Set([
 
 /** Status / progress phrases the TUI emits while waiting on the LLM
  *  or a tool. Matching is loose so variant capitalisation and trailing
- *  ellipses still hit. */
+ *  ellipses still hit. Claude Code rotates through a roster of
+ *  "thinking" words — we add new ones here whenever we spot them. */
 const STATUS_PHRASES = [
   "warping",
   "wrangling",
   "thinking",
   "churning",
   "churned",
+  "spelunking",
+  "pondering",
+  "mulling",
+  "noodling",
+  "musing",
+  "ruminating",
   "loading",
   "calling planflow-mcp",
   "calling mcp",
@@ -182,6 +189,8 @@ const STATUS_PHRASES = [
   "ctrl+",
   "mcp servers failed",
   "/mcp",
+  "thought for",
+  "tip:",
 ];
 
 function isSpinnerLine(line: string): boolean {
@@ -208,6 +217,33 @@ function isStatusLine(line: string): boolean {
   return STATUS_PHRASES.some((needle) => lower.includes(needle));
 }
 
+/** Claude Code's "thinking" animation fades each letter in vertically:
+ *  the same word ("Spelunking…") gets drawn one character per line over
+ *  many redraws. A real terminal emulator would overwrite the same row
+ *  each frame; our PTY-buffer view just collects every frame, which
+ *  produces hundreds of 1-3 character lines like "Sp", "Sl", "pu",
+ *  "en", "lk", "ui", "nn", "kg", "i…", "g…". The content is never
+ *  meaningful so we drop anything that's shorter than 4 characters and
+ *  doesn't carry punctuation a real assistant message might use. */
+function isAnimationFragment(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0 || trimmed.length >= 4) return false;
+  // Keep short list markers + numbered items + closing brackets / dots
+  // that are part of legitimate prose.
+  if (/^[-*•⏺·\d.)\]}>"]/.test(trimmed)) return false;
+  return true;
+}
+
+/** Token-counter / progress lines like "(3s · ↓13 tokens)" and "↑13"
+ *  / "↓45" arrow updates that the TUI prints alongside the spinner. */
+function isProgressMeter(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return false;
+  if (/^[↑↓]\s*\d+$/.test(trimmed)) return true;
+  if (/\(\s*\d+s\s*·.*tokens?\s*\)/i.test(trimmed)) return true;
+  return false;
+}
+
 /** Trim leading echoes of the user's own input and trailing CLI prompts
  *  (lines like `> `, `Claude > `, etc.) so the chat shows only the
  *  assistant's prose. Plus filter out TUI animation artefacts — spinner
@@ -221,7 +257,14 @@ function tidyOutput(raw: string, userInput: string): string {
   const lines = raw
     .split(/\r?\n/)
     .map((l) => l.replace(/\s+$/, ""))
-    .filter((l) => !isSpinnerLine(l) && !isSeparatorLine(l) && !isStatusLine(l));
+    .filter(
+      (l) =>
+        !isSpinnerLine(l) &&
+        !isSeparatorLine(l) &&
+        !isStatusLine(l) &&
+        !isAnimationFragment(l) &&
+        !isProgressMeter(l),
+    );
 
   // Drop the leading echo of the user's input. The TUI sometimes prints
   // the user's prompt back wrapped onto the next line, so the match
