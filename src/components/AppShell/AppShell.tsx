@@ -26,6 +26,9 @@ import { ProjectsEmptyState } from "../ProjectsEmptyState";
 import { Sidebar } from "../Sidebar";
 import { WindowsAppMenu } from "../WindowsAppMenu";
 import { IntegrationTabPlaceholder, WorkspaceTabStrip } from "../WorkspaceTabStrip";
+import { IntegrationReauthBanner } from "../IntegrationReauthBanner";
+import { PlanFlowTaskList } from "../PlanFlowTaskList";
+import { hydrateReauthState, reauthSnapshot } from "../../integrations";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
 import type { LayoutPath } from "../../types/layout";
 import type { WorkspaceTabKind } from "../../types/workspaceTab";
@@ -118,6 +121,13 @@ export function AppShell(props: AppShellProps): JSX.Element {
   // Cmd/Ctrl+Alt+Arrow → move focus between panes inside the active
   // project. Geometry-based; see hotkeys/paneNavHotkeys.ts.
   usePaneNavHotkeys();
+
+  // T11.8 — load the persisted `needs_reauth` flags before the first
+  // integration tab can request them. Hydration is idempotent and runs
+  // once per app launch; the banner stays absent until the await
+  // resolves, which is the right behaviour (don't flash a stale
+  // warning before SQLite has been read).
+  void hydrateReauthState();
 
   // Settings UI moved to the full-window `SettingsPanel` (T8.7). The
   // shell only listens for navigation-relevant menu actions here;
@@ -272,6 +282,15 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
   const tabs = (): readonly WorkspaceTabKind[] => visibleTabs(props.projectId);
   const currentTab = (): WorkspaceTabKind => activeTab(props.projectId);
 
+  // T11.8 — reauth is keyed by integration id, which lines up 1:1 with
+  // the integration WorkspaceTabKind values (`planflow` / `github` /
+  // etc.). Core tabs ("terminal" / "editor") never appear in the
+  // reauth map.
+  const reauth = reauthSnapshot();
+  const tabNeedsReauth = (kind: WorkspaceTabKind): boolean => reauth.map()[kind] === true;
+  const integrationTabActive = (): boolean =>
+    currentTab() !== "terminal" && currentTab() !== "editor";
+
   const handleRatio = (path: LayoutPath, ratio: number): void => {
     updateLayoutRatio(props.projectId, path, ratio);
   };
@@ -332,10 +351,24 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
        *  conditionally render instead since switching to an integration
        *  tab is rare; a future revisit can switch to display:none if PTY
        *  output during off-tab time becomes load-bearing. */}
+      <Show when={integrationTabActive() && tabNeedsReauth(currentTab())}>
+        <IntegrationReauthBanner kind={currentTab()} onReconnect={() => props.onOpenSettings?.()} />
+      </Show>
       <Show
         when={currentTab() === "terminal"}
         fallback={
-          <IntegrationTabPlaceholder kind={currentTab()} onOpenSettings={props.onOpenSettings} />
+          <Show
+            when={currentTab() === "planflow" && !tabNeedsReauth("planflow")}
+            fallback={
+              <IntegrationTabPlaceholder
+                kind={currentTab()}
+                onOpenSettings={props.onOpenSettings}
+                needsReauth={tabNeedsReauth(currentTab())}
+              />
+            }
+          >
+            <PlanFlowTaskList projectId={props.projectId} onOpenSettings={props.onOpenSettings} />
+          </Show>
         }
       >
         <Show

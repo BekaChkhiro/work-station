@@ -6,6 +6,8 @@ import {
   type IntegrationCacheStore,
   type RetryOptions,
 } from "../httpClient";
+import type { IntegrationId } from "../credentials";
+import { markNeedsReauth, runWithReauthGuard } from "../reauth";
 import { mapHttpError, PlanFlowParseError } from "./errors";
 import {
   activeWorkListSchema,
@@ -44,6 +46,12 @@ export interface PlanFlowClientOptions {
   cacheStore?: IntegrationCacheStore;
   defaultTimeoutMs?: number;
   defaultRetry?: RetryOptions;
+  /** T11.8 — when provided, every request is wrapped in the integration
+   *  reauth guard. A 401/403 marks the integration as `needs_reauth`,
+   *  surfaces the Reconnect banner, and queues the request for retry
+   *  after the next successful Verify. Verify clients should leave this
+   *  unset so a bad-token check doesn't trip the global state. */
+  reauthIntegration?: IntegrationId;
 }
 
 export interface ListTasksOptions {
@@ -95,8 +103,11 @@ export interface ReorderTasksPayload {
 
 export class PlanFlowClient {
   readonly #http: IntegrationHttpClient;
+  readonly #reauthIntegration: IntegrationId | null;
 
   constructor(options: PlanFlowClientOptions) {
+    this.#reauthIntegration = options.reauthIntegration ?? null;
+    const reauthIntegration = this.#reauthIntegration;
     this.#http = createIntegrationHttpClient({
       service: "planflow",
       baseUrl: options.baseUrl ?? PLANFLOW_DEFAULT_BASE_URL,
@@ -106,6 +117,12 @@ export class PlanFlowClient {
       defaultHeaders: { accept: "application/json" },
       defaultTimeoutMs: options.defaultTimeoutMs,
       defaultRetry: options.defaultRetry,
+      onAuthFailure:
+        reauthIntegration == null
+          ? undefined
+          : async () => {
+              await markNeedsReauth(reauthIntegration);
+            },
     });
   }
 
@@ -278,19 +295,23 @@ export class PlanFlowClient {
     },
   ): Promise<T> {
     const responseType = options.responseType ?? "json";
-    try {
-      return await this.#http.request<T>(path, {
-        method: options.method,
-        query: options.query,
-        json: options.json,
-        cacheTtlMs: options.cacheTtlMs,
-        responseType,
-        parse:
-          responseType === "json" ? (value) => parseWithSchema(schema, path, value) : undefined,
-      });
-    } catch (error) {
-      mapHttpError(error);
-    }
+    const exec = async (): Promise<T> => {
+      try {
+        return await this.#http.request<T>(path, {
+          method: options.method,
+          query: options.query,
+          json: options.json,
+          cacheTtlMs: options.cacheTtlMs,
+          responseType,
+          parse:
+            responseType === "json" ? (value) => parseWithSchema(schema, path, value) : undefined,
+        });
+      } catch (error) {
+        mapHttpError(error);
+      }
+    };
+    if (this.#reauthIntegration == null) return exec();
+    return runWithReauthGuard(this.#reauthIntegration, exec);
   }
 }
 

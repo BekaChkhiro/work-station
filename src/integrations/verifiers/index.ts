@@ -49,6 +49,11 @@ export class IntegrationVerifyError extends Error {
 
 export interface VerifyResult {
   accountLabel: string;
+  /** T12.2 — PlanFlow returns both fields from `/me`; the Settings card
+   *  renders "Connected as <name> (<email>)" when both are present. Other
+   *  integrations may leave one or both unset. */
+  accountName?: string | null;
+  accountEmail?: string | null;
 }
 
 export interface VerifyOptions {
@@ -90,8 +95,10 @@ async function verifyPlanFlow(token: string, options: VerifyOptions): Promise<Ve
   });
   try {
     const me = await client.getMe();
-    const label = me.name?.trim() || me.email;
-    return { accountLabel: label };
+    const name = me.name?.trim() || null;
+    const email = me.email?.trim() || null;
+    const label = name || email || me.id;
+    return { accountLabel: label, accountName: name, accountEmail: email };
   } catch (error) {
     if (error instanceof PlanFlowAuthError) {
       throw new IntegrationVerifyError(

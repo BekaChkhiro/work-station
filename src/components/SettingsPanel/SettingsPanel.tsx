@@ -25,6 +25,8 @@ import {
 } from "solid-js";
 import type { JSX } from "solid-js";
 
+import { openUrl } from "@tauri-apps/plugin-opener";
+
 import {
   bindingsEqual,
   findConflicts,
@@ -52,8 +54,12 @@ import {
 import { getSetting, setSetting } from "../../db/settings";
 import { cliListAvailable, type CliInfo } from "../../ipc/cli";
 import {
+  cancelQueuedForReauth,
+  clearNeedsReauthAndReplay,
   CredentialsError,
+  createPlanFlowClient,
   DEFAULT_ACCOUNT,
+  hydrateReauthState,
   Integration,
   IntegrationVerifyError,
   clearIntegrationStatus,
@@ -61,13 +67,30 @@ import {
   getCredential,
   getIntegrationStatusMap,
   hasCredential,
+  PlanFlowApiError,
+  PlanFlowAuthError,
   PLANFLOW_DEFAULT_BASE_URL,
   setCredential,
   setIntegrationStatus,
   verifyIntegration,
   type IntegrationId,
   type IntegrationStatusEntry,
+  type Project as PlanFlowProject,
 } from "../../integrations";
+import {
+  activeProjectId,
+  activeTab as activeWorkspaceTab,
+  projects as workspaceProjects,
+  setTabVisibility,
+  visibleTabs as visibleWorkspaceTabs,
+} from "../../stores/workspace";
+import {
+  deleteProjectLink,
+  listProjectLinks,
+  setProjectLink,
+  type ProjectLink,
+} from "../../db/projectLinks";
+import { updateProjectWorkspaceTabs } from "../../db/projects";
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -709,6 +732,9 @@ interface IntegrationDef {
   label: string;
   description: string;
   endpoint: string;
+  /** T12.2 — external URL where the user can mint a fresh API token. The
+   *  card renders it as a "Get token" anchor next to the description. */
+  getTokenUrl: string;
 }
 
 // T11.6 — every integration now ships a minimal authenticated GET (or the
@@ -721,30 +747,35 @@ const INTEGRATIONS: readonly IntegrationDef[] = [
     label: "PlanFlow",
     description: "Tasks, knowledge, and activity sync for this project.",
     endpoint: PLANFLOW_DEFAULT_BASE_URL,
+    getTokenUrl: "https://planflow.tools/settings/api-tokens",
   },
   {
     id: Integration.GitHub,
     label: "GitHub",
     description: "Repository overview, pull requests, and workflow runs.",
     endpoint: "api.github.com",
+    getTokenUrl: "https://github.com/settings/tokens",
   },
   {
     id: Integration.Vercel,
     label: "Vercel",
     description: "Deployments, build logs, and environment variables.",
     endpoint: "api.vercel.com",
+    getTokenUrl: "https://vercel.com/account/tokens",
   },
   {
     id: Integration.Neon,
     label: "Neon",
     description: "Branches, connection strings, and SQL queries.",
     endpoint: "console.neon.tech",
+    getTokenUrl: "https://console.neon.tech/app/settings/api-keys",
   },
   {
     id: Integration.Railway,
     label: "Railway",
     description: "Services, deployments, and live log streams.",
     endpoint: "backboard.railway.app",
+    getTokenUrl: "https://railway.com/account/tokens",
   },
 ];
 
@@ -805,6 +836,10 @@ function IntegrationsSection(): JSX.Element {
 
   onMount(() => {
     void hydrate();
+    // The shell hydrates the reauth state once on launch; calling it
+    // again here is cheap (idempotent) and guarantees the panel is
+    // never the first reader.
+    void hydrateReauthState();
   });
 
   const save = async (def: IntegrationDef): Promise<void> => {
@@ -834,6 +869,9 @@ function IntegrationsSection(): JSX.Element {
     try {
       await deleteCredential(def.id, DEFAULT_ACCOUNT);
       await clearIntegrationStatus(def.id);
+      // T11.8 — any requests parked while waiting for re-auth should
+      // reject now rather than retry against a now-deleted credential.
+      cancelQueuedForReauth(def.id);
       patch(def.id, {
         hasToken: false,
         status: null,
@@ -856,12 +894,18 @@ function IntegrationsSection(): JSX.Element {
         });
         return;
       }
-      const { accountLabel } = await verifyIntegration(def.id, token);
+      const result = await verifyIntegration(def.id, token);
       const entry: IntegrationStatusEntry = {
         verifiedAt: Date.now(),
-        accountLabel,
+        accountLabel: result.accountLabel,
+        accountName: result.accountName ?? null,
+        accountEmail: result.accountEmail ?? null,
       };
       await setIntegrationStatus(def.id, entry);
+      // T11.8 — verify success dismisses the Reconnect banner and
+      // releases any requests that were parked while we waited for
+      // a fresh token.
+      await clearNeedsReauthAndReplay(def.id);
       patch(def.id, { status: entry, phase: { kind: "idle" } });
     } catch (err) {
       patch(def.id, { phase: { kind: "error", message: describeError(err) } });
@@ -879,24 +923,61 @@ function IntegrationsSection(): JSX.Element {
             const busy = (): boolean => phase().kind === "saving" || phase().kind === "verifying";
             const canSave = (): boolean => row().draft.trim().length > 0 && !busy();
             const canVerify = (): boolean => row().hasToken && !busy();
+            // T11.8 — once a long-running call has flagged this
+            // integration as needs-reauth the row pivots into
+            // "Re-enter token" framing until the next successful Verify
+            // clears the flag.
+            const needsReauth = (): boolean => row().status?.needsReauthAt != null;
             return (
-              <div class="ws-integration" role="group" aria-label={`${def.label} integration`}>
+              <div
+                class="ws-integration"
+                role="group"
+                aria-label={`${def.label} integration`}
+                data-needs-reauth={needsReauth() ? "true" : undefined}
+              >
                 <div class="ws-integration__head">
                   <div class="ws-integration__title">
                     <div class="ws-settings-page__lbl">{def.label}</div>
                     <div class="ws-settings-page__hint">
                       {def.description} · {def.endpoint}
                     </div>
+                    <div class="ws-integration__links">
+                      <a
+                        href={def.getTokenUrl}
+                        class="ws-integration__link"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void openUrl(def.getTokenUrl).catch((err: unknown) => {
+                            console.warn("[integrations] openUrl failed", def.id, err);
+                          });
+                        }}
+                        rel="noreferrer noopener"
+                        target="_blank"
+                      >
+                        Get token ↗
+                      </a>
+                    </div>
                   </div>
                   <IntegrationStatusPill row={row()} />
                 </div>
+
+                <Show when={needsReauth()}>
+                  <div class="ws-integration__notice" role="status">
+                    <span aria-hidden="true">⚠</span> Token rejected by {def.label}. Paste a fresh
+                    token and Verify to dismiss this banner.
+                  </div>
+                </Show>
 
                 <div class="ws-integration__token">
                   <input
                     type={row().reveal ? "text" : "password"}
                     class="ws-settings-page__input ws-integration__input"
                     placeholder={
-                      row().hasToken ? "Paste a new token to replace…" : "Paste API token"
+                      needsReauth()
+                        ? "Paste a fresh token to reconnect…"
+                        : row().hasToken
+                          ? "Paste a new token to replace…"
+                          : "Paste API token"
                     }
                     value={row().draft}
                     onInput={(e) => patch(def.id, { draft: e.currentTarget.value })}
@@ -956,6 +1037,10 @@ function IntegrationsSection(): JSX.Element {
                     </div>
                   )}
                 </Show>
+
+                <Show when={def.id === Integration.PlanFlow && row().status && !needsReauth()}>
+                  <PlanFlowLinkPicker />
+                </Show>
               </div>
             );
           }}
@@ -967,14 +1052,25 @@ function IntegrationsSection(): JSX.Element {
 
 function IntegrationStatusPill(props: { row: RowState }): JSX.Element {
   const verifying = (): boolean => props.row.phase.kind === "verifying";
+  const needsReauth = (): boolean => props.row.status?.needsReauthAt != null;
   const label = (): string => {
     if (verifying()) return "Checking…";
-    if (props.row.status) return `Connected · ${props.row.status.accountLabel}`;
+    if (needsReauth()) return "Reconnect required";
+    const status = props.row.status;
+    if (status) {
+      // T12.2 — when the verifier resolved both name and email, prefer the
+      // richer "Name (email)" form so the user can confirm both at a glance.
+      const name = status.accountName?.trim();
+      const email = status.accountEmail?.trim();
+      if (name && email) return `Connected · ${name} (${email})`;
+      return `Connected · ${status.accountLabel}`;
+    }
     if (props.row.hasToken) return "Saved · not verified";
     return "Not connected";
   };
   const tone = (): string => {
     if (verifying()) return "checking";
+    if (needsReauth()) return "reauth";
     if (props.row.status) return "ok";
     if (props.row.hasToken) return "saved";
     return "off";
@@ -992,6 +1088,279 @@ function describeError(err: unknown): string {
   if (err instanceof CredentialsError) return err.userMessage;
   if (err instanceof Error) return err.message;
   return "Unexpected error.";
+}
+
+/* ─── PlanFlow per-project link picker (T12.2) ──────────────────────── */
+//
+// Lives inside the PlanFlow card body, scoped to the *currently-active*
+// Work Station project. The picker resolves three states:
+//
+//  1. No active project — Settings was opened without a workspace. Show
+//     a hint pointing the user back to the sidebar.
+//  2. Active project but no link — load `client.listProjects()` (cached
+//     by the underlying HTTP layer) into a `<select>` and let the user
+//     pick + Link.
+//  3. Active project with an existing link — show the linked project name
+//     and an Unlink action. Picking from the dropdown re-links.
+//
+// Linking persists the row via T11.5's `setProjectLink` *and* flips the
+// PlanFlow workspace tab visible (in-memory store + SQLite). Unlinking
+// reverses both. The tab strip in AppShell renders the result the next
+// time the user closes Settings.
+
+const PLANFLOW_PROJECTS_TTL_MS = 5 * 60 * 1000;
+
+type LinkPhase =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "linking" }
+  | { kind: "unlinking" }
+  | { kind: "error"; message: string };
+
+function PlanFlowLinkPicker(): JSX.Element {
+  const [phase, setPhase] = createSignal<LinkPhase>({ kind: "idle" });
+  const [planflowProjects, setPlanflowProjects] = createSignal<PlanFlowProject[]>([]);
+  const [link, setLink] = createSignal<ProjectLink | null>(null);
+  const [draftId, setDraftId] = createSignal<string>("");
+
+  // The active Work Station project is read each render so opening Settings
+  // from inside any project workspace lands on the right scope without an
+  // explicit prop drill.
+  const wsProjectId = (): string | null => activeProjectId();
+  const wsProject = (): { id: string; name: string } | null => {
+    const id = wsProjectId();
+    if (!id) return null;
+    const meta = workspaceProjects().find((p) => p.id === id);
+    return meta ? { id: meta.id, name: meta.name } : { id, name: id };
+  };
+
+  const refreshLink = async (projectId: string): Promise<void> => {
+    try {
+      const rows = await listProjectLinks(projectId);
+      const existing = rows.find((r) => r.service === Integration.PlanFlow) ?? null;
+      setLink(existing);
+      setDraftId(existing?.externalId ?? "");
+    } catch (err) {
+      console.warn("[T12.2] listProjectLinks failed", err);
+    }
+  };
+
+  const loadProjects = async (): Promise<void> => {
+    setPhase({ kind: "loading" });
+    try {
+      const token = await getCredential(Integration.PlanFlow, DEFAULT_ACCOUNT);
+      if (!token) {
+        setPhase({
+          kind: "error",
+          message: "No PlanFlow token saved. Save and verify a token above first.",
+        });
+        return;
+      }
+      const client = createPlanFlowClient({
+        getAuthToken: () => token,
+        // Verify clients deliberately skip the reauth guard so a transient
+        // 401 doesn't poison the whole integration; here we *want* the guard
+        // because the user is actively working with PlanFlow data and a bad
+        // token deserves the Reconnect banner.
+        reauthIntegration: Integration.PlanFlow,
+      });
+      const list = await client.listProjects(PLANFLOW_PROJECTS_TTL_MS);
+      // Stable alpha-sort so the dropdown order doesn't shift between fetches.
+      const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name));
+      setPlanflowProjects(sorted);
+      setPhase({ kind: "idle" });
+    } catch (err) {
+      setPhase({ kind: "error", message: describePlanFlowError(err) });
+    }
+  };
+
+  onMount(() => {
+    const id = wsProjectId();
+    if (id) void refreshLink(id);
+    void loadProjects();
+  });
+
+  // Switching the active project while Settings is open should re-target
+  // the picker without forcing a remount. The effect re-runs on every
+  // activeProjectId change.
+  createEffect(() => {
+    const id = wsProjectId();
+    if (!id) {
+      setLink(null);
+      setDraftId("");
+      return;
+    }
+    void refreshLink(id);
+  });
+
+  const linkedProject = createMemo<PlanFlowProject | null>(() => {
+    const current = link();
+    if (!current) return null;
+    return planflowProjects().find((p) => p.id === current.externalId) ?? null;
+  });
+
+  const doLink = async (): Promise<void> => {
+    const wsId = wsProjectId();
+    const target = draftId();
+    if (!wsId || !target) return;
+    const chosen = planflowProjects().find((p) => p.id === target);
+    if (!chosen) return;
+    setPhase({ kind: "linking" });
+    try {
+      const row = await setProjectLink({
+        projectId: wsId,
+        service: Integration.PlanFlow,
+        externalId: chosen.id,
+        metadata: { name: chosen.name },
+      });
+      setLink(row);
+      setDraftId(row.externalId);
+      // T11.1 — flip the PlanFlow tab visible so the workspace tab strip
+      // shows it the next time the user closes Settings. Persist in the
+      // same call so a crash before the AppRoot debounce window still
+      // sees the new state on relaunch.
+      setTabVisibility(wsId, "planflow", true);
+      await persistTabsForProject(wsId);
+      setPhase({ kind: "idle" });
+    } catch (err) {
+      setPhase({ kind: "error", message: describeError(err) });
+    }
+  };
+
+  const doUnlink = async (): Promise<void> => {
+    const wsId = wsProjectId();
+    const existing = link();
+    if (!wsId || !existing) return;
+    setPhase({ kind: "unlinking" });
+    try {
+      await deleteProjectLink(wsId, Integration.PlanFlow, existing.externalId);
+      setLink(null);
+      setDraftId("");
+      setTabVisibility(wsId, "planflow", false);
+      await persistTabsForProject(wsId);
+      setPhase({ kind: "idle" });
+    } catch (err) {
+      setPhase({ kind: "error", message: describeError(err) });
+    }
+  };
+
+  const busy = (): boolean => {
+    const p = phase().kind;
+    return p === "loading" || p === "linking" || p === "unlinking";
+  };
+
+  const canLink = (): boolean => {
+    if (busy()) return false;
+    const target = draftId();
+    if (!target) return false;
+    const existing = link();
+    if (existing && existing.externalId === target) return false;
+    return true;
+  };
+
+  return (
+    <div class="ws-integration__link-block" role="group" aria-label="PlanFlow project link">
+      <div class="ws-integration__link-head">
+        <div class="ws-settings-page__lbl">Linked PlanFlow project</div>
+        <Show when={wsProject()}>
+          {(meta) => (
+            <div class="ws-settings-page__hint">
+              For Work Station project <strong>{meta().name}</strong>. The PlanFlow tab activates
+              once linked.
+            </div>
+          )}
+        </Show>
+      </div>
+
+      <Show
+        when={wsProject()}
+        fallback={
+          <div class="ws-settings-page__empty">
+            Open a project in the sidebar to link it to a PlanFlow project.
+          </div>
+        }
+      >
+        <div class="ws-integration__link-row">
+          <select
+            class="ws-settings-page__input ws-integration__link-select"
+            value={draftId()}
+            disabled={busy() || planflowProjects().length === 0}
+            onChange={(e) => setDraftId(e.currentTarget.value)}
+            aria-label="PlanFlow project"
+          >
+            <option value="">
+              {phase().kind === "loading"
+                ? "Loading PlanFlow projects…"
+                : planflowProjects().length === 0
+                  ? "No PlanFlow projects available"
+                  : "Pick a PlanFlow project…"}
+            </option>
+            <For each={planflowProjects()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+          </select>
+          <button
+            type="button"
+            class="ws-settings-page__btn"
+            disabled={!canLink()}
+            onClick={() => void doLink()}
+          >
+            {phase().kind === "linking" ? "Linking…" : link() ? "Re-link" : "Link"}
+          </button>
+          <button
+            type="button"
+            class="ws-settings-page__btn ws-settings-page__btn--ghost"
+            disabled={!link() || busy()}
+            onClick={() => void doUnlink()}
+          >
+            {phase().kind === "unlinking" ? "Unlinking…" : "Unlink"}
+          </button>
+        </div>
+
+        <Show when={link()}>
+          {(current) => (
+            <div class="ws-integration__link-current" role="status">
+              <span aria-hidden="true">✓</span> Linked to{" "}
+              <strong>
+                {linkedProject()?.name ??
+                  (current().metadata?.name as string | undefined) ??
+                  current().externalId}
+              </strong>
+              .
+            </div>
+          )}
+        </Show>
+
+        <Show when={phase().kind === "error" ? phase() : null}>
+          {(p) => (
+            <div class="ws-integration__error" role="alert">
+              <span aria-hidden="true">⚠</span>{" "}
+              {(p() as Extract<LinkPhase, { kind: "error" }>).message}
+            </div>
+          )}
+        </Show>
+      </Show>
+    </div>
+  );
+}
+
+async function persistTabsForProject(projectId: string): Promise<void> {
+  const tabs = visibleWorkspaceTabs(projectId);
+  const active = activeWorkspaceTab(projectId);
+  if (tabs.length === 0) return;
+  try {
+    await updateProjectWorkspaceTabs(projectId, tabs, active);
+  } catch (err) {
+    console.error("[T12.2] workspace tabs persist failed:", err);
+  }
+}
+
+function describePlanFlowError(err: unknown): string {
+  if (err instanceof PlanFlowAuthError) {
+    return "PlanFlow rejected this token. Re-enter and verify above.";
+  }
+  if (err instanceof PlanFlowApiError) {
+    return `PlanFlow API responded with HTTP ${err.status}. Try again shortly.`;
+  }
+  return describeError(err);
 }
 
 /* ─── Privacy ───────────────────────────────────────────────────────── */

@@ -1,4 +1,6 @@
 export { createPlanFlowClient, PlanFlowClient, PLANFLOW_DEFAULT_BASE_URL } from "./client";
+export { createRendererPlanFlowClient, MissingPlanFlowTokenError } from "./clientFactory";
+export type { RendererPlanFlowClientOptions } from "./clientFactory";
 export type {
   BulkStatusPayload,
   CreateCommentPayload,

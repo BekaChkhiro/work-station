@@ -37,12 +37,26 @@ export {
 } from "./credentials";
 
 export {
+  clearIntegrationNeedsReauthFlag,
   clearIntegrationStatus,
   getIntegrationStatus,
   getIntegrationStatusMap,
+  markIntegrationNeedsReauth,
   setIntegrationStatus,
 } from "./status";
 export type { IntegrationStatusEntry, IntegrationStatusMap } from "./status";
+
+export {
+  cancelQueuedForReauth,
+  clearNeedsReauthAndReplay,
+  hydrateReauthState,
+  isNeedsReauth,
+  markNeedsReauth,
+  reauthSnapshot,
+  ReauthCancelledError,
+  runWithReauthGuard,
+} from "./reauth";
+
 export type {
   CredentialsErrorKind,
   CredentialsErrorPayload,
@@ -52,6 +66,8 @@ export type {
 
 export {
   createPlanFlowClient,
+  createRendererPlanFlowClient,
+  MissingPlanFlowTokenError,
   PlanFlowApiError,
   PlanFlowAuthError,
   PlanFlowClient,
@@ -79,6 +95,15 @@ export {
 } from "./writeQueue";
 export type { QueuedWrite, QueueEntry, ReplayContext } from "./writeQueue";
 
+export {
+  clearProjectLinkCache,
+  invalidateProjectLinks,
+  readCachedLinks,
+  usePlanFlowExternalId,
+  usePlanFlowLink,
+  useProjectServiceLink,
+} from "./projectLinks";
+
 export { IntegrationVerifyError, verifyIntegration } from "./verifiers";
 export type { VerifyFailureReason, VerifyOptions, VerifyResult } from "./verifiers";
 export type {
@@ -98,6 +123,7 @@ export type {
   Notification,
   PlanFlowClientOptions,
   Project,
+  RendererPlanFlowClientOptions,
   ReorderTasksPayload,
   Task,
   TaskComplexity,

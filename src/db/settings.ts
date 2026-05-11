@@ -33,11 +33,22 @@ const UiFontSizeSchema = z.number().int().min(12).max(16);
 // (e.g. "planflow", "github"); unknown keys are tolerated so a future
 // integration can ship without a settings migration. The map is rewritten
 // in whole on every save/clear via the helpers in `integrations/status.ts`.
+//
+// T11.8: `needsReauthAt` is set when a long-running integration call
+// returned 401/403 — the banner in the affected tab and the
+// "Re-enter token" mode in Settings both read from this field. A
+// successful Verify clears it and drains the in-flight retry queue.
 const IntegrationStatusSchema = z.record(
   z.string(),
   z.object({
     verifiedAt: z.number().int(),
     accountLabel: z.string(),
+    // T12.2 — PlanFlow's card displays both name and email when the verifier
+    // can resolve them; other integrations leave these unset and the card
+    // falls back to `accountLabel` alone.
+    accountName: z.string().nullable().optional(),
+    accountEmail: z.string().nullable().optional(),
+    needsReauthAt: z.number().int().nullable().optional(),
   }),
 );
 

@@ -19,7 +19,15 @@ import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { HotkeyCheatsheet } from "./components/HotkeyCheatsheet";
 import { QuickSwitcher } from "./components/QuickSwitcher";
+import { ToastRegion } from "./components/Toast";
 import { eventMatchesBinding, getBinding } from "./hotkeys";
+import {
+  DEFAULT_ACCOUNT,
+  Integration,
+  getCredential,
+  installAutoReplay,
+  installOfflineListeners,
+} from "./integrations";
 import { addMenuActionListener, bridgeNativeMenuActions } from "./menu";
 import { isEditableTarget } from "./utils/platform";
 import "./styles/globals.css";
@@ -78,6 +86,25 @@ export default function App() {
   // and we need the modifier combo to win even while a terminal pane has
   // focus.
   onMount(() => {
+    // T11.9 — install network listeners and the offline → online auto-replay
+    // wiring once at app boot. Both helpers are idempotent and the dispose
+    // fns are kept so HMR / unmount tears them down cleanly. The replay
+    // context lazily re-resolves each integration's token at retry time so
+    // a token rotation between enqueue and reconnect doesn't replay a stale
+    // Authorization header.
+    const disposeOfflineListeners = installOfflineListeners();
+    const disposeAutoReplay = installAutoReplay({
+      getAuthToken: async (service): Promise<string | null> => {
+        if (service === Integration.PlanFlow) {
+          return getCredential(Integration.PlanFlow, DEFAULT_ACCOUNT);
+        }
+        // Other integrations (GitHub, Vercel, …) register their own
+        // replay handlers when their tabs ship; until then there is no
+        // token to resolve.
+        return null;
+      },
+    });
+
     let unlistenNative: (() => void) | undefined;
     if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
       void bridgeNativeMenuActions().then((dispose) => {
@@ -135,6 +162,8 @@ export default function App() {
       document.removeEventListener("keydown", handler);
       disposeMenu();
       unlistenNative?.();
+      disposeAutoReplay();
+      disposeOfflineListeners();
     });
   });
 
@@ -189,6 +218,8 @@ export default function App() {
       <CrossSessionSearch open={crossSearchOpen()} onClose={() => setCrossSearchOpen(false)} />
       <QuickSwitcher open={switcherOpen()} onClose={() => setSwitcherOpen(false)} />
       <HotkeyCheatsheet open={cheatsheetOpen()} onClose={() => setCheatsheetOpen(false)} />
+      {/* T11.9 — Single mount point for the offline / queue toasts. */}
+      <ToastRegion />
     </AppErrorBoundary>
   );
 }

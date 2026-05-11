@@ -67,9 +67,12 @@ import {
   setLayout,
   splitPane,
   closePane as closePaneInStore,
+  setTabVisibility,
   updateProjectMeta,
   visibleTabs,
 } from "../../stores/workspace";
+import { listProjectLinks } from "../../db/projectLinks";
+import { Integration } from "../../integrations";
 import type { WorkspaceTabKind } from "../../types/workspaceTab";
 import {
   collectPanes,
@@ -405,6 +408,21 @@ export function AppRoot(): JSX.Element {
         const persisted = await listProjects();
         for (const p of persisted) {
           registerProject(p);
+
+          // T12.2: project_links is the source of truth for "this project
+          // is connected to PlanFlow". If a link row exists but the
+          // persisted workspace_tabs JSON drifted, force the PlanFlow tab
+          // visible so the strip matches the link state on boot.
+          try {
+            const links = await listProjectLinks(p.id);
+            const hasPlanFlowLink = links.some((link) => link.service === Integration.PlanFlow);
+            if (hasPlanFlowLink && !visibleTabs(p.id).includes("planflow")) {
+              setTabVisibility(p.id, "planflow", true);
+              persistWorkspaceTabs(p.id);
+            }
+          } catch (err) {
+            console.warn("[T12.2] project_links reconcile failed:", err);
+          }
 
           // T2.12: load or create a persistent session row, then wire its
           // debounced persister so future layout changes are saved to SQLite.
