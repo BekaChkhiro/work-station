@@ -1343,7 +1343,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T11.3: Settings → Integrations panel
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: M
 - **Dependencies**: T11.2, T8.7
 - **Description**:
@@ -1365,7 +1365,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T11.5: Project ↔ service linking model
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: M
 - **Dependencies**: T3.6, T11.2
 - **Description**:

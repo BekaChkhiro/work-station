@@ -9,6 +9,7 @@
 
 pub mod backup;
 pub mod migrations;
+pub mod project_links;
 pub mod projects;
 
 use sqlx::sqlite::SqlitePool;

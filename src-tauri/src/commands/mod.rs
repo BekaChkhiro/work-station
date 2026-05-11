@@ -5,5 +5,6 @@ pub mod clipboard;
 pub mod credentials;
 pub mod log;
 pub mod picker;
+pub mod project_links;
 pub mod projects;
 pub mod pty;

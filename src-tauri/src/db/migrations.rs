@@ -61,6 +61,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "add project workspace tabs",
         sql: include_str!("../../migrations/0006_project_workspace_tabs.sql"),
     },
+    Migration {
+        version: 7,
+        name: "create project_links table",
+        sql: include_str!("../../migrations/0007_project_links.sql"),
+    },
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -265,7 +270,7 @@ mod tests {
         let pool = fresh_pool().await;
 
         let first = run(&pool, MIGRATIONS, None).await.expect("first run");
-        assert_eq!(first.applied, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(first.applied, vec![1, 2, 3, 4, 5, 6, 7]);
         assert!(first.skipped.is_empty());
 
         // All marker tables exist after a fresh apply.
@@ -274,6 +279,7 @@ mod tests {
             "sessions",
             "app_settings",
             "http_cache",
+            "project_links",
             "schema_version",
         ] {
             let count: i64 = sqlx::query(
@@ -290,7 +296,7 @@ mod tests {
 
         let second = run(&pool, MIGRATIONS, None).await.expect("second run");
         assert!(second.applied.is_empty(), "no migrations should re-apply");
-        assert_eq!(second.skipped, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(second.skipped, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[tokio::test]
@@ -369,14 +375,14 @@ mod tests {
         let report = run(&pool, MIGRATIONS, None)
             .await
             .expect("run with legacy seed");
-        // v1 should be skipped (seeded), v2..v6 newly applied.
+        // v1 should be skipped (seeded), v2..v7 newly applied.
         assert_eq!(report.skipped, vec![1]);
-        assert_eq!(report.applied, vec![2, 3, 4, 5, 6]);
+        assert_eq!(report.applied, vec![2, 3, 4, 5, 6, 7]);
 
         let versions = applied_versions(&pool).await.expect("read schema_version");
         assert_eq!(
             versions.iter().copied().collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6]
+            vec![1, 2, 3, 4, 5, 6, 7]
         );
     }
 
@@ -402,7 +408,7 @@ mod tests {
         let report = run(&pool, MIGRATIONS, Some(&backups))
             .await
             .expect("run with backups");
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7]);
 
         let entries: Vec<_> = std::fs::read_dir(&backups)
             .expect("backups dir created")
