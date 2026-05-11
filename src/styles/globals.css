@@ -2695,6 +2695,157 @@ button {
   color: #fff;
 }
 
+/* T12.9 — Notifications bell + dropdown.
+ * Bell sits in the titlebar; the dropdown anchors below it via absolute
+ * positioning so it doesn't push the titlebar layout around. */
+.ws-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.ws-bell__btn {
+  position: relative;
+  width: 36px;
+}
+
+.ws-bell__badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--error, #e5484d);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+  letter-spacing: 0.01em;
+}
+
+.ws-bell__panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 4px;
+  width: 320px;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md, 6px);
+  box-shadow: var(--shadow-popover);
+  z-index: 200;
+  overflow: hidden;
+}
+
+.ws-bell__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-default);
+  font-size: var(--fs-12);
+}
+
+.ws-bell__title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ws-bell__count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ws-bell__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.ws-bell__row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-default);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.ws-bell__row:last-child {
+  border-bottom: 0;
+}
+
+.ws-bell__row:hover {
+  background: var(--bg-hover);
+}
+
+.ws-bell__row--unread {
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+}
+
+.ws-bell__row--unread:hover {
+  background: color-mix(in oklab, var(--accent) 12%, var(--bg-hover));
+}
+
+.ws-bell__dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.ws-bell__row-message {
+  grid-column: 2;
+  font-size: var(--fs-12);
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ws-bell__row-time {
+  grid-column: 3;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  padding-top: 2px;
+}
+
+.ws-bell__row:not(.ws-bell__row--unread) .ws-bell__row-message {
+  grid-column: 1 / span 2;
+}
+
+.ws-bell__state {
+  padding: var(--sp-3);
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.ws-bell__state--error {
+  color: var(--error, #e5484d);
+}
+
 /* T8.7 — Settings page (full-window modal) */
 .ws-settings-page__backdrop {
   position: fixed;
@@ -3900,6 +4051,21 @@ button {
   color: var(--text-tertiary);
 }
 
+/* T12.8 — selected row mirrors the active-task accent so users can keep
+   their place when the detail panel is open. */
+.ws-pf-tasks__row[data-selected="true"] {
+  background: var(--accent-soft, rgba(78, 201, 176, 0.18));
+}
+
+.ws-pf-tasks__row[data-selected="true"]:hover {
+  background: var(--accent-soft, rgba(78, 201, 176, 0.24));
+}
+
+.ws-pf-tasks__row:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: -2px;
+}
+
 .ws-pf-tasks__id {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: 11px;
@@ -4003,6 +4169,183 @@ button {
 }
 
 .ws-pf-tasks__start[data-active="true"] {
+  border-color: rgba(106, 170, 100, 0.45);
+  color: #6aaa64;
+}
+
+/* ─── T12.5 Progress / Done row buttons + dialog ─────────────────────── */
+
+.ws-pf-tasks__progress,
+.ws-pf-tasks__done {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: var(--r-xs, 4px);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: var(--bg-surface, var(--bg-hover));
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast, 150ms) var(--ease, ease),
+    border-color var(--dur-fast, 150ms) var(--ease, ease);
+}
+
+.ws-pf-tasks__progress:hover:not(:disabled),
+.ws-pf-tasks__done:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-hover, rgba(255, 255, 255, 0.16));
+}
+
+.ws-pf-tasks__progress:focus-visible,
+.ws-pf-tasks__done:focus-visible {
+  outline: 2px solid var(--focus, #4f8cc9);
+  outline-offset: 1px;
+}
+
+.ws-pf-tasks__done {
+  border-color: rgba(106, 170, 100, 0.35);
+  color: #6aaa64;
+}
+
+.ws-pf-action__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 24px;
+}
+
+.ws-pf-action {
+  width: min(520px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--bg-elevated, var(--bg-surface, #1c1f24));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-md, 8px);
+  padding: 18px 18px 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.ws-pf-action__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ws-pf-action__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ws-pf-action__task {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-pf-action__textarea {
+  resize: vertical;
+  min-height: 96px;
+  background: var(--bg-surface, var(--bg-hover));
+  color: var(--text-primary);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-xs, 4px);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.ws-pf-action__textarea:focus-visible {
+  outline: 2px solid var(--focus, #4f8cc9);
+  outline-offset: 1px;
+}
+
+.ws-pf-action__option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.ws-pf-action__preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ws-pf-action__preview-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+
+.ws-pf-action__preview-code {
+  display: block;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  background: var(--bg-surface, var(--bg-hover));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-xs, 4px);
+  padding: 6px 8px;
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.ws-pf-action__error {
+  margin: 0;
+  font-size: 11px;
+  color: var(--error, #d36458);
+}
+
+.ws-pf-action__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ws-pf-action__cancel,
+.ws-pf-action__submit {
+  font-size: 12px;
+  padding: 5px 14px;
+  border-radius: var(--r-xs, 4px);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: var(--bg-surface, var(--bg-hover));
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.ws-pf-action__cancel:hover:not(:disabled),
+.ws-pf-action__submit:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-hover, rgba(255, 255, 255, 0.16));
+}
+
+.ws-pf-action__submit:focus-visible,
+.ws-pf-action__cancel:focus-visible {
+  outline: 2px solid var(--focus, #4f8cc9);
+  outline-offset: 1px;
+}
+
+.ws-pf-action__submit:disabled,
+.ws-pf-action__cancel:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ws-pf-action__submit[data-kind="done"]:not(:disabled) {
   border-color: rgba(106, 170, 100, 0.45);
   color: #6aaa64;
 }
@@ -4356,4 +4699,391 @@ button {
   color: var(--text-tertiary);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* T12.8 — Task detail side panel. Sits where the active-work rail
+   normally lives; the parent toggles between them when a task is
+   selected. */
+.ws-pf-detail {
+  flex: 0 0 360px;
+  min-width: 280px;
+  max-width: 420px;
+  border-left: 1px solid var(--border-default);
+  background: var(--bg-surface, transparent);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ws-pf-detail__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.ws-pf-detail__head-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ws-pf-detail__id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--r-xs, 4px);
+  background: var(--bg-canvas, transparent);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  white-space: nowrap;
+}
+
+.ws-pf-detail__status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  flex: 0 0 auto;
+}
+
+.ws-pf-detail__status-dot[data-status="TODO"] {
+  background: var(--text-tertiary);
+}
+.ws-pf-detail__status-dot[data-status="IN_PROGRESS"] {
+  background: var(--accent, #4ec9b0);
+}
+.ws-pf-detail__status-dot[data-status="BLOCKED"] {
+  background: var(--danger, #f44747);
+}
+.ws-pf-detail__status-dot[data-status="DONE"],
+.ws-pf-detail__status-dot[data-status="DROPPED"] {
+  background: var(--success, #6a9955);
+}
+
+.ws-pf-detail__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-pf-detail__close {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-xs, 4px);
+  cursor: pointer;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ws-pf-detail__close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ws-pf-detail__close:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.ws-pf-detail__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ws-pf-detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-pf-detail__section-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ws-pf-detail__section-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-canvas, transparent);
+  border: 1px solid var(--border-default);
+}
+
+.ws-pf-detail__muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.ws-pf-detail__description {
+  margin: 0;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-canvas, transparent);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm, 6px);
+  padding: 8px 10px;
+}
+
+.ws-pf-detail__deps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ws-pf-detail__dep {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-xs, 4px);
+  padding: 6px 8px;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ws-pf-detail__dep:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ws-pf-detail__dep:disabled {
+  cursor: not-allowed;
+  color: var(--text-tertiary);
+}
+
+.ws-pf-detail__dep:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.ws-pf-detail__dep-icon {
+  font-size: 12px;
+  width: 14px;
+  text-align: center;
+}
+
+.ws-pf-detail__dep-icon[data-status="DONE"],
+.ws-pf-detail__dep-icon[data-status="DROPPED"] {
+  color: var(--success, #6a9955);
+}
+.ws-pf-detail__dep-icon[data-status="IN_PROGRESS"] {
+  color: var(--accent, #4ec9b0);
+}
+.ws-pf-detail__dep-icon[data-status="BLOCKED"] {
+  color: var(--danger, #f44747);
+}
+.ws-pf-detail__dep-icon[data-status="UNKNOWN"] {
+  color: var(--text-tertiary);
+}
+
+.ws-pf-detail__dep-id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.ws-pf-detail__dep-name {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ws-pf-detail__comments {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ws-pf-detail__comment {
+  background: var(--bg-canvas, transparent);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm, 6px);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ws-pf-detail__comment[data-mine="true"] {
+  border-color: var(--accent, var(--border-strong, var(--border-default)));
+}
+
+.ws-pf-detail__comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.ws-pf-detail__comment-author {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ws-pf-detail__comment-time {
+  color: var(--text-tertiary);
+}
+
+.ws-pf-detail__comment-body {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ws-pf-detail__composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border-default);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-surface, transparent);
+}
+
+.ws-pf-detail__composer-wrap {
+  position: relative;
+}
+
+.ws-pf-detail__textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 60px;
+  max-height: 200px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm, 6px);
+  padding: 8px 10px;
+  background: var(--bg-canvas, transparent);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.ws-pf-detail__textarea:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.ws-pf-detail__mentions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--bg-elevated, var(--bg-surface));
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm, 6px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.ws-pf-detail__mention {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs, 4px);
+  cursor: pointer;
+  color: var(--text-primary);
+  text-align: left;
+  font-size: 12px;
+}
+
+.ws-pf-detail__mention:hover,
+.ws-pf-detail__mention[data-active="true"] {
+  background: var(--bg-hover);
+}
+
+.ws-pf-detail__mention-handle {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  color: var(--accent, var(--text-primary));
+}
+
+.ws-pf-detail__mention-name {
+  color: var(--text-tertiary);
+}
+
+.ws-pf-detail__composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ws-pf-detail__post {
+  background: var(--accent, var(--text-primary));
+  color: var(--bg-canvas, #fff);
+  border: 0;
+  border-radius: var(--r-sm, 6px);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ws-pf-detail__post:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ws-pf-detail__post:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ws-pf-detail__post:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
 }

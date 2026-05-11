@@ -20,6 +20,7 @@ import {
   knowledgeTypeSchema,
   meSchema,
   notificationListSchema,
+  unreadNotificationCountSchema,
   projectListSchema,
   projectSchema,
   taskListSchema,
@@ -248,6 +249,11 @@ export class PlanFlowClient {
 
   async listNotifications(): Promise<Notification[]> {
     return this.#get("/notifications", notificationListSchema);
+  }
+
+  async getUnreadNotificationCount(): Promise<number> {
+    const response = await this.#get("/notifications/unread-count", unreadNotificationCountSchema);
+    return response.count;
   }
 
   async markNotificationRead(notificationId: string): Promise<void> {

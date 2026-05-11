@@ -36,9 +36,11 @@ import {
   Match,
   Show,
   Switch,
+  createEffect,
   createMemo,
   createResource,
   createSignal,
+  onCleanup,
   onMount,
 } from "solid-js";
 import type { JSX, Resource } from "solid-js";
@@ -48,6 +50,9 @@ import { Tooltip } from "../Tooltip";
 import { showToast } from "../Toast";
 import {
   createRendererPlanFlowClient,
+  finishTask,
+  formatCommitMessage,
+  markProgress,
   MissingPlanFlowTokenError,
   PlanFlowApiError,
   PlanFlowAuthError,
@@ -62,8 +67,10 @@ import {
   type TaskStatus,
 } from "../../integrations";
 import { activeTaskId } from "../../stores/activeTask";
+import { consumeTaskJump, pendingTaskJump } from "../../stores/pendingTaskJump";
 import { ActiveWorkPanel } from "./ActiveWorkPanel";
 import { ActivityFeed } from "./ActivityFeed";
+import { TaskDetailPanel } from "./TaskDetailPanel";
 
 const ROW_FLASH_CLASS = "ws-pf-tasks__row--flash";
 const ROW_FLASH_DURATION_MS = 1400;
@@ -182,13 +189,42 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
     void refetch();
   };
 
-  let controller: TaskListController | null = null;
+  const [controller, setController] = createSignal<TaskListController | null>(null);
   const bindController = (c: TaskListController): void => {
-    controller = c;
+    setController(c);
   };
   const jumpToTask = (taskId: string): void => {
-    controller?.jumpToTask(taskId);
+    controller()?.jumpToTask(taskId);
   };
+
+  // T12.8 — Detail panel selection. Clicking a row opens the side panel
+  // for that task; clicking the close button (or selecting the same row
+  // again) clears it. Jumping to a task from any rail also focuses the
+  // detail view so the user lands on the same context.
+  const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null);
+  const handleSelect = (taskId: string): void => {
+    setSelectedTaskId((prev) => (prev === taskId ? null : taskId));
+  };
+  const handleJump = (taskId: string): void => {
+    setSelectedTaskId(taskId);
+    jumpToTask(taskId);
+  };
+  const handleCloseDetail = (): void => {
+    setSelectedTaskId(null);
+  };
+
+  // T12.9 — cross-project notification clicks land a pending jump in the
+  // store before this view is mounted (or before its task list resolves).
+  // Drain it once the controller is ready so the bell's "click → switch
+  // project → open task" path scrolls/flashes the row AND opens the
+  // T12.8 task-detail panel for the target.
+  createEffect(() => {
+    const pending = pendingTaskJump(props.workspaceProjectId);
+    const ctrl = controller();
+    if (pending == null || ctrl == null) return;
+    handleJump(pending);
+    consumeTaskJump(props.workspaceProjectId);
+  });
 
   return (
     <div class="ws-pf-tasks__shell">
@@ -218,14 +254,29 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
                   workspaceProjectId={props.workspaceProjectId}
                   externalId={props.externalId}
                   me={me()}
+                  selectedTaskId={selectedTaskId()}
+                  onSelectTask={handleSelect}
                 />
               )}
             </Match>
           </Switch>
         </div>
-        <ActiveWorkPanel externalId={props.externalId} onJumpToTask={jumpToTask} />
+        <Show
+          when={selectedTaskId() != null}
+          fallback={<ActiveWorkPanel externalId={props.externalId} onJumpToTask={handleJump} />}
+        >
+          <TaskDetailPanel
+            client={client}
+            externalId={props.externalId}
+            taskId={selectedTaskId() as string}
+            tasks={tasks() ?? []}
+            me={me()}
+            onClose={handleCloseDetail}
+            onJumpToTask={handleJump}
+          />
+        </Show>
       </div>
-      <ActivityFeed externalId={props.externalId} onJumpToTask={jumpToTask} />
+      <ActivityFeed externalId={props.externalId} onJumpToTask={handleJump} />
     </div>
   );
 }
@@ -295,12 +346,24 @@ interface TaskListBodyProps {
   workspaceProjectId: string;
   externalId: string;
   me: Me | null | undefined;
+  /** T12.8 — currently selected task for the detail side panel. */
+  selectedTaskId: string | null;
+  onSelectTask: (taskId: string) => void;
+}
+
+interface ActionDialogState {
+  task: Task;
+  kind: "progress" | "done";
 }
 
 function TaskListBody(props: TaskListBodyProps): JSX.Element {
   const [query, setQuery] = createSignal("");
   const [phase, setPhase] = createSignal<string | null>(null);
   const [doneExpanded, setDoneExpanded] = createSignal(false);
+  // T12.5 — open dialog state for the Progress / Done flows. `null` while
+  // closed. Submission lives inside <TaskActionDialog>; this signal just
+  // tracks which row triggered it.
+  const [actionDialog, setActionDialog] = createSignal<ActionDialogState | null>(null);
 
   let scrollHostRef: HTMLDivElement | undefined;
 
@@ -493,6 +556,8 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
                               task={task}
                               meUserId={props.me?.id ?? null}
                               activeTaskId={activeTaskId(props.workspaceProjectId)}
+                              selected={props.selectedTaskId === task.id}
+                              onSelect={() => props.onSelectTask(task.id)}
                               onStart={(t) =>
                                 void runStartTask(
                                   props.client,
@@ -502,6 +567,8 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
                                   props.onRetry,
                                 )
                               }
+                              onMarkProgress={(t) => setActionDialog({ task: t, kind: "progress" })}
+                              onMarkDone={(t) => setActionDialog({ task: t, kind: "done" })}
                             />
                           )}
                         </For>
@@ -513,6 +580,21 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
             }}
           </For>
         </div>
+      </Show>
+      <Show when={actionDialog()}>
+        {(state) => (
+          <TaskActionDialog
+            state={state()}
+            client={props.client}
+            externalId={props.externalId}
+            workspaceProjectId={props.workspaceProjectId}
+            onClose={() => setActionDialog(null)}
+            onSuccess={() => {
+              setActionDialog(null);
+              props.onRetry();
+            }}
+          />
+        )}
       </Show>
     </div>
   );
@@ -547,7 +629,15 @@ interface TaskRowProps {
   /** Active in-progress task id for this project. Used to mark the row
    *  when it matches `task.id` so the badge styling lights up. */
   activeTaskId: string | null;
+  /** T12.8 — true when this row is currently shown in the detail panel. */
+  selected: boolean;
+  onSelect: () => void;
   onStart: (task: Task) => void;
+  /** T12.5 — open the Progress dialog for this task. Surfaced only when
+   *  the row is the user's active in-progress task. */
+  onMarkProgress: (task: Task) => void;
+  /** T12.5 — open the Done dialog for this task. Same gating as Progress. */
+  onMarkDone: (task: Task) => void;
 }
 
 function TaskRow(props: TaskRowProps): JSX.Element {
@@ -572,10 +662,22 @@ function TaskRow(props: TaskRowProps): JSX.Element {
   const showStart = (): boolean => !isDone();
   const startDisabled = (): boolean => lockedByOther();
   const startLabel = (): string => (isActive() || lockedBySelf() ? "Resume" : "Start working");
+  // T12.5 — Progress + Done actions are scoped to the *user's* active
+  // task. `isActive()` already encodes that: the local store only sets
+  // an entry after a successful `/work` POST as this user. Avoids
+  // showing Done on rows where the lock is held by someone else.
+  const showLifecycleActions = (): boolean => isActive() && !isDone();
   const assignee = (): string | null => {
     const a = props.task.assignee;
     if (!a) return null;
     return a.name?.trim() || a.email || null;
+  };
+
+  const onRowKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      props.onSelect();
+    }
   };
 
   return (
@@ -586,6 +688,13 @@ function TaskRow(props: TaskRowProps): JSX.Element {
       data-status={props.task.status}
       data-locked={lockedBy() ? "true" : undefined}
       data-active-task={isActive() ? "true" : undefined}
+      data-selected={props.selected ? "true" : undefined}
+      role="button"
+      tabIndex={0}
+      aria-pressed={props.selected}
+      aria-label={`Open detail for ${props.task.id}: ${props.task.name}`}
+      onClick={() => props.onSelect()}
+      onKeyDown={onRowKeyDown}
     >
       <span class="ws-pf-tasks__id" aria-label={`Task ${props.task.id}`}>
         {props.task.id}
@@ -650,6 +759,32 @@ function TaskRow(props: TaskRowProps): JSX.Element {
           }}
         >
           {startLabel()}
+        </button>
+      </Show>
+      <Show when={showLifecycleActions()}>
+        <button
+          type="button"
+          class="ws-pf-tasks__progress"
+          aria-label={`Mark progress on ${props.task.id}`}
+          title="Post a comment without changing status"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onMarkProgress(props.task);
+          }}
+        >
+          Progress
+        </button>
+        <button
+          type="button"
+          class="ws-pf-tasks__done"
+          aria-label={`Mark ${props.task.id} done`}
+          title="Set DONE, release the lock, and stage a commit message"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onMarkDone(props.task);
+          }}
+        >
+          Done
         </button>
       </Show>
     </li>
@@ -764,6 +899,200 @@ function describeError(error: unknown): string {
     return error.message;
   }
   return "Unexpected error contacting PlanFlow.";
+}
+
+// T12.5 — Progress / Done dialog. One component for both flows; the
+// `kind` discriminator on `state` flips the copy, the checkbox, and the
+// submit handler. Validation is minimal: a non-empty note for both
+// flows. Backdrop click and Esc dismiss without submitting; clicks
+// inside the dialog don't bubble to the row's onSelect handler.
+interface TaskActionDialogProps {
+  state: ActionDialogState;
+  client: PlanFlowClient;
+  externalId: string;
+  workspaceProjectId: string;
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+function TaskActionDialog(props: TaskActionDialogProps): JSX.Element {
+  const [note, setNote] = createSignal("");
+  const [saveAsKnowledge, setSaveAsKnowledge] = createSignal(false);
+  const [submitting, setSubmitting] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const task = (): Task => props.state.task;
+  const kind = (): "progress" | "done" => props.state.kind;
+  const title = (): string =>
+    kind() === "progress" ? `Mark progress on ${task().id}` : `Mark ${task().id} done`;
+  const placeholder = (): string =>
+    kind() === "progress"
+      ? "What just happened? (decisions, blockers, partial findings)"
+      : "Summary of what landed — copied verbatim into the closing comment.";
+  const submitLabel = (): string => {
+    if (submitting()) return kind() === "progress" ? "Posting…" : "Closing…";
+    return kind() === "progress" ? "Post comment" : "Mark done";
+  };
+  const commitPreview = (): string => formatCommitMessage(task().id, task().name);
+  const canSubmit = (): boolean => note().trim().length > 0 && !submitting();
+
+  let textareaRef: HTMLTextAreaElement | undefined;
+  const onKeydown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      if (submitting()) return;
+      event.preventDefault();
+      props.onClose();
+    }
+  };
+
+  onMount(() => {
+    textareaRef?.focus();
+    document.addEventListener("keydown", onKeydown, true);
+  });
+  onCleanup(() => {
+    document.removeEventListener("keydown", onKeydown, true);
+  });
+
+  const onSubmit = async (event: Event): Promise<void> => {
+    event.preventDefault();
+    if (!canSubmit()) return;
+    setSubmitting(true);
+    setError(null);
+    const body = note().trim();
+    try {
+      if (kind() === "progress") {
+        await markProgress({
+          client: props.client,
+          externalId: props.externalId,
+          taskId: task().id,
+          note: body,
+          saveAsKnowledge: saveAsKnowledge(),
+        });
+        showToast({
+          message: saveAsKnowledge()
+            ? `Comment + knowledge entry posted on ${task().id}.`
+            : `Comment posted on ${task().id}.`,
+          variant: "success",
+        });
+      } else {
+        const result = await finishTask({
+          client: props.client,
+          externalId: props.externalId,
+          workspaceProjectId: props.workspaceProjectId,
+          taskId: task().id,
+          summary: body,
+          taskName: task().name,
+        });
+        if (!result.released) {
+          showToast({
+            message: `${task().id} marked done. Lock release didn't confirm — refresh to verify.`,
+            variant: "warning",
+          });
+        } else if (!result.prefilled) {
+          showToast({
+            message: `${task().id} done. Open a terminal and run: ${result.commitMessage}`,
+            variant: "info",
+          });
+        } else {
+          showToast({
+            message: `${task().id} done — press Enter to commit.`,
+            variant: "success",
+          });
+        }
+      }
+      props.onSuccess();
+    } catch (err) {
+      if (err instanceof PlanFlowAuthError) {
+        setError("PlanFlow rejected the token. Reconnect in Settings.");
+      } else if (err instanceof PlanFlowApiError) {
+        setError(`PlanFlow responded with HTTP ${err.status}. Try again.`);
+      } else if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("Unknown error contacting PlanFlow.");
+      }
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      class="ws-pf-action__backdrop"
+      onMouseDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (submitting()) return;
+        props.onClose();
+      }}
+    >
+      <form
+        class="ws-pf-action"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title()}
+        onSubmit={(e) => void onSubmit(e)}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header class="ws-pf-action__head">
+          <span class="ws-pf-action__title">{title()}</span>
+          <span class="ws-pf-action__task" title={task().name}>
+            {task().name}
+          </span>
+        </header>
+        <textarea
+          ref={textareaRef}
+          class="ws-pf-action__textarea"
+          rows={5}
+          placeholder={placeholder()}
+          aria-label={kind() === "progress" ? "Progress note" : "Done summary"}
+          value={note()}
+          disabled={submitting()}
+          onInput={(e) => setNote(e.currentTarget.value)}
+        />
+        <Show when={kind() === "progress"}>
+          <label class="ws-pf-action__option">
+            <input
+              type="checkbox"
+              checked={saveAsKnowledge()}
+              disabled={submitting()}
+              onChange={(e) => setSaveAsKnowledge(e.currentTarget.checked)}
+            />
+            <span>Save as knowledge (decision)</span>
+          </label>
+        </Show>
+        <Show when={kind() === "done"}>
+          <div class="ws-pf-action__preview">
+            <span class="ws-pf-action__preview-label">Commit message</span>
+            <code class="ws-pf-action__preview-code">{commitPreview()}</code>
+          </div>
+        </Show>
+        <Show when={error()}>
+          {(msg) => (
+            <p class="ws-pf-action__error" role="alert">
+              {msg()}
+            </p>
+          )}
+        </Show>
+        <footer class="ws-pf-action__foot">
+          <button
+            type="button"
+            class="ws-pf-action__cancel"
+            onClick={() => props.onClose()}
+            disabled={submitting()}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="ws-pf-action__submit"
+            data-kind={kind()}
+            disabled={!canSubmit()}
+          >
+            {submitLabel()}
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
 }
 
 export default PlanFlowTaskList;

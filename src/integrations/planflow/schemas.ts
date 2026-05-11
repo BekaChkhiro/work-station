@@ -108,6 +108,11 @@ export type Notification = z.infer<typeof notificationSchema>;
 
 export const notificationListSchema = z.array(notificationSchema);
 
+export const unreadNotificationCountSchema = z.looseObject({
+  count: z.number().int().nonnegative(),
+});
+export type UnreadNotificationCount = z.infer<typeof unreadNotificationCountSchema>;
+
 export const changeSchema = z.looseObject({
   id: z.string(),
   kind: z.string(),

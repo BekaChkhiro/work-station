@@ -1,8 +1,23 @@
 export { createPlanFlowClient, PlanFlowClient, PLANFLOW_DEFAULT_BASE_URL } from "./client";
 export { createRendererPlanFlowClient, MissingPlanFlowTokenError } from "./clientFactory";
 export type { RendererPlanFlowClientOptions } from "./clientFactory";
-export { formatCheckoutCommand, startTask } from "./startTask";
-export type { StartTaskInput, StartTaskResult } from "./startTask";
+export {
+  commitScopeFromTaskId,
+  finishTask,
+  formatCheckoutCommand,
+  formatCommitCommand,
+  formatCommitMessage,
+  markProgress,
+  startTask,
+} from "./startTask";
+export type {
+  FinishTaskInput,
+  FinishTaskResult,
+  MarkProgressInput,
+  MarkProgressResult,
+  StartTaskInput,
+  StartTaskResult,
+} from "./startTask";
 export type {
   BulkStatusPayload,
   CreateCommentPayload,

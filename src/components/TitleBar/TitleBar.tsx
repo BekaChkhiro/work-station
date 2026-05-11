@@ -14,6 +14,7 @@ import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isMac, isWindows } from "../../utils/platform";
+import { NotificationsBell } from "../NotificationsBell";
 
 export interface TitleBarProps {
   /** Title text shown centered in the bar. Falls back to "Work Station". */
@@ -66,6 +67,12 @@ export function TitleBar(props: TitleBarProps): JSX.Element {
           {props.title ?? "Work Station"}
         </span>
       </div>
+
+      {/* T12.9 — cross-project notifications bell. Always rendered (Mac
+          + Windows + Linux): the bell handles its own gating (no token →
+          no badge) and we want it reachable regardless of where the
+          window controls live. */}
+      <NotificationsBell />
 
       <Show when={isWindows}>
         <div class="flex h-full items-stretch">

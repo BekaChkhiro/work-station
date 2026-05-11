@@ -61,6 +61,13 @@ export async function invalidateProjectLinks(projectId: string): Promise<void> {
   await load(projectId, true);
 }
 
+/** Imperative load for callers that need the link list without a Solid
+ *  resource — e.g. the notifications bell mapping a PlanFlow notification's
+ *  projectId back to a workspace project. Hits the cache when warm. */
+export async function loadProjectLinks(projectId: string): Promise<readonly ProjectLink[]> {
+  return load(projectId, false);
+}
+
 /** Drop every cached entry — used by the project store when a project is
  *  removed so a recreated project with the same id doesn't see ghosts. */
 export function clearProjectLinkCache(projectId?: string): void {

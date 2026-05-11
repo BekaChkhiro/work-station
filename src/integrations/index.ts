@@ -65,9 +65,14 @@ export type {
 } from "./credentials";
 
 export {
+  commitScopeFromTaskId,
   createPlanFlowClient,
   createRendererPlanFlowClient,
+  finishTask,
   formatCheckoutCommand,
+  formatCommitCommand,
+  formatCommitMessage,
+  markProgress,
   MissingPlanFlowTokenError,
   PlanFlowApiError,
   PlanFlowAuthError,
@@ -101,6 +106,7 @@ export type { QueuedWrite, QueueEntry, ReplayContext } from "./writeQueue";
 export {
   clearProjectLinkCache,
   invalidateProjectLinks,
+  loadProjectLinks,
   readCachedLinks,
   usePlanFlowExternalId,
   usePlanFlowLink,
@@ -127,6 +133,10 @@ export type {
   PlanFlowClientOptions,
   Project,
   RendererPlanFlowClientOptions,
+  FinishTaskInput,
+  FinishTaskResult,
+  MarkProgressInput,
+  MarkProgressResult,
   ReorderTasksPayload,
   StartTaskInput,
   StartTaskResult,
