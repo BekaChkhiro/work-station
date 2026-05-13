@@ -48,7 +48,7 @@ export async function writeTextFile(
   content: string,
   encoding: TextEncoding = "utf-8",
 ): Promise<void> {
-  await invoke<void>("write_text_file", {
+  await invoke<unknown>("write_text_file", {
     projectRoot,
     relativePath,
     content,

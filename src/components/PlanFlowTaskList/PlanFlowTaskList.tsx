@@ -46,6 +46,7 @@ import {
 import type { JSX, Resource } from "solid-js";
 
 import { EmptyState, ErrorCard, SkeletonRows } from "../AsyncStates";
+import type { PaneCliOption } from "../Pane";
 import { Tooltip } from "../Tooltip";
 import { showToast } from "../Toast";
 import {
@@ -102,6 +103,10 @@ export interface PlanFlowTaskListProps {
   /** Opens Settings → Integrations. The view CTAs both the "not linked"
    *  and "needs token" empty states through this. */
   onOpenSettings?: () => void;
+  /** Available CLIs for the split-button CLI picker on Start. When more
+   *  than one CLI is available a ▾ chevron appears next to Start so the
+   *  user can choose which CLI to launch for this task. */
+  clis?: readonly PaneCliOption[];
 }
 
 export function PlanFlowTaskList(props: PlanFlowTaskListProps): JSX.Element {
@@ -140,6 +145,7 @@ export function PlanFlowTaskList(props: PlanFlowTaskListProps): JSX.Element {
               workspaceProjectId={workspaceProjectId()}
               externalId={linked().externalId}
               onOpenSettings={props.onOpenSettings}
+              clis={props.clis ?? []}
             />
           )}
         </Show>
@@ -152,6 +158,7 @@ interface LinkedTaskListProps {
   workspaceProjectId: string;
   externalId: string;
   onOpenSettings?: () => void;
+  clis?: readonly PaneCliOption[];
 }
 
 interface TaskListController {
@@ -268,6 +275,7 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
                   me={me()}
                   selectedTaskId={selectedTaskId()}
                   onSelectTask={handleSelect}
+                  clis={props.clis ?? []}
                 />
               )}
             </Match>
@@ -362,6 +370,7 @@ interface TaskListBodyProps {
   /** T12.8 — currently selected task for the detail side panel. */
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
+  clis?: readonly PaneCliOption[];
 }
 
 interface ActionDialogState {
@@ -605,14 +614,16 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
               activeTaskId={activeTaskId(props.workspaceProjectId)}
               meUserId={props.me?.id ?? null}
               selectedTaskId={props.selectedTaskId}
+              clis={props.clis ?? []}
               onSelect={(t) => props.onSelectTask(t.taskId)}
-              onStart={(t) =>
+              onStart={(t, cliName) =>
                 void runStartTask(
                   props.client,
                   props.externalId,
                   props.workspaceProjectId,
                   t,
                   props.onRetry,
+                  cliName,
                 )
               }
               onChangeStatus={(t, s) =>
@@ -676,14 +687,16 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
                                 activeTaskId={activeTaskId(props.workspaceProjectId)}
                                 ready={readyIds().has(task.taskId)}
                                 selected={props.selectedTaskId === task.taskId}
+                                clis={props.clis ?? []}
                                 onSelect={() => props.onSelectTask(task.taskId)}
-                                onStart={(t) =>
+                                onStart={(t, cliName) =>
                                   void runStartTask(
                                     props.client,
                                     props.externalId,
                                     props.workspaceProjectId,
                                     t,
                                     props.onRetry,
+                                    cliName,
                                   )
                                 }
                                 onMarkProgress={(t) =>
@@ -757,8 +770,9 @@ interface KanbanBoardProps {
   activeTaskId: string | null;
   meUserId: string | null;
   selectedTaskId: string | null;
+  clis?: readonly PaneCliOption[];
   onSelect: (task: Task) => void;
-  onStart: (task: Task) => void;
+  onStart: (task: Task, cliName?: string) => void;
   onChangeStatus: (task: Task, status: TaskStatus) => void;
 }
 
@@ -814,8 +828,9 @@ function KanbanBoard(props: KanbanBoardProps): JSX.Element {
                       activeTaskId={props.activeTaskId}
                       selected={props.selectedTaskId === task.taskId}
                       column={col}
+                      clis={props.clis ?? []}
                       onSelect={() => props.onSelect(task)}
-                      onStart={() => props.onStart(task)}
+                      onStart={(cliName) => props.onStart(task, cliName)}
                       onChangeStatus={(s) => props.onChangeStatus(task, s)}
                     />
                   )}
@@ -840,8 +855,9 @@ interface KanbanCardProps {
   activeTaskId: string | null;
   selected: boolean;
   column: KanbanColumn;
+  clis?: readonly PaneCliOption[];
   onSelect: () => void;
-  onStart: () => void;
+  onStart: (cliName?: string) => void;
   onChangeStatus: (status: TaskStatus) => void;
 }
 
@@ -932,20 +948,18 @@ function KanbanCard(props: KanbanCardProps): JSX.Element {
         {props.task.name}
       </div>
       <Show when={showStart()}>
-        <button
-          type="button"
-          class="ws-pf-kanban__card-start"
-          data-active={isActive() ? "true" : undefined}
+        <CliStartButton
+          label={startLabel()}
+          taskId={props.task.taskId}
           disabled={startDisabled()}
-          onClick={(e) => {
-            e.stopPropagation();
+          clis={props.clis ?? []}
+          active={isActive()}
+          variant="kanban"
+          onStart={(cliName) => {
             if (startDisabled()) return;
-            props.onStart();
+            props.onStart(cliName);
           }}
-          aria-label={`${startLabel()} on ${props.task.taskId}`}
-        >
-          {startLabel()}
-        </button>
+        />
       </Show>
       <Show when={menuOpen()}>
         <ul
@@ -991,6 +1005,123 @@ function KanbanCard(props: KanbanCardProps): JSX.Element {
   );
 }
 
+const TASK_CLI_NAMES: ReadonlySet<string> = new Set(["claude", "codex"]);
+
+/* ─── CliStartButton ────────────────────────────────────────────────── */
+
+interface CliStartButtonProps {
+  label: string;
+  taskId: string;
+  disabled: boolean;
+  active: boolean;
+  clis: readonly PaneCliOption[];
+  /** "row" = task-list row style, "kanban" = kanban card style */
+  variant: "row" | "kanban";
+  disabledTitle?: string;
+  activeTitle?: string;
+  defaultTitle?: string;
+  onStart: (cliName?: string) => void;
+}
+
+function CliStartButton(props: CliStartButtonProps): JSX.Element {
+  const [pickerOpen, setPickerOpen] = createSignal(false);
+  let wrapRef: HTMLDivElement | undefined;
+
+  const taskClis = (): readonly PaneCliOption[] =>
+    props.clis.filter((c) => TASK_CLI_NAMES.has(c.name));
+  const showChevron = (): boolean => taskClis().length > 1;
+  const mainClass = (): string =>
+    props.variant === "kanban" ? "ws-pf-kanban__card-start" : "ws-pf-tasks__start";
+
+  const titleAttr = (): string => {
+    if (props.disabled) return props.disabledTitle ?? "";
+    if (props.active) return props.activeTitle ?? "";
+    return props.defaultTitle ?? "";
+  };
+
+  createEffect(() => {
+    if (!pickerOpen()) return;
+    const onDown = (event: MouseEvent): void => {
+      const target = event.target as Node | null;
+      if (wrapRef && target && wrapRef.contains(target)) return;
+      setPickerOpen(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    onCleanup(() => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    });
+  });
+
+  return (
+    <div
+      class="ws-pf-tasks__start-wrap"
+      ref={(el) => (wrapRef = el)}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        class={`${mainClass()}${showChevron() ? " ws-pf-tasks__start--split" : ""}`}
+        data-active={props.active ? "true" : undefined}
+        disabled={props.disabled}
+        aria-label={
+          props.disabled
+            ? `${props.label} on ${props.taskId} — ${props.disabledTitle ?? "locked"}`
+            : `${props.label} on ${props.taskId}`
+        }
+        title={titleAttr()}
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onStart();
+        }}
+      >
+        {props.label}
+      </button>
+      <Show when={showChevron()}>
+        <button
+          type="button"
+          class="ws-pf-tasks__start-chevron"
+          disabled={props.disabled}
+          aria-label={`Choose CLI for ${props.taskId}`}
+          title="Choose which CLI to launch"
+          onClick={(e) => {
+            e.stopPropagation();
+            setPickerOpen((v) => !v);
+          }}
+        >
+          ▾
+        </button>
+      </Show>
+      <Show when={pickerOpen()}>
+        <ul class="ws-pf-tasks__clipicker" role="menu" aria-label="Choose CLI">
+          <For each={taskClis()}>
+            {(cli) => (
+              <li role="none">
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="ws-pf-tasks__clipicker-item"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPickerOpen(false);
+                    props.onStart(cli.name);
+                  }}
+                >
+                  {cli.name}
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </div>
+  );
+}
+
 interface PhaseChipProps {
   label: string;
   active: boolean;
@@ -1027,8 +1158,9 @@ interface TaskRowProps {
    *  the user can spot the actionable tasks without scanning dependency
    *  chips manually. */
   ready: boolean;
+  clis?: readonly PaneCliOption[];
   onSelect: () => void;
-  onStart: (task: Task) => void;
+  onStart: (task: Task, cliName?: string) => void;
   /** T12.5 — open the Progress dialog for this task. Surfaced only when
    *  the row is the user's active in-progress task. */
   onMarkProgress: (task: Task) => void;
@@ -1176,31 +1308,21 @@ function TaskRow(props: TaskRowProps): JSX.Element {
         )}
       </Show>
       <Show when={showStart()}>
-        <button
-          type="button"
-          class="ws-pf-tasks__start"
-          data-active={isActive() ? "true" : undefined}
+        <CliStartButton
+          label={startLabel()}
+          taskId={props.task.taskId}
           disabled={startDisabled()}
-          aria-label={
-            startDisabled()
-              ? `${startLabel()} on ${props.task.taskId} — locked by ${lockedBy()}`
-              : `${startLabel()} on ${props.task.taskId}`
-          }
-          title={
-            startDisabled()
-              ? `Locked by ${lockedBy() ?? "another user"}`
-              : isActive()
-                ? "In progress — switch to terminal and re-prime the command"
-                : "Acquire lock, set IN_PROGRESS, and pre-fill the checkout command"
-          }
-          onClick={(e) => {
-            e.stopPropagation();
+          disabledTitle={`Locked by ${lockedBy() ?? "another user"}`}
+          activeTitle="In progress — switch to terminal and re-prime the command"
+          defaultTitle="Acquire lock, set IN_PROGRESS, and pre-fill the checkout command"
+          clis={props.clis ?? []}
+          active={isActive()}
+          variant="row"
+          onStart={(cliName) => {
             if (startDisabled()) return;
-            props.onStart(props.task);
+            props.onStart(props.task, cliName);
           }}
-        >
-          {startLabel()}
-        </button>
+        />
       </Show>
       <Show when={showLifecycleActions()}>
         <button
@@ -1352,6 +1474,7 @@ async function runStartTask(
   workspaceProjectId: string,
   task: Task,
   onRetry: () => void,
+  cliName?: string,
 ): Promise<void> {
   try {
     const result = await startTask({
@@ -1359,6 +1482,7 @@ async function runStartTask(
       externalId,
       workspaceProjectId,
       taskId: task.taskId,
+      cliName,
     });
     if (result.branchName === null) {
       showToast({

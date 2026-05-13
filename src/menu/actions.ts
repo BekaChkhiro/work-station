@@ -8,6 +8,7 @@ export type MenuActionId =
   | "new-project"
   | "new-terminal"
   | "close-pane"
+  | "close-editor-tab"
   | "save-file"
   | "open-settings"
   | "copy"

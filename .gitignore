@@ -41,3 +41,4 @@ logs/
 # Misc
 *.pem
 .cache/
+.planflow/worktrees.json

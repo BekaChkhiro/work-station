@@ -1597,7 +1597,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T13.5: External-change conflict detection
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: M
 - **Dependencies**: T13.4
 - **Description**:
@@ -1607,7 +1607,7 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T13.6: Multi-file editor tabs
 
-- [ ] **Status**: TODO
+- [x] **Status**: DONE
 - **Complexity**: M
 - **Dependencies**: T13.4
 - **Description**:

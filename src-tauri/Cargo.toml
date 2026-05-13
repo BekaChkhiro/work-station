@@ -37,6 +37,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 
+# T13.5: file watcher + content hash for external-change conflict detection.
+# `notify` is the standard cross-platform fs-event crate (fsevents on macOS,
+# inotify on Linux, ReadDirectoryChangesW on Windows). `sha2` lets us
+# fingerprint each watched file's bytes so we can distinguish a real content
+# change from the spurious mtime-only events some filesystems emit (and from
+# the file's own atomic save: every write_text_file rename triggers a
+# Create event for the same path).
+notify = "=8.2.0"
+sha2 = "=0.10.9"
+
 # Logging (T1.9) — tracing + daily-rotated file appender, platform log dir resolution.
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }

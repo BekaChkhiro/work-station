@@ -11,3 +11,4 @@ pub mod picker;
 pub mod project_links;
 pub mod projects;
 pub mod pty;
+pub mod watch;

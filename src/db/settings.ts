@@ -60,6 +60,20 @@ const IntegrationsIntroDismissedSchema = z.boolean();
 // is treated as the debounce window after the last keystroke. Capped at
 // 60s so a typo in the settings UI can't push saves into the next year.
 const EditorAutosaveMsSchema = z.number().int().min(0).max(60_000);
+// T13.6 — per-project open editor tabs. Keyed by projectId; each entry
+// records the absolute file paths that were open (in tab order) and which
+// of them was active so a relaunch restores the same view. Paths that no
+// longer exist on disk fail their re-open gracefully and the entry is
+// dropped from the restored list on first save. Stored globally in
+// `app_settings` rather than on the `projects` table to keep the schema
+// stable — editor restoration is a soft UI nicety, not load-bearing data.
+const EditorTabsByProjectSchema = z.record(
+  z.string(),
+  z.object({
+    paths: z.array(z.string()),
+    active: z.string().nullable(),
+  }),
+);
 
 interface SettingDef<T> {
   schema: z.ZodType<T>;
@@ -85,6 +99,10 @@ export const SETTINGS = {
   integration_status: def(IntegrationStatusSchema, {} as z.infer<typeof IntegrationStatusSchema>),
   integrations_intro_dismissed: def(IntegrationsIntroDismissedSchema, false),
   editor_autosave_ms: def(EditorAutosaveMsSchema, 0),
+  editor_tabs_by_project: def(
+    EditorTabsByProjectSchema,
+    {} as z.infer<typeof EditorTabsByProjectSchema>,
+  ),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;

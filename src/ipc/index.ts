@@ -4,6 +4,8 @@ export { cliListAvailable } from "./cli";
 export type { CliInfo } from "./cli";
 export { readTextFile, writeTextFile } from "./files";
 export type { BinaryReason, ReadFileResult, TextEncoding } from "./files";
+export { onExternalChange, startFileWatch, stopFileWatch } from "./fileWatch";
+export type { ExternalChangeEvent } from "./fileWatch";
 export { fsListDir } from "./fs";
 export type { FsDirEntry, FsListDirOptions } from "./fs";
 export { pickProjectFolder } from "./picker";

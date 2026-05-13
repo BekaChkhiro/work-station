@@ -21,13 +21,19 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } fr
 import type { JSX } from "solid-js";
 import { FileTree } from "../FileTree";
 import { LayoutTree } from "../LayoutTree";
-import { MonacoEditor } from "../MonacoEditor";
+import { MonacoDiff, MonacoEditor } from "../MonacoEditor";
 import {
   readTextFile,
   writeTextFile,
   type ReadFileResult,
   type TextEncoding,
 } from "../../ipc/files";
+import {
+  onExternalChange,
+  startFileWatch,
+  stopFileWatch,
+  type ExternalChangeEvent,
+} from "../../ipc/fileWatch";
 import type { PaneCliLaunchMode, PaneCliOption } from "../Pane";
 import type { CliMeta } from "../../types/tab";
 import { ProjectsEmptyState } from "../ProjectsEmptyState";
@@ -38,6 +44,7 @@ import { IntegrationReauthBanner } from "../IntegrationReauthBanner";
 import { PlanFlowTaskList } from "../PlanFlowTaskList";
 import { editorScratch, setEditorScratch } from "../../stores/editorScratch";
 import { editorAutosaveMs } from "../../stores/editorAutosave";
+import { getSetting, setSetting } from "../../db/settings";
 import { hydrateReauthState, reauthSnapshot } from "../../integrations";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
 import type { LayoutPath } from "../../types/layout";
@@ -404,6 +411,7 @@ function ProjectWorkspaceView(props: ProjectWorkspaceViewProps): JSX.Element {
                 <PlanFlowTaskList
                   projectId={props.projectId}
                   onOpenSettings={props.onOpenSettings}
+                  clis={props.clis ?? []}
                 />
               </Show>
             }
@@ -499,68 +507,135 @@ function ProjectTerminalEmptyState(props: ProjectTerminalEmptyStateProps): JSX.E
 }
 
 /**
- * T13.2 / T13.4 — editor tab body: [file tree | Monaco editor].
+ * T13.2 / T13.4 / T13.6 — editor tab body: [file tree | tabs | Monaco].
  *
- * Layout splits side-by-side: a fixed-width file tree on the left, the
- * editor filling the rest. The tree is hidden when the project root is
- * unknown (harnesses without `resolveProjectPath`) so the editor still
- * works as a scratch buffer.
+ * Layout: fixed-width file tree on the left; editor pane on the right
+ * containing a horizontal sub-tab strip atop the Monaco host. The tree is
+ * hidden when the project root is unknown so the editor still works as a
+ * scratch buffer.
  *
- * Buffer state machine:
- *   • no selection      → editable scratch buffer (per-project store)
- *   • text file         → editable buffer with a `baseline` snapshot of
- *                          last-known disk content; dirty = content ≠ baseline
- *   • binary file       → readOnly placeholder explaining why
- *   • read error        → readOnly placeholder showing the error message
- *   • saving            → marker on the text variant suppresses redundant
- *                          concurrent saves; the in-flight write keeps the
- *                          editor responsive (no UI lock)
+ * Tab list (T13.6):
+ *   • Clicking a file in the tree opens a new sub-tab or activates an
+ *     existing one keyed by absolute path.
+ *   • Sub-tabs persist per-project in `editor_tabs_by_project` and are
+ *     restored on mount. Files that can't be read on restore drop out of
+ *     the list silently (the on-disk file is the source of truth).
+ *   • Cmd/Ctrl+W routes to `close-editor-tab` whenever the editor is the
+ *     active workspace tab — the keystroke is otherwise the close-pane
+ *     accelerator for terminals (see paneHotkeys / AppRoot).
+ *   • Closing a dirty tab prompts via `window.confirm`. The buffer's
+ *     dirty state lives on the tab itself (`content !== baseline`).
+ *
+ * Per-tab state machine (unchanged from T13.3/T13.4):
+ *   • "loading"  → placeholder text, read-only
+ *   • "text"     → editable; baseline snapshot drives the dirty flag and
+ *                   save reconciliation
+ *   • "binary"   → read-only placeholder
+ *   • "error"    → read-only placeholder with the IO error message
  *
  * Save flow (T13.4):
- *   • Cmd/Ctrl+S routes through the `save-file` menu action — the menu
- *     bridge fires whether focus is on the editor, the file tree, or the
- *     header bar, so the accelerator works anywhere inside the tab.
- *   • Optional debounced auto-save: when `editor_autosave_ms > 0`, every
- *     keystroke restarts a timer; expiry triggers a save iff the buffer is
- *     dirty and not already saving. Default is `0` (off) so we never
- *     silently rewrite a file the user didn't ask us to.
- *   • Successful saves update `baseline` to the just-saved string, which
- *     clears the dirty indicator without re-reading from disk.
+ *   • Cmd/Ctrl+S → `save-file` menu action. Saves the active tab if dirty.
+ *   • Optional debounced auto-save fires per-tab when `editor_autosave_ms`
+ *     > 0; each tab carries its own timer so typing in tab A then
+ *     switching to B doesn't drop A's pending save.
+ *   • Successful saves update `baseline` so the dirty indicator clears
+ *     without re-reading from disk.
  *
- * The selection is local to this view (signal), not persisted. Multi-
- * tab persistence is T13.6.
+ * MonacoEditor is value-bound (one model); switching tabs swaps the
+ * buffer text. Cursor / scroll / undo do NOT survive a tab switch — a
+ * future revisit can move to per-tab `IModel` instances and
+ * `editor.setModel()`. The acceptance criteria for T13.6 only require
+ * content survival, which the tab list gives us.
  */
-function EditorWorkspace(props: { projectId: string; projectPath: string | null }): JSX.Element {
-  type OpenedFile =
-    | { kind: "loading"; path: string }
-    | {
-        kind: "text";
-        path: string;
-        relative: string;
-        content: string;
-        baseline: string;
-        encoding: TextEncoding;
-        saving: boolean;
-        lastError: string | null;
-      }
-    | { kind: "binary"; path: string; reason: string }
-    | { kind: "error"; path: string; message: string };
+/** T13.5 — pending external-change prompt for a single text tab. `mode`
+ *  controls whether the user sees the slim banner above the editor or
+ *  the full side-by-side Monaco diff swapped in for the editor host. */
+interface EditorConflict {
+  mode: "banner" | "diff";
+  /** Content read from disk by the watcher when the change was detected. */
+  newContent: string;
+  newEncoding: TextEncoding;
+  /** Hex sha256 of the on-disk bytes — purely for debugging / telemetry;
+   *  the UI compares strings, not hashes, when resolving the conflict. */
+  newHash: string;
+}
 
-  const [opened, setOpened] = createSignal<OpenedFile | null>(null);
-
-  // Token-based race guard. A slow read on /big.txt followed by a fast
-  // read on /readme.md should land readme's content in the editor — not
-  // big.txt's content arriving later and overwriting it.
-  let openSeq = 0;
-  // Per-open auto-save timer. Cleared on every keystroke (and on tab/file
-  // change) so we only ever have one pending save in flight.
-  let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const clearAutosaveTimer = (): void => {
-    if (autosaveTimer !== null) {
-      clearTimeout(autosaveTimer);
-      autosaveTimer = null;
+type EditorFileTab =
+  | { kind: "loading"; path: string }
+  | {
+      kind: "text";
+      path: string;
+      relative: string;
+      content: string;
+      baseline: string;
+      encoding: TextEncoding;
+      saving: boolean;
+      lastError: string | null;
+      /** T13.5 — watch handle returned by `start_file_watch`. `null` until
+       *  the watch is registered (briefly during the open transition, and
+       *  for the duration of failed-to-arm cases). */
+      watchId: number | null;
+      /** T13.5 — non-null while an external change is awaiting resolution.
+       *  Cleared by Reload / Keep Mine. */
+      conflict: EditorConflict | null;
     }
+  | { kind: "binary"; path: string; reason: string }
+  | { kind: "error"; path: string; message: string };
+
+function fileLabelFromPath(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return slash === -1 ? path : path.slice(slash + 1);
+}
+
+function EditorWorkspace(props: { projectId: string; projectPath: string | null }): JSX.Element {
+  const [tabs, setTabs] = createSignal<EditorFileTab[]>([]);
+  const [activePath, setActivePath] = createSignal<string | null>(null);
+
+  // Per-path race guard. A slow read on /big.txt followed by a fast read
+  // on /readme.md should land each result in its own tab; tokens prevent
+  // a late read from clobbering a tab that has already been edited or
+  // closed in the meantime.
+  const openTokens = new Map<string, number>();
+  // Per-tab autosave timer. Survives tab switches so a buffer that was
+  // typed-in but then deactivated still flushes after the debounce window.
+  const autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const clearAutosaveTimer = (path: string): void => {
+    const t = autosaveTimers.get(path);
+    if (t !== undefined) {
+      clearTimeout(t);
+      autosaveTimers.delete(path);
+    }
+  };
+
+  const clearAllAutosaveTimers = (): void => {
+    for (const t of autosaveTimers.values()) clearTimeout(t);
+    autosaveTimers.clear();
+  };
+
+  const findTab = (path: string): EditorFileTab | undefined => tabs().find((t) => t.path === path);
+
+  const activeTabValue = (): EditorFileTab | null => {
+    const p = activePath();
+    if (p === null) return null;
+    return findTab(p) ?? null;
+  };
+
+  const updateTab = (
+    path: string,
+    updater: (prev: EditorFileTab) => EditorFileTab | null,
+  ): void => {
+    setTabs((prev) => {
+      const idx = prev.findIndex((t) => t.path === path);
+      if (idx === -1) return prev;
+      const current = prev[idx];
+      if (current === undefined) return prev;
+      const next = updater(current);
+      if (next === null) return prev;
+      const out = prev.slice();
+      out[idx] = next;
+      return out;
+    });
   };
 
   const toRelative = (root: string, absPath: string): string => {
@@ -569,18 +644,32 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
     return absPath;
   };
 
-  const handleSelect = async (absPath: string): Promise<void> => {
+  // Load a path into a tab. If the tab already exists, leaves its buffer
+  // alone (we don't want a stray click in the tree to refresh a tab the
+  // user is editing). `silent` skips activation — used during restore so
+  // we end up with a coherent active selection at the end, not whatever
+  // happened to be the last entry in the persisted list.
+  const openOrActivate = async (absPath: string, silent = false): Promise<void> => {
     const root = props.projectPath;
     if (root === null) return;
+    const existing = findTab(absPath);
+    if (existing) {
+      if (!silent) setActivePath(absPath);
+      return;
+    }
     const relative = toRelative(root, absPath);
-    const myToken = ++openSeq;
-    clearAutosaveTimer();
-    setOpened({ kind: "loading", path: absPath });
+    const myToken = (openTokens.get(absPath) ?? 0) + 1;
+    openTokens.set(absPath, myToken);
+    setTabs((prev) => [...prev, { kind: "loading", path: absPath }]);
+    if (!silent) setActivePath(absPath);
     try {
       const result: ReadFileResult = await readTextFile(root, relative);
-      if (myToken !== openSeq) return;
+      if (openTokens.get(absPath) !== myToken) return;
+      // The tab might have been closed while the read was in flight.
+      if (!findTab(absPath)) return;
+      let next: EditorFileTab;
       if (result.kind === "text") {
-        setOpened({
+        next = {
           kind: "text",
           path: absPath,
           relative,
@@ -589,128 +678,424 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
           encoding: result.encoding,
           saving: false,
           lastError: null,
-        });
+          watchId: null,
+          conflict: null,
+        };
       } else {
         const reason =
           result.reason === "nul-byte"
             ? "binary file (contains NUL bytes)"
             : "binary file (not valid UTF-8)";
-        setOpened({ kind: "binary", path: absPath, reason });
+        next = { kind: "binary", path: absPath, reason };
+      }
+      updateTab(absPath, () => next);
+      // T13.5 — arm the file watcher after the tab is in place. We do
+      // this *after* updateTab so a fast external write that hits between
+      // start_file_watch and the state update can never race ahead of
+      // the tab existing. `void` because watch failures aren't fatal:
+      // the editor still works, just without external-change detection,
+      // and the next open attempt will retry.
+      if (next.kind === "text") {
+        void armWatch(absPath, relative);
       }
     } catch (err) {
-      if (myToken !== openSeq) return;
+      if (openTokens.get(absPath) !== myToken) return;
+      if (!findTab(absPath)) return;
       const message = err instanceof Error ? err.message : String(err);
-      setOpened({ kind: "error", path: absPath, message });
+      updateTab(absPath, () => ({ kind: "error", path: absPath, message }));
     }
   };
 
   const editorValue = (): string => {
-    const o = opened();
-    if (o === null) return editorScratch(props.projectId);
-    if (o.kind === "loading") return "// Loading…";
-    if (o.kind === "text") return o.content;
-    if (o.kind === "binary") return `// ${o.path}\n//\n// Not displayed — ${o.reason}.`;
-    return `// ${o.path}\n//\n// Could not open file: ${o.message}`;
+    const t = activeTabValue();
+    if (t === null) return editorScratch(props.projectId);
+    if (t.kind === "loading") return "// Loading…";
+    if (t.kind === "text") return t.content;
+    if (t.kind === "binary") return `// ${t.path}\n//\n// Not displayed — ${t.reason}.`;
+    return `// ${t.path}\n//\n// Could not open file: ${t.message}`;
   };
 
-  // Only "text" and `null` (scratch) buffers are editable. Loading, binary
-  // and error variants render their placeholder text read-only so the user
-  // can't accidentally clobber unloaded state.
   const isReadOnly = (): boolean => {
-    const o = opened();
-    return o !== null && o.kind !== "text";
+    const t = activeTabValue();
+    return t !== null && t.kind !== "text";
   };
 
-  const isDirty = (): boolean => {
-    const o = opened();
-    return o?.kind === "text" && o.content !== o.baseline;
+  const isTabDirty = (t: EditorFileTab): boolean => t.kind === "text" && t.content !== t.baseline;
+
+  const isActiveDirty = (): boolean => {
+    const t = activeTabValue();
+    return t !== null && isTabDirty(t);
   };
 
-  const fileLabel = (): string | null => {
-    const o = opened();
-    if (o === null) return null;
-    const path = o.path;
-    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    return slash === -1 ? path : path.slice(slash + 1);
+  const activeFileLabel = (): string | null => {
+    const t = activeTabValue();
+    return t === null ? null : fileLabelFromPath(t.path);
   };
 
   const saveStatus = (): "idle" | "saving" | "dirty" | "error" => {
-    const o = opened();
-    if (o?.kind !== "text") return "idle";
-    if (o.saving) return "saving";
-    if (o.lastError !== null) return "error";
-    return isDirty() ? "dirty" : "idle";
+    const t = activeTabValue();
+    if (t?.kind !== "text") return "idle";
+    if (t.saving) return "saving";
+    if (t.lastError !== null) return "error";
+    return isTabDirty(t) ? "dirty" : "idle";
   };
 
-  const performSave = async (): Promise<void> => {
+  const performSaveFor = async (targetPath: string): Promise<void> => {
     const root = props.projectPath;
     if (root === null) return;
-    const current = opened();
+    const current = findTab(targetPath);
     if (current?.kind !== "text") return;
     if (current.saving) return;
     if (current.content === current.baseline) return;
 
     const snapshot = current.content;
-    const targetPath = current.path;
-    setOpened({ ...current, saving: true, lastError: null });
+    updateTab(targetPath, (prev) =>
+      prev.kind === "text" ? { ...prev, saving: true, lastError: null } : prev,
+    );
     try {
       await writeTextFile(root, current.relative, snapshot, current.encoding);
-      // Reconcile against `opened()` rather than `current`: the user may
-      // have kept typing during the await. Updating `baseline` to the just-
-      // saved snapshot leaves the live `content` intact, so the dirty flag
-      // continues to reflect "what's in the buffer vs. what's on disk".
-      setOpened((prev) =>
-        prev?.kind === "text" && prev.path === targetPath
+      updateTab(targetPath, (prev) =>
+        prev.kind === "text"
           ? { ...prev, baseline: snapshot, saving: false, lastError: null }
           : prev,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setOpened((prev) =>
-        prev?.kind === "text" && prev.path === targetPath
-          ? { ...prev, saving: false, lastError: message }
-          : prev,
+      updateTab(targetPath, (prev) =>
+        prev.kind === "text" ? { ...prev, saving: false, lastError: message } : prev,
       );
       console.warn("[editor] save failed", err);
     }
   };
 
-  const handleEditorChange = (v: string): void => {
-    const o = opened();
-    if (o === null) {
-      setEditorScratch(props.projectId, v);
-      return;
-    }
-    if (o.kind !== "text") return;
-    setOpened({ ...o, content: v, lastError: null });
-    // Restart the debounce window on every keystroke. The guard against
-    // saving === true falls out of `performSave` itself; we just want to
-    // avoid scheduling pointless timers when auto-save is disabled.
-    clearAutosaveTimer();
-    const delay = editorAutosaveMs();
-    if (delay > 0) {
-      autosaveTimer = setTimeout(() => {
-        autosaveTimer = null;
-        void performSave();
-      }, delay);
+  const performSaveActive = async (): Promise<void> => {
+    const p = activePath();
+    if (p === null) return;
+    await performSaveFor(p);
+  };
+
+  // T13.5 — bookkeeping for the file watchers attached to text tabs.
+  // The map keys are absolute paths (same key as the tab list). It
+  // exists in addition to the `watchId` stored on each tab because we
+  // need a fast lookup from event payload → tab path: events come in
+  // with a watch ID, and we hold the ID-to-path mapping here.
+  const watchIdToPath = new Map<number, string>();
+
+  const stopWatchForTab = (tab: EditorFileTab): void => {
+    if (tab.kind !== "text" || tab.watchId === null) return;
+    const id = tab.watchId;
+    watchIdToPath.delete(id);
+    void stopFileWatch(id).catch((err) => {
+      console.warn("[T13.5] stop_file_watch failed", err);
+    });
+  };
+
+  const armWatch = async (absPath: string, relative: string): Promise<void> => {
+    const root = props.projectPath;
+    if (root === null) return;
+    try {
+      const watchId = await startFileWatch(root, relative);
+      // The tab may have been closed (or replaced via re-open) while the
+      // command was in flight. If it's no longer the same text tab we
+      // armed for, drop the watch right back.
+      const current = findTab(absPath);
+      if (current?.kind !== "text" || current.watchId !== null) {
+        void stopFileWatch(watchId).catch(() => undefined);
+        return;
+      }
+      watchIdToPath.set(watchId, absPath);
+      updateTab(absPath, (prev) => (prev.kind === "text" ? { ...prev, watchId } : prev));
+    } catch (err) {
+      console.warn("[T13.5] start_file_watch failed", err);
     }
   };
 
-  // T13.4 — Cmd/Ctrl+S bridge. The native menu (macOS) and WindowsAppMenu
-  // both emit `save-file`; document-level keyboard listeners (T8.x) translate
-  // the keystroke into the same event when no menu is mounted. Only fire
-  // when the editor tab is the active workspace tab so the accelerator
-  // doesn't try to save while focus is on, say, a Terminal pane.
-  onMount(() => {
-    const dispose = addMenuActionListener((id) => {
-      if (id !== "save-file") return;
-      if (activeTab(props.projectId) !== "editor") return;
-      if (activeProjectId() !== props.projectId) return;
-      void performSave();
+  // T13.5 — react to an external write surfaced by the backend.
+  //   • clean buffer (content === baseline) → silent reload to the new
+  //     disk content. Mirrors VS Code's "auto-reload on disk change"
+  //     when there's nothing to lose.
+  //   • dirty buffer → stage a conflict so the banner lets the user pick.
+  // Late events (the tab was closed mid-flight, or another event already
+  // replaced the conflict with a newer one) overwrite cleanly: the latest
+  // disk state is always the canonical one to resolve against.
+  const handleExternalChange = (event: ExternalChangeEvent): void => {
+    const path = watchIdToPath.get(event.watchId);
+    if (path === undefined) return;
+    const tab = findTab(path);
+    if (tab?.kind !== "text") return;
+    // No-op if the file's bytes now match what's in the buffer
+    // (e.g. the user edited the file to match an external write).
+    if (event.content === tab.content && event.encoding === tab.encoding) {
+      updateTab(path, (prev) =>
+        prev.kind === "text"
+          ? { ...prev, baseline: event.content, encoding: event.encoding, conflict: null }
+          : prev,
+      );
+      return;
+    }
+    const buffered = tab.content;
+    const isDirty = buffered !== tab.baseline;
+    if (!isDirty) {
+      updateTab(path, (prev) =>
+        prev.kind === "text"
+          ? {
+              ...prev,
+              content: event.content,
+              baseline: event.content,
+              encoding: event.encoding,
+              conflict: null,
+            }
+          : prev,
+      );
+      return;
+    }
+    updateTab(path, (prev) =>
+      prev.kind === "text"
+        ? {
+            ...prev,
+            conflict: {
+              mode: "banner",
+              newContent: event.content,
+              newEncoding: event.encoding,
+              newHash: event.hash,
+            },
+          }
+        : prev,
+    );
+  };
+
+  // T13.5 — Reload: discard the buffer's edits, snap to disk content.
+  // We update both `content` and `baseline` so the dirty indicator clears
+  // and a subsequent save would be a no-op until the user types again.
+  const resolveReload = (path: string): void => {
+    updateTab(path, (prev) => {
+      if (prev.kind !== "text" || prev.conflict === null) return prev;
+      return {
+        ...prev,
+        content: prev.conflict.newContent,
+        baseline: prev.conflict.newContent,
+        encoding: prev.conflict.newEncoding,
+        conflict: null,
+      };
     });
+  };
+
+  // T13.5 — Keep Mine: retain the buffer as-is, but advance `baseline`
+  // (and encoding) to whatever's on disk now. The next save will write
+  // the user's content over the external change — which is what they
+  // asked for. Without the baseline bump, the buffer would still be
+  // marked dirty against the *original* disk content, and the next
+  // save's "did the bytes change?" guard would compare against a stale
+  // snapshot.
+  const resolveKeepMine = (path: string): void => {
+    updateTab(path, (prev) => {
+      if (prev.kind !== "text" || prev.conflict === null) return prev;
+      return {
+        ...prev,
+        baseline: prev.conflict.newContent,
+        encoding: prev.conflict.newEncoding,
+        conflict: null,
+      };
+    });
+  };
+
+  const resolveViewDiff = (path: string): void => {
+    updateTab(path, (prev) =>
+      prev.kind === "text" && prev.conflict !== null
+        ? { ...prev, conflict: { ...prev.conflict, mode: "diff" } }
+        : prev,
+    );
+  };
+
+  const resolveBackToEdit = (path: string): void => {
+    updateTab(path, (prev) =>
+      prev.kind === "text" && prev.conflict !== null
+        ? { ...prev, conflict: { ...prev.conflict, mode: "banner" } }
+        : prev,
+    );
+  };
+
+  const handleEditorChange = (v: string): void => {
+    const t = activeTabValue();
+    if (t === null) {
+      setEditorScratch(props.projectId, v);
+      return;
+    }
+    if (t.kind !== "text") return;
+    const targetPath = t.path;
+    updateTab(targetPath, (prev) =>
+      prev.kind === "text" ? { ...prev, content: v, lastError: null } : prev,
+    );
+    clearAutosaveTimer(targetPath);
+    const delay = editorAutosaveMs();
+    if (delay > 0) {
+      const timer = setTimeout(() => {
+        autosaveTimers.delete(targetPath);
+        void performSaveFor(targetPath);
+      }, delay);
+      autosaveTimers.set(targetPath, timer);
+    }
+  };
+
+  // Close a tab. Confirms via window.confirm when the buffer is dirty so
+  // the user doesn't lose work to an errant Cmd+W. Picks a sensible next
+  // active tab: the same-index entry after removal (i.e. the tab to the
+  // right) or, if we closed the last one, the new tail.
+  const closeTab = (path: string, options: { confirmDirty?: boolean } = {}): boolean => {
+    const tab = findTab(path);
+    if (!tab) return false;
+    if (options.confirmDirty !== false && isTabDirty(tab)) {
+      const label = fileLabelFromPath(path);
+      const ok = window.confirm(`${label} has unsaved changes. Close anyway?`);
+      if (!ok) return false;
+    }
+    clearAutosaveTimer(path);
+    openTokens.delete(path);
+    stopWatchForTab(tab);
+    setTabs((prev) => {
+      const idx = prev.findIndex((t) => t.path === path);
+      if (idx === -1) return prev;
+      const out = prev.slice();
+      out.splice(idx, 1);
+      // If we just closed the active tab, slide to the neighbour to the
+      // right (same index after splice). Falls back to the new tail when
+      // the closed tab was last, and to null when the list is empty.
+      if (activePath() === path) {
+        const nextActive = out[idx] ?? out[out.length - 1] ?? null;
+        setActivePath(nextActive ? nextActive.path : null);
+      }
+      return out;
+    });
+    return true;
+  };
+
+  const closeActiveTab = (): void => {
+    const p = activePath();
+    if (p === null) return;
+    closeTab(p);
+  };
+
+  // T13.6 — persist `{ paths, active }` per project. Read-modify-write
+  // the global `editor_tabs_by_project` map so we don't lose other
+  // projects' entries when this one updates. Debounced to coalesce burst
+  // changes (rapid tree clicks, tab close storms).
+  const PERSIST_DEBOUNCE_MS = 250;
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  let restored = false;
+
+  const persistNow = async (): Promise<void> => {
+    try {
+      const all = await getSetting("editor_tabs_by_project");
+      const paths = tabs().map((t) => t.path);
+      const active = activePath();
+      const next: typeof all = {};
+      for (const [key, value] of Object.entries(all)) {
+        if (key === props.projectId) continue;
+        next[key] = value;
+      }
+      if (paths.length > 0) {
+        next[props.projectId] = { paths, active };
+      }
+      await setSetting("editor_tabs_by_project", next);
+    } catch (err) {
+      console.warn("[T13.6] editor tab persist failed", err);
+    }
+  };
+
+  const schedulePersist = (): void => {
+    if (!restored) return;
+    if (persistTimer !== null) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      void persistNow();
+    }, PERSIST_DEBOUNCE_MS);
+  };
+
+  // Re-persist whenever the tab list or active selection changes — but
+  // only after the initial restore pass completes, otherwise the
+  // mid-restore intermediate states would overwrite the persisted record.
+  createEffect(() => {
+    // Track both signals.
+    tabs();
+    activePath();
+    schedulePersist();
+  });
+
+  const restoreTabs = async (): Promise<void> => {
+    if (props.projectPath === null) {
+      restored = true;
+      return;
+    }
+    try {
+      const all = await getSetting("editor_tabs_by_project");
+      const entry = all[props.projectId];
+      if (entry && entry.paths.length > 0) {
+        for (const p of entry.paths) {
+          // Sequential: keeps the restored tab order stable and avoids a
+          // thundering herd of FS reads on app launch.
+          await openOrActivate(p, true);
+        }
+        // Pick the persisted active tab if it survived the restore; else
+        // fall back to the first surviving tab.
+        const survivors = tabs();
+        const wanted =
+          entry.active && survivors.some((t) => t.path === entry.active)
+            ? entry.active
+            : (survivors[0]?.path ?? null);
+        setActivePath(wanted);
+      }
+    } catch (err) {
+      console.warn("[T13.6] editor tab restore failed", err);
+    } finally {
+      restored = true;
+      schedulePersist();
+    }
+  };
+
+  onMount(() => {
+    // restoreTabs reads `tabs()` (a signal) inside an async tail — solid's
+    // lint flags any reactive read outside a tracked scope as a possible
+    // missed update. Here we intentionally only sample once after the
+    // restore loop, so the read is correct and untracked is appropriate.
+    untrack(() => {
+      void restoreTabs();
+    });
+
+    const dispose = addMenuActionListener((id) => {
+      if (activeProjectId() !== props.projectId) return;
+      if (activeTab(props.projectId) !== "editor") return;
+      if (id === "save-file") {
+        void performSaveActive();
+        return;
+      }
+      if (id === "close-editor-tab") {
+        closeActiveTab();
+        return;
+      }
+    });
+
+    // T13.5 — single subscription per workspace instance routes events
+    // by their watchId. Bookkeeping (id → path) lives in `watchIdToPath`
+    // so this handler stays a pure dispatcher.
+    let disposeExternal: (() => void) | null = null;
+    void onExternalChange(handleExternalChange).then((unlisten) => {
+      disposeExternal = unlisten;
+    });
+
     onCleanup(() => {
-      clearAutosaveTimer();
+      clearAllAutosaveTimers();
+      if (persistTimer !== null) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+      }
       dispose();
+      if (disposeExternal !== null) disposeExternal();
+      // Stop every watcher we own. Stops are idempotent on the backend
+      // (unknown IDs no-op), so racing the unlisten above is fine.
+      for (const id of watchIdToPath.keys()) {
+        void stopFileWatch(id).catch(() => undefined);
+      }
+      watchIdToPath.clear();
     });
   });
 
@@ -721,14 +1106,63 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
           <aside class="ws-editor-tab__tree" aria-label="Project files">
             <FileTree
               root={root()}
-              onSelectFile={(p) => void handleSelect(p)}
-              selectedPath={opened()?.path ?? null}
+              onSelectFile={(p) => void openOrActivate(p)}
+              selectedPath={activePath()}
             />
           </aside>
         )}
       </Show>
       <div class="ws-editor-tab__editor min-h-0 flex-1 flex flex-col">
-        <Show when={fileLabel()}>
+        <Show when={tabs().length > 0}>
+          <div class="ws-editor-tab__tabs" role="tablist" aria-label="Open files">
+            <For each={tabs()}>
+              {(tab) => {
+                const isActive = (): boolean => activePath() === tab.path;
+                const label = fileLabelFromPath(tab.path);
+                const dirty = (): boolean => isTabDirty(tab);
+                return (
+                  <div
+                    class="ws-editor-tab__tab"
+                    data-active={isActive() ? "true" : undefined}
+                    data-dirty={dirty() ? "true" : undefined}
+                    role="tab"
+                    aria-selected={isActive() ? "true" : "false"}
+                    title={tab.path}
+                  >
+                    <button
+                      type="button"
+                      class="ws-editor-tab__tab-main"
+                      onClick={() => setActivePath(tab.path)}
+                      onAuxClick={(e) => {
+                        if (e.button === 1) {
+                          e.preventDefault();
+                          closeTab(tab.path);
+                        }
+                      }}
+                    >
+                      <Show when={dirty()}>
+                        <span class="ws-editor-tab__tab-dirty" aria-label="Unsaved changes" />
+                      </Show>
+                      <span class="ws-editor-tab__tab-name">{label}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="ws-editor-tab__tab-close"
+                      aria-label={`Close ${label}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(tab.path);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              }}
+            </For>
+          </div>
+        </Show>
+        <Show when={activeFileLabel()}>
           {(label) => (
             <div
               class="ws-editor-tab__header"
@@ -736,8 +1170,11 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
               aria-label="Editor status"
               data-status={saveStatus()}
             >
-              <span class="ws-editor-tab__header-filename" title={opened()?.path ?? undefined}>
-                <Show when={isDirty()}>
+              <span
+                class="ws-editor-tab__header-filename"
+                title={activeTabValue()?.path ?? undefined}
+              >
+                <Show when={isActiveDirty()}>
                   <span class="ws-editor-tab__dirty-dot" aria-label="Unsaved changes" />
                 </Show>
                 {label()}
@@ -746,26 +1183,121 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
                 <span class="ws-editor-tab__header-status">Saving…</span>
               </Show>
               <Show when={saveStatus() === "error"}>
-                {(_) => {
-                  const o = opened();
-                  const err = o?.kind === "text" ? o.lastError : null;
-                  return (
-                    <span class="ws-editor-tab__header-status ws-editor-tab__header-status--error">
-                      Save failed{err ? `: ${err}` : ""}
-                    </span>
-                  );
-                }}
+                <span class="ws-editor-tab__header-status ws-editor-tab__header-status--error">
+                  Save failed
+                  <Show
+                    when={(() => {
+                      const t = activeTabValue();
+                      return t?.kind === "text" && t.lastError ? t.lastError : null;
+                    })()}
+                  >
+                    {(msg) => <>: {msg()}</>}
+                  </Show>
+                </span>
               </Show>
             </div>
           )}
         </Show>
+        <Show
+          when={(() => {
+            const t = activeTabValue();
+            return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "banner"
+              ? t
+              : null;
+          })()}
+        >
+          {(t) => (
+            <div class="ws-editor-tab__conflict" role="status" aria-live="polite">
+              <span class="ws-editor-tab__conflict-text">
+                <strong>{fileLabelFromPath(t().path)}</strong> changed on disk while you were
+                editing. Your buffer has unsaved changes.
+              </span>
+              <div class="ws-editor-tab__conflict-actions">
+                <button
+                  type="button"
+                  class="ws-editor-tab__conflict-button"
+                  onClick={() => resolveReload(t().path)}
+                  title="Discard your changes and load the new disk content"
+                >
+                  Reload
+                </button>
+                <button
+                  type="button"
+                  class="ws-editor-tab__conflict-button"
+                  onClick={() => resolveKeepMine(t().path)}
+                  title="Keep your buffer; the next save will overwrite the new disk content"
+                >
+                  Keep mine
+                </button>
+                <button
+                  type="button"
+                  class="ws-editor-tab__conflict-button"
+                  onClick={() => resolveViewDiff(t().path)}
+                  title="See what changed on disk vs. what's in your buffer"
+                >
+                  View diff
+                </button>
+              </div>
+            </div>
+          )}
+        </Show>
         <div class="min-h-0 flex-1">
-          <MonacoEditor
-            value={editorValue()}
-            path={opened()?.path ?? undefined}
-            readOnly={isReadOnly()}
-            onChange={handleEditorChange}
-          />
+          <Show
+            when={(() => {
+              const t = activeTabValue();
+              return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "diff"
+                ? t
+                : null;
+            })()}
+            fallback={
+              <MonacoEditor
+                value={editorValue()}
+                path={activeTabValue()?.path ?? undefined}
+                readOnly={isReadOnly()}
+                onChange={handleEditorChange}
+              />
+            }
+          >
+            {(t) => (
+              <div class="ws-editor-tab__diff flex min-h-0 flex-1 flex-col">
+                <div class="ws-editor-tab__diff-toolbar" role="toolbar" aria-label="Diff actions">
+                  <span class="ws-editor-tab__diff-label">
+                    <strong>On disk</strong> ↔ <strong>Your changes</strong>
+                  </span>
+                  <div class="ws-editor-tab__conflict-actions">
+                    <button
+                      type="button"
+                      class="ws-editor-tab__conflict-button"
+                      onClick={() => resolveReload(t().path)}
+                    >
+                      Reload
+                    </button>
+                    <button
+                      type="button"
+                      class="ws-editor-tab__conflict-button"
+                      onClick={() => resolveKeepMine(t().path)}
+                    >
+                      Keep mine
+                    </button>
+                    <button
+                      type="button"
+                      class="ws-editor-tab__conflict-button"
+                      onClick={() => resolveBackToEdit(t().path)}
+                    >
+                      Back to editor
+                    </button>
+                  </div>
+                </div>
+                <div class="min-h-0 flex-1">
+                  <MonacoDiff
+                    original={t().conflict?.newContent ?? ""}
+                    modified={t().content}
+                    path={t().path}
+                  />
+                </div>
+              </div>
+            )}
+          </Show>
         </div>
       </div>
     </div>

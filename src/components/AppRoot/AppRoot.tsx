@@ -51,7 +51,7 @@ import {
 import { getSetting, setSetting } from "../../db/settings";
 import { pickProjectFolder } from "../../ipc/picker";
 import { cliListAvailable } from "../../ipc/cli";
-import { ptyKill, ptySpawn } from "../../ipc/pty";
+import { ptyKill, ptySpawn, ptySubscribe, ptyWrite } from "../../ipc/pty";
 import { setThemeMode, themeMode, type ThemeMode } from "../../stores/theme";
 import {
   activeProjectId,
@@ -89,7 +89,7 @@ import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "
 import type { LayoutPersister } from "../../db/sessions";
 import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
 import { eventMatchesBinding, getBinding, loadPersistedBindings } from "../../hotkeys";
-import { addMenuActionListener } from "../../menu";
+import { addMenuActionListener, dispatchMenuAction } from "../../menu";
 import { isMac, isWindows } from "../../utils/platform";
 import "../../stores/appearance";
 
@@ -295,6 +295,15 @@ export function AppRoot(): JSX.Element {
   onMount(() => {
     const dispose = addMenuActionListener((id) => {
       if (id === "close-pane") {
+        // T13.6 — when the editor workspace tab is active, the native
+        // "Close pane" menu item closes an editor sub-tab instead of the
+        // terminal pane underneath. EditorWorkspace listens for
+        // `close-editor-tab` and handles the dirty-buffer prompt.
+        const projectId = activeProjectId();
+        if (projectId && activeTab(projectId) === "editor") {
+          dispatchMenuAction("close-editor-tab");
+          return;
+        }
         void closeFocusedPane();
         return;
       }
@@ -504,7 +513,9 @@ export function AppRoot(): JSX.Element {
         // `startTask` the focused pane's CLI so the orchestrator can
         // skip the `git checkout` pre-fill when the focused pane is a
         // REPL (Claude / Kimi / Codex).
-        setTaskCliLauncher((projectId, taskId) => startTaskCliLauncher(projectId, taskId));
+        setTaskCliLauncher((projectId, taskId, cliName) =>
+          startTaskCliLauncher(projectId, taskId, cliName),
+        );
         setFocusedSessionCliResolver((projectId) => resolveFocusedSessionCli(projectId));
         // PlanFlow chat ships an embedded xterm.js mini-terminal now —
         // no PTY-output scraping, so no hidden-bridge installer is
@@ -790,34 +801,46 @@ export function AppRoot(): JSX.Element {
     return `planflow_task_start(taskId: "${escaped}")`;
   };
 
-  // Resolve the CLI to launch for a Start-task pane. Project default
-  // wins; if that's not on PATH (T7.8 case) fall back to the first
-  // available CLI. Returns `null` only when *no* CLI is available, in
-  // which case the launcher silently skips the spawn and the user keeps
-  // the existing flow (git checkout pre-fill in the focused pane).
+  // CLIs that support the auto-start flow (idle detection + auto-submit).
+  // kimi is excluded because its MCP init state interferes with stdin
+  // injection and the prompt never lands reliably.
+  const TASK_CLI_NAMES: ReadonlySet<string> = new Set(["claude", "codex"]);
+
+  // Resolve the CLI to launch for a Start-task pane. Prefers the project
+  // default when it's a supported task CLI; otherwise picks the first
+  // supported CLI on PATH. Returns `null` when none are available.
   const resolveTaskCli = (projectId: string): PaneCliOption | null => {
     const preferred = resolveDefaultCli(projectId);
-    if (preferred) return preferred;
-    return availableClis()[0] ?? null;
+    if (preferred && TASK_CLI_NAMES.has(preferred.name)) return preferred;
+    return availableClis().find((c) => TASK_CLI_NAMES.has(c.name)) ?? null;
   };
 
   // Run `planflow_task_start(taskId: …)` against the project. Always spawn
-  // a fresh CLI pane with the prompt queued as a startup command — never
-  // type into an existing CLI pane. Each Start press gets its own terminal,
-  // tiled into a 2×2 grid as starts accumulate:
+  // a fresh CLI pane — never type into an existing CLI pane. Each Start
+  // press gets its own terminal, tiled into a 2×2 grid as starts accumulate:
   //   1st Start (empty layout) → single pane, full size.
   //   2nd Start              → side-by-side with the 1st (top row).
   //   3rd Start              → below the 1st (bottom-left).
   //   4th Start              → below the 2nd (bottom-right) → grid complete.
   //   5th+ Start             → fall back to splitting the focused pane
   //                            vertically; the user can rearrange manually.
-  const startTaskCliLauncher = async (projectId: string, taskId: string): Promise<void> => {
+  const startTaskCliLauncher = async (
+    projectId: string,
+    taskId: string,
+    cliName?: string,
+  ): Promise<void> => {
     const prompt = formatPlanFlowStartPrompt(taskId);
     const ws = getWorkspace(projectId);
     const focused = ws?.focusedSessionId ?? null;
-    const cli = resolveTaskCli(projectId);
+    const cli =
+      cliName && TASK_CLI_NAMES.has(cliName)
+        ? (availableClis().find((c) => c.name === cliName) ?? resolveTaskCli(projectId))
+        : resolveTaskCli(projectId);
     if (!cli) return;
-    const sessionId = await spawnCli(projectId, cli, [prompt]);
+
+    // Spawn without startup commands — write the prompt once the REPL is
+    // idle (see writePromptWhenReady below).
+    const sessionId = await spawnCli(projectId, cli);
     trackSession(projectId, sessionId);
     if (ws?.layout) {
       const target = pickGridSplitTarget(ws.layout, focused);
@@ -829,13 +852,96 @@ export function AppRoot(): JSX.Element {
         if (!attached) {
           await ptyKill(sessionId);
           untrackSession(projectId, sessionId);
+          return;
         }
+        writePromptWhenReady(sessionId, prompt);
         return;
       }
     }
     setLayout(projectId, paneNode(sessionId));
     setFocusedSession(projectId, sessionId);
+    writePromptWhenReady(sessionId, prompt);
   };
+
+  // Write `prompt` (no newline) into a CLI pane once it has been idle for
+  // IDLE_MS — i.e. no new PTY output chunks for that window. This lets
+  // every CLI finish its startup (claude: fast; kimi: slow, waits for MCP
+  // to connect) before we inject text, so the characters appear in the
+  // input field. The user then presses Enter when ready, consistent with
+  // the git-checkout pre-fill on shell panes.
+  //
+  // MAX_WAIT_MS is a hard ceiling so we always write, even if the CLI
+  // never fully goes idle.
+  function writePromptWhenReady(sessionId: string, prompt: string): void {
+    const IDLE_MS = 600;
+    const MAX_WAIT_MS = 10_000;
+
+    // Shared mutable state for the timers and subscription reference so
+    // both the chunk handler and the flush function can reach them.
+    const state = {
+      idleTimer: null as ReturnType<typeof window.setTimeout> | null,
+      maxTimer: null as ReturnType<typeof window.setTimeout> | null,
+      done: false,
+      sub: null as { unsubscribe: () => void } | null,
+    };
+
+    const flush = (): void => {
+      if (state.done) return;
+      state.done = true;
+      if (state.idleTimer != null) clearTimeout(state.idleTimer);
+      if (state.maxTimer != null) clearTimeout(state.maxTimer);
+      state.sub?.unsubscribe();
+      const encoder = new TextEncoder();
+      // Write the prompt text first so it appears in the input field, then
+      // send \r (Enter in raw-mode) in a separate write after a short pause.
+      // Sending both in one call lets the CLI process \r before echoing the
+      // text characters — the submit fires on an empty buffer and the prompt
+      // text ends up as stray output rather than a submitted command.
+      void ptyWrite(sessionId, encoder.encode(prompt))
+        .then(
+          () =>
+            new Promise<void>((resolve) => {
+              window.setTimeout(resolve, 150);
+            }),
+        )
+        .then(() => ptyWrite(sessionId, encoder.encode("\r")))
+        .catch(() => {
+          // Session closed — silently ignore.
+        });
+    };
+
+    const armIdle = (): void => {
+      if (state.idleTimer != null) clearTimeout(state.idleTimer);
+      state.idleTimer = window.setTimeout(flush, IDLE_MS);
+    };
+
+    // Only start idle detection after the first output chunk arrives.
+    // Calling armIdle() unconditionally in .then() would fire 600ms after
+    // subscription setup even if the CLI hasn't printed anything yet —
+    // which causes a false-early write for CLIs like codex that take a
+    // moment before their first output burst.
+    let seenFirstChunk = false;
+
+    ptySubscribe(sessionId, () => {
+      if (state.done) return;
+      seenFirstChunk = true;
+      armIdle();
+    })
+      .then((sub) => {
+        state.sub = sub;
+        if (state.done) {
+          sub.unsubscribe();
+          return;
+        }
+        state.maxTimer = window.setTimeout(flush, MAX_WAIT_MS);
+        // Do NOT call armIdle() here — let the first output chunk trigger it.
+        void seenFirstChunk; // referenced so the closure isn't dead-code stripped
+      })
+      .catch(() => {
+        // ptySubscribe unavailable (non-Tauri preview) — fixed fallback.
+        window.setTimeout(flush, 1000);
+      });
+  }
 
   // Sibling of the launcher: synchronous lookup of the focused pane's CLI
   // for `projectId`. `startTask` reads this *before* it decides whether to

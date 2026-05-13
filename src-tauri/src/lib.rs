@@ -75,6 +75,10 @@ pub fn run() {
         // T7.1: detected-CLI registry, populated once at boot below. App-scoped
         // so the frontend (T7.2) sees the same cached list across windows.
         .manage(cli::CliRegistry::new())
+        // T13.5: editor file-watch state. Holds the notify watcher plus per-
+        // open-file hash bookkeeping so we can spot external writes without
+        // chasing spurious mtime events. Created eagerly, watcher lazily.
+        .manage(commands::watch::FileWatchManager::new())
         .setup(|app| {
             if let Err(error) = menu::install(app) {
                 tracing::error!(target: "menu", %error, "native menu install failed");
@@ -174,6 +178,8 @@ pub fn run() {
             commands::fs::fs_list_dir,
             commands::files::read_text_file,
             commands::files::write_text_file,
+            commands::watch::start_file_watch,
+            commands::watch::stop_file_watch,
             commands::cli::cli_list_available,
             commands::clipboard::save_clipboard_image,
             commands::credentials::credentials_set,

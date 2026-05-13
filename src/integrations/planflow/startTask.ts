@@ -65,6 +65,10 @@ export interface StartTaskInput {
   workspaceProjectId: string;
   /** Task to start (`T12.4`-style id). */
   taskId: string;
+  /** Optional CLI name override. When set, the launcher uses this CLI
+   *  instead of the project default. Silently ignored when the named CLI
+   *  is not on PATH — the launcher falls back to the auto-resolved CLI. */
+  cliName?: string;
 }
 
 export interface StartTaskResult {
@@ -222,7 +226,7 @@ export async function startTask(input: StartTaskInput): Promise<StartTaskResult>
   // new CLI pane is spawned next to the existing layout. Wired by
   // AppRoot via `setTaskCliLauncher`; failures are swallowed inside the
   // launcher so the lock we just claimed stays intact.
-  void launchTaskCli(input.workspaceProjectId, input.taskId);
+  void launchTaskCli(input.workspaceProjectId, input.taskId, input.cliName);
 
   return { task, branchName, prefilled };
 }

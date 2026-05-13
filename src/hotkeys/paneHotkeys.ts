@@ -24,11 +24,13 @@ import { onCleanup, onMount } from "solid-js";
 import { ptyKill, ptySpawn } from "../ipc/pty";
 import {
   activeProjectId,
+  activeTab,
   closePane as closePaneInStore,
   getWorkspace,
   splitPane,
 } from "../stores/workspace";
 import type { SplitDirection } from "../types/layout";
+import { dispatchMenuAction } from "../menu";
 import { eventMatchesBinding, getBinding } from "./registry";
 
 export interface PaneHotkeyDefaultCli {
@@ -149,7 +151,29 @@ export function installPaneHotkeys(handlers: PaneHotkeyHandlers): () => void {
     const closePane = getBinding("close-pane");
     if (closePane && eventMatchesBinding(e, closePane)) {
       e.preventDefault();
+      // T13.6 — when the editor workspace tab is active, Cmd/Ctrl+W
+      // closes the focused editor sub-tab instead of killing the
+      // terminal pane underneath. The editor body owns the menu-action
+      // listener; we just route the keystroke through `close-editor-tab`
+      // and let EditorWorkspace handle the dirty-buffer confirmation.
+      const projectId = activeProjectId();
+      if (projectId && activeTab(projectId) === "editor") {
+        dispatchMenuAction("close-editor-tab");
+        return;
+      }
       void handleClose(handlers);
+      return;
+    }
+
+    // T13.4 — On macOS the native menu accelerator captures Cmd+S before it
+    // reaches the webview, so this branch is dead code there. On Windows /
+    // Linux there is no native menu owning the accelerator, so we surface the
+    // keystroke as the same `save-file` menu action — EditorWorkspace's
+    // listener handles the rest (tab focus check, dirty check, dispatch).
+    const saveFile = getBinding("save-file");
+    if (saveFile && eventMatchesBinding(e, saveFile)) {
+      e.preventDefault();
+      dispatchMenuAction("save-file");
       return;
     }
   };

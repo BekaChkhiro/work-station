@@ -14,7 +14,11 @@
 // start flow itself still succeeds — the lock is held, the user can
 // open a CLI manually.
 
-export type TaskCliLauncher = (projectId: string, taskId: string) => Promise<void> | void;
+export type TaskCliLauncher = (
+  projectId: string,
+  taskId: string,
+  cliName?: string,
+) => Promise<void> | void;
 
 /** Synchronous lookup: which CLI (if any) is currently running in the
  *  focused pane for `projectId`. Returns `null` when no pane is focused,
@@ -61,12 +65,17 @@ export function getFocusedSessionCli(projectId: string): string | null {
 }
 
 /** Best-effort: run the registered launcher for `(projectId, taskId)`.
- *  Errors are caught + logged; the caller keeps going. */
-export async function launchTaskCli(projectId: string, taskId: string): Promise<void> {
+ *  Pass an optional `cliName` to override the auto-resolved CLI for this
+ *  specific start. Errors are caught + logged; the caller keeps going. */
+export async function launchTaskCli(
+  projectId: string,
+  taskId: string,
+  cliName?: string,
+): Promise<void> {
   const fn = registeredLauncher;
   if (fn == null) return;
   try {
-    await fn(projectId, taskId);
+    await fn(projectId, taskId, cliName);
   } catch (error) {
     console.warn("[planflow] task CLI launcher failed:", error);
   }
