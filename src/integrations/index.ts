@@ -116,6 +116,25 @@ export {
 
 export { IntegrationVerifyError, verifyIntegration } from "./verifiers";
 export type { VerifyFailureReason, VerifyOptions, VerifyResult } from "./verifiers";
+
+export {
+  WsBridgeClient,
+  WsBridgeClosedError,
+  WsBridgeServerError,
+  decodeBase64 as decodeWsBridgeBase64,
+  encodeBase64 as encodeWsBridgeBase64,
+} from "./wsBridge";
+export type {
+  ConnectionState as WsBridgeConnectionState,
+  ExitHandler as WsBridgeExitHandler,
+  MessageHandler as WsBridgeMessageHandler,
+  OutputHandler as WsBridgeOutputHandler,
+  PtyScrollbackChunk as WsBridgePtyScrollbackChunk,
+  PtySpawnPayload as WsBridgePtySpawnPayload,
+  ReconnectOptions as WsBridgeReconnectOptions,
+  ServerMessage as WsBridgeServerMessage,
+  WsBridgeClientOptions,
+} from "./wsBridge";
 export type {
   ActiveWorkEntry,
   ActiveWorkUser,
