@@ -147,11 +147,7 @@ pub async fn handle_project_switch(
 
     events.emit_active_project_changed(Some(&project_id));
 
-    send(
-        out_tx,
-        &ServerMessage::ProjectSwitched { id, project_id },
-    )
-    .await;
+    send(out_tx, &ServerMessage::ProjectSwitched { id, project_id }).await;
 }
 
 /// Handle a `settings_get` request: reads `theme` + `last_active_project`
@@ -172,14 +168,12 @@ pub async fn handle_settings_get(
     // Outer flatten turns `Ok(None)` into `None`; inner turns a stored
     // JSON `null` (`Some(None)`) into `None` too, so callers always see
     // a flat `Option<String>` no matter which "missing" shape produced it.
-    let last_active = app_settings::get_json::<Option<String>>(
-        pool,
-        app_settings::LAST_ACTIVE_PROJECT_KEY,
-    )
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    let last_active =
+        app_settings::get_json::<Option<String>>(pool, app_settings::LAST_ACTIVE_PROJECT_KEY)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
 
     let settings = SettingsView {
         theme,

@@ -228,10 +228,7 @@ async fn handle_text(
         }
     };
 
-    let echo_id = value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
+    let echo_id = value.get("id").and_then(|v| v.as_str()).map(str::to_owned);
     let type_str = match value.get("type").and_then(|v| v.as_str()) {
         Some(t) => t,
         None => {
