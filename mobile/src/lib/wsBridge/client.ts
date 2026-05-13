@@ -48,7 +48,20 @@ export type ServerMessage =
       total_bytes: number;
       next_offset: number;
     }
-  | { type: "pty_exit"; session_id: string };
+  | { type: "pty_exit"; session_id: string }
+  // T18.6 — PlanFlow Tasks bridge response frames. `data` is the raw
+  // PlanFlow response payload (envelope already stripped server-side);
+  // the mobile UI's existing zod schemas parse it. Errors carry the
+  // upstream HTTP status when one was available so callers can branch
+  // on 401/403 without parsing prose.
+  | { type: "planflow_result"; id?: string; data: unknown }
+  | {
+      type: "planflow_error";
+      id?: string;
+      kind: string;
+      message: string;
+      status?: number;
+    };
 
 export interface PtySpawnPayload {
   command: string;
@@ -120,6 +133,29 @@ export class WsBridgeServerError extends Error {
   ) {
     super(message);
     this.name = "WsBridgeServerError";
+  }
+}
+
+/** T18.6 — error returned by the PlanFlow Tasks bridge.
+ *
+ * `kind` is one of: `unauthorized` (401/403), `not_found` (404),
+ * `rate_limited` (429), `client` (other 4xx), `server` (5xx),
+ * `network`, `timeout`, `decode`, `no_credential` (no PlanFlow API
+ * token configured on the desktop), `credential`, `invalid_args`,
+ * `unavailable` (bridge not initialised on the server). The mobile UI
+ * branches on `kind === "unauthorized" || kind === "no_credential"` to
+ * prompt the user to (re)connect PlanFlow on the desktop.
+ *
+ * `status` carries the upstream HTTP status when one is available.
+ */
+export class WsBridgePlanflowError extends Error {
+  constructor(
+    public readonly kind: string,
+    message: string,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = "WsBridgePlanflowError";
   }
 }
 
@@ -300,6 +336,94 @@ export class WsBridgeClient {
     await this.request({ type: "pty_unsubscribe", session_id: sessionId });
   }
 
+  // ---- T18.6: PlanFlow Tasks bridge ---------------------------------------
+  //
+  // Mirrors mobile/src/lib/planflowClient.ts's surface but routes
+  // through the desktop's embedded WebSocket bridge so the mobile
+  // client never handles the PlanFlow API token directly.
+  //
+  // The bridge already strips PlanFlow's `{success, data}` envelope —
+  // callers receive the inner payload directly.
+
+  async planflowGetMe(): Promise<unknown> {
+    return this.planflowRequest({ type: "planflow_get_me" });
+  }
+
+  async planflowListProjects(organizationId?: string): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_list_projects",
+      ...(organizationId ? { organization_id: organizationId } : {}),
+    });
+  }
+
+  async planflowListTasks(projectId: string, options: { status?: string } = {}): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_list_tasks",
+      project_id: projectId,
+      ...(options.status ? { status: options.status } : {}),
+    });
+  }
+
+  async planflowListActiveWork(projectId: string): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_list_active_work",
+      project_id: projectId,
+    });
+  }
+
+  async planflowListComments(projectId: string, taskId: string): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_list_comments",
+      project_id: projectId,
+      task_id: taskId,
+    });
+  }
+
+  async planflowCreateComment(projectId: string, taskId: string, body: string): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_create_comment",
+      project_id: projectId,
+      task_id: taskId,
+      body,
+    });
+  }
+
+  async planflowStartWork(projectId: string, taskId: string): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_start_work",
+      project_id: projectId,
+      task_id: taskId,
+    });
+  }
+
+  async planflowStopWork(projectId: string): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_stop_work",
+      project_id: projectId,
+    });
+  }
+
+  async planflowUpdateTaskStatus(
+    projectId: string,
+    taskId: string,
+    status: string,
+  ): Promise<unknown> {
+    return this.planflowRequest({
+      type: "planflow_update_task_status",
+      project_id: projectId,
+      task_id: taskId,
+      status,
+    });
+  }
+
+  private async planflowRequest(payload: Record<string, unknown>): Promise<unknown> {
+    const reply = await this.request(payload);
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgePlanflowError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
   // ---- internals ----------------------------------------------------------
 
   private buildUrl(): string {
@@ -397,9 +521,21 @@ export class WsBridgeClient {
         }
         return;
       }
+      case "planflow_error": {
+        const id = parsed.id;
+        if (id !== undefined) {
+          const pending = this.pending.get(id);
+          if (pending) {
+            this.pending.delete(id);
+            pending.reject(new WsBridgePlanflowError(parsed.kind, parsed.message, parsed.status));
+          }
+        }
+        return;
+      }
       case "pty_spawned":
       case "pty_ack":
-      case "pty_scrollback_chunk": {
+      case "pty_scrollback_chunk":
+      case "planflow_result": {
         const id = parsed.id;
         if (id !== undefined) {
           const pending = this.pending.get(id);

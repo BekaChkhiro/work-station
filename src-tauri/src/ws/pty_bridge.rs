@@ -1,3 +1,7 @@
+// T18.6 docs reference `PlanFlow` (CamelCase) and other bare proper
+// nouns; backticking each mention hurts readability. Allow doc_markdown.
+#![allow(clippy::doc_markdown)]
+
 //! PTY-over-WebSocket bridge handler (T18.3).
 //!
 //! One [`run_connection`] task per authenticated WebSocket. The task
@@ -32,6 +36,7 @@ use uuid::Uuid;
 
 use crate::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
 
+use super::planflow_bridge::{self, PlanflowState};
 use super::projects_bridge::{self, AppEvents};
 use super::protocol::{ClientMessage, ServerMessage, KNOWN_CLIENT_TYPES};
 use super::system_monitor::{StatsSnapshot, SystemMonitorHandle};
@@ -109,6 +114,7 @@ pub async fn run_connection(
     pool: SqlitePool,
     events: Arc<dyn AppEvents>,
     monitor: SystemMonitorHandle,
+    planflow: Option<PlanflowState>,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
@@ -144,7 +150,7 @@ pub async fn run_connection(
         };
         match msg {
             Message::Text(payload) => {
-                handle_text(&mut conn, &payload, &pool, &events).await;
+                handle_text(&mut conn, &payload, &pool, &events, planflow.as_ref()).await;
             }
             Message::Binary(_) => {
                 // Binary frames aren't part of the protocol; reply with
@@ -209,6 +215,7 @@ async fn handle_text(
     payload: &str,
     pool: &SqlitePool,
     events: &Arc<dyn AppEvents>,
+    planflow: Option<&PlanflowState>,
 ) {
     // Two-phase parse so we can distinguish "unknown message type"
     // (T18.4: reply `error{kind: "unsupported"}`) from "malformed
@@ -320,6 +327,164 @@ async fn handle_text(
         }
         ClientMessage::SettingsGet { id } => {
             projects_bridge::handle_settings_get(&conn.out_tx, pool, id).await;
+        }
+        // T18.6 — PlanFlow Tasks bridge dispatch. Each arm forwards to
+        // a sibling-module handler which proxies the REST call through
+        // `http::Client` (retries + cache) using the OS-keychain-stored
+        // PlanFlow API token.
+        ClientMessage::PlanflowGetMe { id } => {
+            dispatch_planflow(&conn.out_tx, planflow, id, |state, tx, id| async move {
+                planflow_bridge::handle_get_me(&state, &tx, id).await;
+            })
+            .await;
+        }
+        ClientMessage::PlanflowListProjects {
+            id,
+            organization_id,
+        } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_list_projects(&state, &tx, id, organization_id).await;
+                },
+            )
+            .await;
+        }
+        ClientMessage::PlanflowListTasks {
+            id,
+            project_id,
+            status,
+        } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_list_tasks(&state, &tx, id, project_id, status).await;
+                },
+            )
+            .await;
+        }
+        ClientMessage::PlanflowListActiveWork { id, project_id } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_list_active_work(&state, &tx, id, project_id).await;
+                },
+            )
+            .await;
+        }
+        ClientMessage::PlanflowListComments {
+            id,
+            project_id,
+            task_id,
+        } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_list_comments(&state, &tx, id, project_id, task_id)
+                        .await;
+                },
+            )
+            .await;
+        }
+        ClientMessage::PlanflowCreateComment {
+            id,
+            project_id,
+            task_id,
+            body,
+        } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_create_comment(
+                        &state, &tx, id, project_id, task_id, body,
+                    )
+                    .await;
+                },
+            )
+            .await;
+        }
+        ClientMessage::PlanflowStartWork {
+            id,
+            project_id,
+            task_id,
+        } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_start_work(&state, &tx, id, project_id, task_id).await;
+                },
+            )
+            .await;
+        }
+        ClientMessage::PlanflowStopWork { id, project_id } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_stop_work(&state, &tx, id, project_id).await;
+                },
+            )
+            .await;
+        }
+        ClientMessage::PlanflowUpdateTaskStatus {
+            id,
+            project_id,
+            task_id,
+            status,
+        } => {
+            dispatch_planflow(
+                &conn.out_tx,
+                planflow,
+                id,
+                move |state, tx, id| async move {
+                    planflow_bridge::handle_update_task_status(
+                        &state, &tx, id, project_id, task_id, status,
+                    )
+                    .await;
+                },
+            )
+            .await;
+        }
+    }
+}
+
+/// Dispatch a PlanFlow client message to its handler, replying with a
+/// stable `planflow_error{kind:"unavailable"}` when the bridge state
+/// isn't available (boot-time HTTP-client failure). Keeping this in
+/// one helper means every PlanFlow arm gets the same fallback without
+/// duplicating the `Option` match.
+async fn dispatch_planflow<F, Fut>(
+    out_tx: &mpsc::Sender<String>,
+    planflow: Option<&PlanflowState>,
+    id: Option<String>,
+    run: F,
+) where
+    F: FnOnce(PlanflowState, mpsc::Sender<String>, Option<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    match planflow {
+        Some(state) => run(state.clone(), out_tx.clone(), id).await,
+        None => {
+            let msg = ServerMessage::planflow_error(
+                id,
+                "unavailable",
+                "planflow bridge is not configured on this server",
+                None,
+            );
+            send_value(out_tx, &msg).await;
         }
     }
 }
@@ -832,6 +997,7 @@ mod tests {
             r#"{"type":"definitely_not_a_real_type","id":"r1"}"#,
             &pool,
             &events,
+            None,
         )
         .await;
         let frame = out_rx.recv().await.expect("frame");
@@ -848,7 +1014,7 @@ mod tests {
         let pool = empty_pool().await;
         let events: Arc<dyn AppEvents> = Arc::new(NoopEvents);
 
-        handle_text(&mut conn, r#"{"id":"r2"}"#, &pool, &events).await;
+        handle_text(&mut conn, r#"{"id":"r2"}"#, &pool, &events, None).await;
         let frame = out_rx.recv().await.expect("frame");
         assert!(frame.contains(r#""type":"error""#), "got {frame}");
         assert!(frame.contains(r#""kind":"invalid_json""#), "got {frame}");
@@ -863,7 +1029,7 @@ mod tests {
         let pool = empty_pool().await;
         let events: Arc<dyn AppEvents> = Arc::new(NoopEvents);
 
-        handle_text(&mut conn, r#"{"type": broken"#, &pool, &events).await;
+        handle_text(&mut conn, r#"{"type": broken"#, &pool, &events, None).await;
         let frame = out_rx.recv().await.expect("frame");
         assert!(frame.contains(r#""type":"error""#), "got {frame}");
         assert!(frame.contains(r#""kind":"invalid_json""#), "got {frame}");
