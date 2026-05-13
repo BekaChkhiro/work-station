@@ -73,6 +73,12 @@ reqwest = { version = "=0.13.3", default-features = false, features = ["rustls",
 axum = { version = "=0.7.9", features = ["ws"] }
 futures-util = "=0.3.31"
 
+# T18.5 — system-stats bridge. Default features pull in process / disk /
+# network refreshers we never call; trim to just the `system` feature
+# (CPU + memory) so the 2-second poll stays cheap and the binary size
+# doesn't drift for one bridge.
+sysinfo = { version = "=0.39.1", default-features = false, features = ["system"] }
+
 # T18.19 — Web Push notifications. `web-push` brings the JWT/VAPID
 # signing, AES-128-GCM payload encryption, and an isahc-backed HTTP
 # client for outbound push delivery. `p256` + `rand_core` mint a fresh

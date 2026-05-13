@@ -33,6 +33,7 @@ use crate::push::{self, PushService};
 
 use super::auth::{check_auth, AuthResult, AuthToken};
 use super::pty_bridge;
+use super::system_monitor::{self, SystemMonitorHandle};
 
 /// Default port — matches `PROJECT_PLAN` T18.1 ("default 7420").
 pub const DEFAULT_PORT: u16 = 7420;
@@ -52,6 +53,10 @@ pub const HOST_ENV: &str = "WS_HOST";
 struct AppState {
     token: AuthToken,
     manager: PtyManager,
+    /// T18.5 — handle to the singleton system-stats broadcaster. Each
+    /// `/ws` upgrade clones a subscriber off this so every connection
+    /// receives the same poll tick.
+    monitor: SystemMonitorHandle,
 }
 
 /// Build the axum [`Router`] with all routes wired up.
@@ -63,7 +68,24 @@ pub(crate) fn router(
     manager: PtyManager,
     push_service: Option<PushService>,
 ) -> Router {
-    let state = Arc::new(AppState { token, manager });
+    let monitor = system_monitor::start(manager.clone());
+    router_with_monitor(token, manager, push_service, monitor)
+}
+
+/// Same as [`router`] but lets the caller inject a pre-built monitor.
+/// Test code uses this to swap in a fast-tick monitor without spawning
+/// the production 2-second sampler.
+pub(crate) fn router_with_monitor(
+    token: AuthToken,
+    manager: PtyManager,
+    push_service: Option<PushService>,
+    monitor: SystemMonitorHandle,
+) -> Router {
+    let state = Arc::new(AppState {
+        token,
+        manager,
+        monitor,
+    });
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
@@ -185,7 +207,8 @@ async fn ws_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let manager = state.manager.clone();
-    upgrade.on_upgrade(move |socket| pty_bridge::run_connection(socket, manager))
+    let monitor = state.monitor.clone();
+    upgrade.on_upgrade(move |socket| pty_bridge::run_connection(socket, manager, monitor))
 }
 
 fn unauthorized(message: &'static str) -> Response {
@@ -310,6 +333,62 @@ mod tests {
         assert!(saw_output, "never received pty_output frame");
 
         // Best-effort close.
+        let _ = socket.close(None).await;
+    }
+
+    /// T18.5 acceptance: a connected client receives `system_stats`
+    /// frames automatically. Uses `router_with_monitor` to inject a
+    /// fast-tick monitor so the test doesn't have to wait the 2-second
+    /// production cadence.
+    #[tokio::test]
+    async fn ws_connection_receives_system_stats() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let manager = PtyManager::new();
+        let monitor =
+            system_monitor::start_with_interval(manager.clone(), Duration::from_millis(50));
+        let app = router_with_monitor(AuthToken::new("secret"), manager, None, monitor);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let url = format!("ws://{addr}/ws");
+        let mut req = url.into_client_request().expect("client req");
+        req.headers_mut()
+            .insert("Authorization", "Bearer secret".parse().unwrap());
+        let (mut socket, response) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("connect");
+        assert_eq!(response.status().as_u16(), 101);
+
+        // The monitor primes for MINIMUM_CPU_UPDATE_INTERVAL (~200ms)
+        // before the first publish. Give it 3 seconds total so a noisy
+        // CI host doesn't flake.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_stats = false;
+        let mut payload_for_assert = String::new();
+        while tokio::time::Instant::now() < deadline && !saw_stats {
+            let next = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
+            if let Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(payload)))) = next {
+                if payload.contains(r#""type":"system_stats""#) {
+                    saw_stats = true;
+                    payload_for_assert = payload;
+                }
+            }
+        }
+        assert!(saw_stats, "never received system_stats frame");
+        assert!(
+            payload_for_assert.contains("cpu_percent")
+                && payload_for_assert.contains("ram_used_bytes")
+                && payload_for_assert.contains("ram_total_bytes")
+                && payload_for_assert.contains("pty_session_count"),
+            "system_stats frame missing fields: {payload_for_assert}",
+        );
+
         let _ = socket.close(None).await;
     }
 }

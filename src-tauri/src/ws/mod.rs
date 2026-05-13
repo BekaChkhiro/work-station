@@ -9,6 +9,9 @@
 //!   * T18.3 — JSON message protocol that bridges WebSocket clients to
 //!     the existing `PtyManager` (spawn / write / resize / kill /
 //!     scrollback) and streams PTY output back as live frames.
+//!   * T18.5 — system-stats bridge: a single background task polls
+//!     CPU / RAM / active PTY count every 2s and broadcasts
+//!     `system_stats` frames to every authenticated WebSocket.
 //!
 //! The boot path lives in [`init`]: it loads (or creates) the auth
 //! token from the `SQLite` pool, then calls [`server::spawn`] to bind
@@ -29,6 +32,7 @@ mod auth;
 mod protocol;
 mod pty_bridge;
 mod server;
+mod system_monitor;
 
 // Public surface — T18.4+ consumers (other bridges) and Tauri commands
 // that expose / regenerate the token will reach in via these re-exports.
