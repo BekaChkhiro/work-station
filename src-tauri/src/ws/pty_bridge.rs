@@ -1,0 +1,682 @@
+//! PTY-over-WebSocket bridge handler (T18.3).
+//!
+//! One [`run_connection`] task per authenticated WebSocket. The task
+//! splits the socket into a read half (incoming `ClientMessage`s) and a
+//! write half (outbound `ServerMessage` JSON frames), funnelling all
+//! outbound writes through a single [`tokio::sync::mpsc`] so the
+//! per-session output forwarders and the request/response replies can
+//! produce frames concurrently without contending on the WebSocket
+//! sink.
+//!
+//! Per attached session we hold a [`tokio::sync::broadcast::Receiver`]
+//! that taps the same channel desktop subscribers use (see
+//! `pty/session.rs` `output_tx`). The forwarder task base64-encodes
+//! each output chunk into a `pty_output` frame and ships it on the
+//! shared outbound mpsc. When the broadcast closes (child exited, or
+//! the session was killed) we send `pty_exit` and tear down the
+//! forwarder; if the WebSocket sink itself dies we cancel every
+//! outstanding forwarder and exit the connection task.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use axum::extract::ws::{Message, WebSocket};
+use base64::Engine;
+use bytes::Bytes;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+use crate::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
+
+use super::protocol::{ClientMessage, ServerMessage};
+
+/// Capacity for the per-connection outbound mpsc.
+///
+/// One forwarder per session + the request-reply lane all push here;
+/// 256 is wide enough to absorb a burst from `cat huge.log` without
+/// dropping frames while still applying backpressure if the WebSocket
+/// peer stalls.
+const OUTBOUND_CHANNEL_CAPACITY: usize = 256;
+
+/// Per-connection state. Lives on the stack of [`run_connection`].
+struct Connection {
+    manager: PtyManager,
+    /// Single sink for all outbound JSON frames.
+    out_tx: mpsc::Sender<String>,
+    /// Active per-session output forwarders. Dropping a handle aborts
+    /// the underlying task so [`unsubscribe`] is a no-await teardown.
+    forwarders: HashMap<Uuid, JoinHandle<()>>,
+}
+
+impl Connection {
+    fn new(manager: PtyManager, out_tx: mpsc::Sender<String>) -> Self {
+        Self {
+            manager,
+            out_tx,
+            forwarders: HashMap::new(),
+        }
+    }
+
+    fn subscribe_to(&mut self, session_id: Uuid) -> bool {
+        if self.forwarders.contains_key(&session_id) {
+            return true; // already streaming
+        }
+        let Some(session) = self.manager.get(session_id) else {
+            return false;
+        };
+        let rx = session.output_tx.subscribe();
+        let out_tx = self.out_tx.clone();
+        let handle = tokio::spawn(forward_output(session_id, rx, out_tx));
+        self.forwarders.insert(session_id, handle);
+        true
+    }
+
+    fn unsubscribe(&mut self, session_id: Uuid) {
+        if let Some(handle) = self.forwarders.remove(&session_id) {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        for (_, handle) in self.forwarders.drain() {
+            handle.abort();
+        }
+    }
+}
+
+/// Run a single authenticated WebSocket connection until the client
+/// disconnects or the socket errors.
+///
+/// `manager` is the app-scoped [`PtyManager`] — cloning the wrapper is
+/// cheap (it's an `Arc` internally) so each connection gets its own
+/// handle.
+pub async fn run_connection(socket: WebSocket, manager: PtyManager) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
+
+    // Outbound pump: drains the mpsc into the WebSocket sink as text
+    // frames. Exits cleanly when the mpsc closes (every Sender dropped)
+    // or when a send to the sink errors.
+    let sink_task = tokio::spawn(async move {
+        while let Some(payload) = out_rx.recv().await {
+            if ws_tx.send(Message::Text(payload)).await.is_err() {
+                break;
+            }
+        }
+        // Best-effort close — if the peer already hung up this errors,
+        // which we ignore.
+        let _ = ws_tx.close().await;
+    });
+
+    let mut conn = Connection::new(manager, out_tx);
+
+    while let Some(frame) = ws_rx.next().await {
+        let Ok(msg) = frame else {
+            // Underlying transport error — bail; sink_task will tear
+            // down on the next pump iteration.
+            break;
+        };
+        match msg {
+            Message::Text(payload) => {
+                handle_text(&mut conn, &payload).await;
+            }
+            Message::Binary(_) => {
+                // Binary frames aren't part of the protocol; reply with
+                // a typed error so a misbehaving client gets a usable
+                // diagnostic instead of a silent drop.
+                let err = ServerMessage::error(
+                    None,
+                    "invalid_frame",
+                    "binary frames are not supported on this connection",
+                );
+                send(&conn.out_tx, &err).await;
+            }
+            Message::Ping(_) | Message::Pong(_) => {
+                // axum responds to pings automatically; pong frames are
+                // ignored.
+            }
+            Message::Close(_) => break,
+        }
+    }
+
+    drop(conn); // aborts forwarders
+                // Closing the mpsc sender drains the sink_task; await it for a
+                // clean WebSocket close.
+    let _ = sink_task.await;
+}
+
+async fn handle_text(conn: &mut Connection, payload: &str) {
+    let msg = match serde_json::from_str::<ClientMessage>(payload) {
+        Ok(msg) => msg,
+        Err(error) => {
+            let err = ServerMessage::error(
+                None,
+                "invalid_json",
+                format!("failed to parse client message: {error}"),
+            );
+            send(&conn.out_tx, &err).await;
+            return;
+        }
+    };
+
+    match msg {
+        ClientMessage::PtySpawn {
+            id,
+            command,
+            args,
+            cwd,
+            env,
+            cols,
+            rows,
+        } => handle_spawn(conn, id, command, args, cwd, env, cols, rows).await,
+        ClientMessage::PtyWrite {
+            id,
+            session_id,
+            data,
+        } => {
+            handle_write(conn, id, session_id, &data).await;
+        }
+        ClientMessage::PtyResize {
+            id,
+            session_id,
+            cols,
+            rows,
+        } => {
+            handle_resize(conn, id, session_id, cols, rows).await;
+        }
+        ClientMessage::PtyKill { id, session_id } => {
+            handle_kill(conn, id, session_id).await;
+        }
+        ClientMessage::PtyScrollback {
+            id,
+            session_id,
+            offset,
+            limit,
+        } => {
+            handle_scrollback(conn, id, session_id, offset, limit).await;
+        }
+        ClientMessage::PtySubscribe { id, session_id } => {
+            handle_subscribe(conn, id, session_id).await;
+        }
+        ClientMessage::PtyUnsubscribe { id, session_id } => {
+            conn.unsubscribe(session_id);
+            send(&conn.out_tx, &ServerMessage::PtyAck { id }).await;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_spawn(
+    conn: &mut Connection,
+    id: Option<String>,
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: HashMap<String, String>,
+    cols: u16,
+    rows: u16,
+) {
+    if command.trim().is_empty() {
+        send(
+            &conn.out_tx,
+            &ServerMessage::error(id, "invalid_args", "command must not be empty"),
+        )
+        .await;
+        return;
+    }
+    if cols == 0 || rows == 0 {
+        send(
+            &conn.out_tx,
+            &ServerMessage::error(
+                id,
+                "invalid_args",
+                "cols and rows must be greater than zero",
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let manager = conn.manager.clone();
+    let config = SpawnConfig {
+        command,
+        args,
+        cwd: cwd.map(PathBuf::from),
+        env,
+        cols,
+        rows,
+    };
+
+    // Off-load the blocking spawn / reader-wire-up onto the blocking
+    // pool — `manager.spawn` can stat the filesystem (`is_executable`)
+    // and call native pty openpty.
+    let spawn_result = tokio::task::spawn_blocking({
+        let manager = manager.clone();
+        move || -> Result<Uuid, PtyError> {
+            let id = manager.spawn(config)?;
+            if let Some(session) = manager.get(id) {
+                spawn_reader(manager.clone(), &session);
+            }
+            Ok(id)
+        }
+    })
+    .await;
+
+    match spawn_result {
+        Ok(Ok(session_id)) => {
+            // Auto-subscribe the spawning client so the first frames
+            // (shell banner, prompt) reach it without a round-trip.
+            conn.subscribe_to(session_id);
+            send(&conn.out_tx, &ServerMessage::PtySpawned { id, session_id }).await;
+        }
+        Ok(Err(error)) => {
+            let (kind, message) = pty_error_to_kind(&error);
+            send(&conn.out_tx, &ServerMessage::error(id, kind, message)).await;
+        }
+        Err(join_err) => {
+            send(
+                &conn.out_tx,
+                &ServerMessage::error(id, "internal", format!("spawn task failed: {join_err}")),
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_write(conn: &Connection, id: Option<String>, session_id: Uuid, data_b64: &str) {
+    let data = match decode_b64(data_b64) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(id, session_id, "invalid_args", error),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let manager = conn.manager.clone();
+    let result = tokio::task::spawn_blocking(move || manager.write(session_id, &data)).await;
+    match result {
+        Ok(Ok(())) => send(&conn.out_tx, &ServerMessage::PtyAck { id }).await,
+        Ok(Err(error)) => {
+            let (kind, message) = pty_error_to_kind(&error);
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(id, session_id, kind, message),
+            )
+            .await;
+        }
+        Err(join_err) => {
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(
+                    id,
+                    session_id,
+                    "internal",
+                    format!("write task failed: {join_err}"),
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_resize(
+    conn: &Connection,
+    id: Option<String>,
+    session_id: Uuid,
+    cols: u16,
+    rows: u16,
+) {
+    if cols == 0 || rows == 0 {
+        send(
+            &conn.out_tx,
+            &ServerMessage::session_error(
+                id,
+                session_id,
+                "invalid_args",
+                "cols and rows must be greater than zero",
+            ),
+        )
+        .await;
+        return;
+    }
+    let manager = conn.manager.clone();
+    let result = tokio::task::spawn_blocking(move || manager.resize(session_id, cols, rows)).await;
+    match result {
+        Ok(Ok(())) => send(&conn.out_tx, &ServerMessage::PtyAck { id }).await,
+        Ok(Err(error)) => {
+            let (kind, message) = pty_error_to_kind(&error);
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(id, session_id, kind, message),
+            )
+            .await;
+        }
+        Err(join_err) => {
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(
+                    id,
+                    session_id,
+                    "internal",
+                    format!("resize task failed: {join_err}"),
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_kill(conn: &mut Connection, id: Option<String>, session_id: Uuid) {
+    // Drop our forwarder ahead of the kill so the per-session
+    // broadcast can close cleanly without racing the abort.
+    conn.unsubscribe(session_id);
+    let manager = conn.manager.clone();
+    let result = tokio::task::spawn_blocking(move || manager.kill(session_id)).await;
+    match result {
+        Ok(Ok(())) => send(&conn.out_tx, &ServerMessage::PtyAck { id }).await,
+        Ok(Err(error)) => {
+            let (kind, message) = pty_error_to_kind(&error);
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(id, session_id, kind, message),
+            )
+            .await;
+        }
+        Err(join_err) => {
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(
+                    id,
+                    session_id,
+                    "internal",
+                    format!("kill task failed: {join_err}"),
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_scrollback(
+    conn: &Connection,
+    id: Option<String>,
+    session_id: Uuid,
+    offset: usize,
+    limit: usize,
+) {
+    let manager = conn.manager.clone();
+    let result =
+        tokio::task::spawn_blocking(move || manager.read_scrollback(session_id, offset, limit))
+            .await;
+    match result {
+        Ok(Ok(chunk)) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk.data);
+            send(
+                &conn.out_tx,
+                &ServerMessage::PtyScrollbackChunk {
+                    id,
+                    session_id,
+                    data: encoded,
+                    total_bytes: chunk.total_bytes,
+                    next_offset: chunk.next_offset,
+                },
+            )
+            .await;
+        }
+        Ok(Err(error)) => {
+            let (kind, message) = pty_error_to_kind(&error);
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(id, session_id, kind, message),
+            )
+            .await;
+        }
+        Err(join_err) => {
+            send(
+                &conn.out_tx,
+                &ServerMessage::session_error(
+                    id,
+                    session_id,
+                    "internal",
+                    format!("scrollback task failed: {join_err}"),
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_subscribe(conn: &mut Connection, id: Option<String>, session_id: Uuid) {
+    if conn.subscribe_to(session_id) {
+        send(&conn.out_tx, &ServerMessage::PtyAck { id }).await;
+    } else {
+        send(
+            &conn.out_tx,
+            &ServerMessage::session_error(id, session_id, "not_found", "session not found"),
+        )
+        .await;
+    }
+}
+
+/// Per-session output forwarder: bridges the broadcast channel to the
+/// WebSocket outbound mpsc, exiting on `Closed` (child gone). On a
+/// lag event the broadcast skips frames and reports the count; we
+/// forward the next live frame as normal — desktop subscribers handle
+/// the same case via the backpressure counters, and the PWA replays
+/// scrollback to recover.
+async fn forward_output(
+    session_id: Uuid,
+    mut rx: broadcast::Receiver<Bytes>,
+    out_tx: mpsc::Sender<String>,
+) {
+    loop {
+        match rx.recv().await {
+            Ok(chunk) => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk);
+                let frame = ServerMessage::PtyOutput {
+                    session_id,
+                    data: encoded,
+                };
+                if let Ok(payload) = serde_json::to_string(&frame) {
+                    if out_tx.send(payload).await.is_err() {
+                        return; // peer gone
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                // Drop continues — the next `recv` gives us the freshest
+                // frame. PWA recovers via scrollback if needed.
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                let frame = ServerMessage::PtyExit { session_id };
+                if let Ok(payload) = serde_json::to_string(&frame) {
+                    let _ = out_tx.send(payload).await;
+                }
+                return;
+            }
+        }
+    }
+}
+
+async fn send(out_tx: &mpsc::Sender<String>, msg: &ServerMessage) {
+    if let Ok(payload) = serde_json::to_string(msg) {
+        // If the receiver was dropped the connection is already going
+        // away — swallow the error and let the parent task tear down.
+        let _ = out_tx.send(payload).await;
+    }
+}
+
+fn decode_b64(data: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(data))
+        .map_err(|e| format!("invalid base64 payload: {e}"))
+}
+
+fn pty_error_to_kind(error: &PtyError) -> (&'static str, String) {
+    let kind = match error {
+        PtyError::CwdMissing(_) => "cwd_missing",
+        PtyError::CommandNotFound(_) => "command_not_found",
+        PtyError::OpenPty(_) | PtyError::Spawn(_) | PtyError::Writer(_) => "spawn_failed",
+        PtyError::WriteIo(_) => "write_failed",
+        PtyError::WriteToClosed(_) => "write_to_closed",
+        PtyError::ResizeIo(_) => "resize_failed",
+        PtyError::NotFound(_) => "not_found",
+        PtyError::LockPoisoned => "internal",
+        PtyError::ReaderPanic(_) => "reader_panic",
+    };
+    (kind, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_b64_handles_padded_and_unpadded() {
+        assert_eq!(decode_b64("aGk=").unwrap(), b"hi");
+        assert_eq!(decode_b64("aGk").unwrap(), b"hi");
+    }
+
+    #[test]
+    fn decode_b64_rejects_garbage() {
+        assert!(decode_b64("!!!not-base64!!!").is_err());
+    }
+
+    #[test]
+    fn pty_error_to_kind_maps_all_variants() {
+        let pairs: Vec<(PtyError, &str)> = vec![
+            (PtyError::CwdMissing(PathBuf::from("/x")), "cwd_missing"),
+            (PtyError::CommandNotFound("x".into()), "command_not_found"),
+            (PtyError::OpenPty("x".into()), "spawn_failed"),
+            (PtyError::Spawn("x".into()), "spawn_failed"),
+            (PtyError::Writer("x".into()), "spawn_failed"),
+            (PtyError::WriteIo("x".into()), "write_failed"),
+            (PtyError::WriteToClosed(Uuid::nil()), "write_to_closed"),
+            (PtyError::ResizeIo("x".into()), "resize_failed"),
+            (PtyError::NotFound(Uuid::nil()), "not_found"),
+            (PtyError::LockPoisoned, "internal"),
+            (PtyError::ReaderPanic(Uuid::nil()), "reader_panic"),
+        ];
+        for (error, expected) in pairs {
+            let (kind, _) = pty_error_to_kind(&error);
+            assert_eq!(kind, expected, "{error:?}");
+        }
+    }
+
+    /// End-to-end-ish: spawn a real shell that prints a known string,
+    /// drive it through the bridge handler, and assert the output
+    /// frame round-trips with the same bytes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_write_and_receive_output() {
+        use std::time::Duration;
+
+        let manager = PtyManager::new();
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
+        let mut conn = Connection::new(manager, out_tx);
+
+        // Spawn a real shell — we use /bin/sh -c 'echo hi; sleep 30' so
+        // the session stays alive long enough to read the output.
+        handle_spawn(
+            &mut conn,
+            Some("spawn-1".into()),
+            "/bin/sh".into(),
+            vec!["-c".into(), "echo HELLO_FROM_PTY; sleep 30".into()],
+            None,
+            HashMap::new(),
+            80,
+            24,
+        )
+        .await;
+
+        // First frame must be PtySpawned.
+        let first = tokio::time::timeout(Duration::from_secs(3), out_rx.recv())
+            .await
+            .expect("timed out waiting for pty_spawned")
+            .expect("channel closed");
+        assert!(first.contains(r#""type":"pty_spawned""#), "got {first}");
+
+        // Drain pty_output frames, base64-decode their `data`, and look
+        // for HELLO_FROM_PTY in the concatenated bytes. A substring
+        // search on the raw base64 is unreliable — base64 boundaries
+        // depend on alignment, so the same plaintext can encode to
+        // different ASCII when split across chunks.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut decoded_stream: Vec<u8> = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            let recv = tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await;
+            match recv {
+                Ok(Some(frame)) => {
+                    let parsed: serde_json::Value = match serde_json::from_str(&frame) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if parsed.get("type").and_then(|v| v.as_str()) != Some("pty_output") {
+                        continue;
+                    }
+                    if let Some(b64) = parsed.get("data").and_then(|v| v.as_str()) {
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                            decoded_stream.extend_from_slice(&bytes);
+                            if decoded_stream
+                                .windows(b"HELLO_FROM_PTY".len())
+                                .any(|w| w == b"HELLO_FROM_PTY")
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {} // timer tick, keep waiting
+            }
+        }
+        assert!(
+            decoded_stream
+                .windows(b"HELLO_FROM_PTY".len())
+                .any(|w| w == b"HELLO_FROM_PTY"),
+            "never saw HELLO_FROM_PTY in output stream ({} bytes received)",
+            decoded_stream.len()
+        );
+
+        // Clean up: pull the session id out of the spawned frame so we
+        // can kill it.
+        let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let session_id: Uuid = serde_json::from_value(parsed["session_id"].clone()).unwrap();
+        handle_kill(&mut conn, None, session_id).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_write_with_invalid_base64_returns_error() {
+        let manager = PtyManager::new();
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
+        let conn = Connection::new(manager, out_tx);
+
+        handle_write(&conn, Some("w-1".into()), Uuid::nil(), "$$not-base64$$").await;
+
+        let frame = out_rx.recv().await.expect("frame");
+        assert!(frame.contains(r#""type":"pty_error""#), "got {frame}");
+        assert!(frame.contains(r#""kind":"invalid_args""#), "got {frame}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_resize_zero_dims_returns_error() {
+        let manager = PtyManager::new();
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
+        let conn = Connection::new(manager, out_tx);
+
+        handle_resize(&conn, Some("r-1".into()), Uuid::nil(), 0, 24).await;
+        let frame = out_rx.recv().await.expect("frame");
+        assert!(frame.contains(r#""kind":"invalid_args""#), "got {frame}");
+    }
+}

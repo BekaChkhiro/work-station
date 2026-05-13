@@ -20,6 +20,11 @@ mod logging;
 mod menu;
 mod pty;
 mod shell_path;
+// T18.1 / T18.2 / T18.3 — embedded HTTP + WebSocket server that bridges
+// the mobile PWA to the existing PtyManager. Started in `setup` below
+// once the SQLite migrations have run (auth token lives in
+// `app_settings`).
+mod ws;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 // Bootstrap wiring is inherently long — module setup, async migration
@@ -146,6 +151,31 @@ pub fn run() {
                     }
                     Err(error) => {
                         tracing::error!(target: "db", %error, "sqlite preload failed");
+                    }
+                }
+
+                // T18.1 + T18.2 + T18.3: stand up the WebSocket bridge
+                // *after* migrations so the auth-token row can land in
+                // `app_settings`. Failure here only takes down the
+                // mobile bridge — the desktop GUI keeps working.
+                let manager = handle.state::<pty::PtyManager>().inner().clone();
+                let pool = match db::pool(&handle).await {
+                    Ok(pool) => pool,
+                    Err(error) => {
+                        tracing::error!(target: "ws", %error, "ws bridge: could not resolve sqlite pool");
+                        return;
+                    }
+                };
+                match ws::init(&pool, manager).await {
+                    Ok(addr) => {
+                        tracing::info!(
+                            target: "ws",
+                            %addr,
+                            "ws bridge listening",
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "ws", %error, "ws bridge: init failed");
                     }
                 }
             });

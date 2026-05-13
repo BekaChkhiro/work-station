@@ -66,6 +66,13 @@ thiserror = "=2.0.18"
 # `cookies`/`hickory-dns` features — we don't need either.
 reqwest = { version = "=0.13.3", default-features = false, features = ["rustls", "json", "gzip"] }
 
+# T18.1 / T18.2 / T18.3 — embedded HTTP + WebSocket server. axum's `ws`
+# feature pulls in tokio-tungstenite transitively, so we don't need it
+# at the top level. `futures-util` for SinkExt / StreamExt on the split
+# WebSocket halves.
+axum = { version = "=0.7.9", features = ["ws"] }
+futures-util = "=0.3.31"
+
 # T2.8: SIGTERM for graceful PTY shutdown (Unix only — portable-pty's
 # `Child::kill` always sends SIGKILL).
 [target.'cfg(unix)'.dependencies]
@@ -97,6 +104,10 @@ tempfile = "=3.13.0"
 # T11.4 — HTTP client tests use wiremock to stub 5xx/429/cache scenarios
 # instead of dialling out to the real network.
 wiremock = "=0.6.5"
+# T18.1 — drive the embedded axum WS server from integration tests
+# as a real WebSocket client. axum pulls tokio-tungstenite in
+# transitively but doesn't re-export it.
+tokio-tungstenite = "=0.24.0"
 
 [[bench]]
 name = "ipc_throughput"

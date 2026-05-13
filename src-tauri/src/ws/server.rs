@@ -1,0 +1,292 @@
+//! axum HTTP + WebSocket server boot (T18.1 + T18.2).
+//!
+//! Runs on a Tauri-managed tokio task next to the GUI. The listener is
+//! bound to `127.0.0.1` by default so the server isn't reachable from
+//! the LAN without an explicit tunnel (T18.x Cloudflare Tunnel work);
+//! `WS_HOST` env override is allowed for tests / dogfooding.
+//!
+//! Routes:
+//!   * `GET /healthz` — unauthenticated liveness probe.
+//!   * `GET /ws`      — bearer-authenticated WebSocket upgrade, handed
+//!     off to [`pty_bridge::run_connection`].
+//!
+//! Auth is checked on the upgrade request itself (header or `?token=`),
+//! NOT inside the WebSocket message stream. Failed auth returns plain
+//! HTTP 401 so a misconfigured PWA gets a usable HTTP error instead of
+//! a WebSocket close code the browser console doesn't surface.
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+
+use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::{Query, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
+use serde::Deserialize;
+use tokio::net::TcpListener;
+
+use crate::pty::PtyManager;
+
+use super::auth::{check_auth, AuthResult, AuthToken};
+use super::pty_bridge;
+
+/// Default port — matches `PROJECT_PLAN` T18.1 ("default 7420").
+pub const DEFAULT_PORT: u16 = 7420;
+
+/// Environment override for the bind port (`WS_PORT`).
+pub const PORT_ENV: &str = "WS_PORT";
+
+/// Environment override for the bind host (`WS_HOST`).
+///
+/// Defaults to `127.0.0.1`. Set to `0.0.0.0` only with an explicit
+/// tunnel in front — never expose the bearer token endpoint on the
+/// LAN.
+pub const HOST_ENV: &str = "WS_HOST";
+
+/// Shared state for axum handlers.
+#[derive(Clone)]
+struct AppState {
+    token: AuthToken,
+    manager: PtyManager,
+}
+
+/// Build the axum [`Router`] with all routes wired up.
+///
+/// Exposed (crate-internal) for tests that want to drive the server
+/// against a real `TcpListener` without going through [`spawn`].
+pub(crate) fn router(token: AuthToken, manager: PtyManager) -> Router {
+    let state = Arc::new(AppState { token, manager });
+    // Auth lives in a route-scoped middleware so it runs *before*
+    // axum's `WebSocketUpgrade` extractor — the latter rejects any
+    // non-upgrade GET with 400, which would otherwise mask our 401.
+    let ws_routes =
+        Router::new()
+            .route("/ws", get(ws_handler))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_bearer,
+            ));
+    Router::new()
+        .route("/healthz", get(healthz))
+        .merge(ws_routes)
+        .with_state(state)
+}
+
+/// Bearer-token middleware. Runs before extractors so a missing /
+/// invalid token surfaces as a clean 401 with `WWW-Authenticate:
+/// Bearer` instead of axum's generic 400 from the `WebSocketUpgrade`
+/// extractor.
+async fn require_bearer(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let header_value = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_owned);
+    // Cheap manual query-string parse — we only care about `token=…`
+    // and don't want to pull a routing extractor in here.
+    let query_token = req.uri().query().and_then(|q| {
+        q.split('&').find_map(|pair| {
+            let mut it = pair.splitn(2, '=');
+            match (it.next(), it.next()) {
+                (Some("token"), Some(val)) => Some(val.to_owned()),
+                _ => None,
+            }
+        })
+    });
+
+    match check_auth(
+        &state.token,
+        header_value.as_deref(),
+        query_token.as_deref(),
+    ) {
+        AuthResult::Ok => next.run(req).await,
+        AuthResult::Missing => unauthorized("missing bearer token"),
+        AuthResult::Mismatch => unauthorized("invalid bearer token"),
+    }
+}
+
+/// Spawn the server in the background and return its bound address.
+///
+/// Binding happens synchronously (await on `TcpListener::bind`) so a
+/// port collision surfaces immediately at boot instead of being lost
+/// inside a fire-and-forget task. After `bind` succeeds the `serve`
+/// future runs on a background tokio task; cancelling that task (or
+/// dropping its handle) gracefully shuts the server down with the
+/// rest of the app.
+pub async fn spawn(token: AuthToken, manager: PtyManager) -> std::io::Result<SocketAddr> {
+    let host = std::env::var(HOST_ENV)
+        .ok()
+        .and_then(|s| s.parse::<IpAddr>().ok())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let port = std::env::var(PORT_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_PORT);
+
+    let app = router(token, manager);
+    let addr = SocketAddr::new(host, port);
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, app).await {
+            tracing::error!(target: "ws", %error, "axum server exited with error");
+        }
+    });
+    Ok(bound)
+}
+
+/// `GET /healthz` — unauthenticated liveness probe.
+///
+/// Used by the PWA's "is the desktop reachable?" check and by the
+/// dogfooding curl-from-shell flow.
+async fn healthz() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
+#[derive(Debug, Deserialize)]
+struct WsQuery {
+    #[allow(dead_code)] // consumed by `require_bearer`; left here so axum
+    // still rejects unknown query layouts via Query.
+    token: Option<String>,
+}
+
+/// `GET /ws` — WebSocket upgrade. Auth has already passed before this
+/// handler runs (see `require_bearer` middleware).
+async fn ws_handler(
+    State(state): State<Arc<AppState>>,
+    Query(_query): Query<WsQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let manager = state.manager.clone();
+    upgrade.on_upgrade(move |socket| pty_bridge::run_connection(socket, manager))
+}
+
+fn unauthorized(message: &'static str) -> Response {
+    let mut response = (StatusCode::UNAUTHORIZED, message).into_response();
+    response
+        .headers_mut()
+        .insert("WWW-Authenticate", "Bearer".parse().unwrap());
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Helper: spawn the server bound to an ephemeral port and return
+    /// the bound socket address. Skipped on hosts without IPv4
+    /// loopback (none we ship to, but cargo test on weird sandboxes).
+    async fn spawn_test_server(token: AuthToken) -> SocketAddr {
+        let manager = PtyManager::new();
+        let app = router(token, manager);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        // Give axum a beat to start accepting.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        addr
+    }
+
+    #[tokio::test]
+    async fn healthz_is_unauthenticated() {
+        let addr = spawn_test_server(AuthToken::new("secret")).await;
+        let body = reqwest::get(format!("http://{addr}/healthz"))
+            .await
+            .expect("get")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "ok");
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_rejects_missing_token() {
+        let addr = spawn_test_server(AuthToken::new("secret")).await;
+        // Plain HTTP GET against /ws without auth — should be 401.
+        let status = reqwest::Client::new()
+            .get(format!("http://{addr}/ws"))
+            .send()
+            .await
+            .expect("send")
+            .status();
+        assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_rejects_wrong_token() {
+        let addr = spawn_test_server(AuthToken::new("secret")).await;
+        let status = reqwest::Client::new()
+            .get(format!("http://{addr}/ws"))
+            .header("Authorization", "Bearer wrong")
+            .send()
+            .await
+            .expect("send")
+            .status();
+        assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    /// Drive a real WebSocket upgrade end-to-end with a valid token,
+    /// then send a single `pty_spawn` and assert we get a
+    /// `pty_spawned` reply. Exercises router → middleware → bridge
+    /// → `PtyManager`. Unix-only since spawn calls into portable-pty.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn valid_token_upgrades_and_routes_to_bridge() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let addr = spawn_test_server(AuthToken::new("secret")).await;
+
+        let url = format!("ws://{addr}/ws");
+        let mut req = url.into_client_request().expect("client req");
+        req.headers_mut()
+            .insert("Authorization", "Bearer secret".parse().unwrap());
+        let (mut socket, response) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("connect");
+        assert_eq!(response.status().as_u16(), 101);
+
+        let spawn_payload = serde_json::json!({
+            "type": "pty_spawn",
+            "id": "spawn-1",
+            "command": "/bin/sh",
+            "args": ["-c", "echo HELLO; sleep 30"],
+            "cols": 80,
+            "rows": 24,
+        });
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                spawn_payload.to_string(),
+            ))
+            .await
+            .expect("send spawn");
+
+        // First frame should be pty_spawned, then output frames will
+        // follow. Bound the wait so a portable-pty failure surfaces.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut saw_spawned = false;
+        let mut saw_output = false;
+        while tokio::time::Instant::now() < deadline && !(saw_spawned && saw_output) {
+            let next = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
+            if let Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(payload)))) = next {
+                if payload.contains(r#""type":"pty_spawned""#) {
+                    saw_spawned = true;
+                } else if payload.contains(r#""type":"pty_output""#) {
+                    saw_output = true;
+                }
+            }
+        }
+        assert!(saw_spawned, "never received pty_spawned frame");
+        assert!(saw_output, "never received pty_output frame");
+
+        // Best-effort close.
+        let _ = socket.close(None).await;
+    }
+}
