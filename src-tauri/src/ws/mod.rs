@@ -31,6 +31,7 @@ use crate::pty::PtyManager;
 use crate::push::PushService;
 
 mod auth;
+mod planflow_bridge;
 mod projects_bridge;
 mod protocol;
 mod pty_bridge;
@@ -41,6 +42,8 @@ mod system_monitor;
 // that expose / regenerate the token will reach in via these re-exports.
 #[allow(unused_imports)]
 pub use auth::{AuthToken, WS_AUTH_TOKEN_KEY};
+#[allow(unused_imports)]
+pub use planflow_bridge::PlanflowState;
 #[allow(unused_imports)]
 pub use server::{DEFAULT_PORT, HOST_ENV, PORT_ENV};
 
@@ -72,10 +75,11 @@ pub async fn init(
     manager: PtyManager,
     push: Option<PushService>,
     app: AppHandle,
+    planflow: Option<PlanflowState>,
 ) -> Result<SocketAddr, InitError> {
     let token = auth::load_or_create_token(pool).await?;
     let events: Arc<dyn projects_bridge::AppEvents> =
         Arc::new(projects_bridge::TauriAppEvents::new(app));
-    let addr = server::spawn(token, manager, push, pool.clone(), events).await?;
+    let addr = server::spawn(token, manager, push, pool.clone(), events, planflow).await?;
     Ok(addr)
 }

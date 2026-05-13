@@ -1,3 +1,8 @@
+// T18.6 docs reference `PlanFlow` (CamelCase) and other bare proper
+// nouns in prose; backticking each mention hurts readability. Allow
+// doc_markdown for the module.
+#![allow(clippy::doc_markdown)]
+
 //! JSON message protocol for the WebSocket bridge (T18.3).
 //!
 //! Both directions speak text JSON frames discriminated by the `type`
@@ -12,6 +17,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::projects::Project;
@@ -41,6 +47,16 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "project_get",
     "project_switch",
     "settings_get",
+    // T18.6 — PlanFlow Tasks bridge variants.
+    "planflow_get_me",
+    "planflow_list_projects",
+    "planflow_list_tasks",
+    "planflow_list_active_work",
+    "planflow_list_comments",
+    "planflow_create_comment",
+    "planflow_start_work",
+    "planflow_stop_work",
+    "planflow_update_task_status",
 ];
 
 /// Client → server frame.
@@ -133,6 +149,72 @@ pub enum ClientMessage {
     SettingsGet {
         #[serde(default)]
         id: Option<String>,
+    },
+
+    // ---- T18.6: PlanFlow Tasks bridge ----
+    //
+    // Each variant maps 1:1 to a method on the PlanFlow REST client;
+    // the server proxies the call through `http::Client` using the
+    // desktop's OS-keychain-stored PlanFlow API token. Success comes
+    // back as `planflow_result { id, data }` whose `data` is the
+    // upstream payload (envelope stripped); failures use
+    // `planflow_error` with a stable `kind`. The mobile side never
+    // sees the user's PlanFlow token directly — auth is the WS bearer.
+    PlanflowGetMe {
+        #[serde(default)]
+        id: Option<String>,
+    },
+    PlanflowListProjects {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        organization_id: Option<String>,
+    },
+    PlanflowListTasks {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        #[serde(default)]
+        status: Option<String>,
+    },
+    PlanflowListActiveWork {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    PlanflowListComments {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        task_id: String,
+    },
+    PlanflowCreateComment {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        task_id: String,
+        body: String,
+    },
+    PlanflowStartWork {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        task_id: String,
+    },
+    PlanflowStopWork {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    PlanflowUpdateTaskStatus {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        task_id: String,
+        /// `TODO` / `IN_PROGRESS` / `BLOCKED` / `DONE` / `DROPPED`.
+        /// The bridge forwards the string as-is; the PlanFlow API
+        /// enforces the enum.
+        status: String,
     },
 }
 
@@ -247,6 +329,30 @@ pub enum ServerMessage {
         /// the user can see "what's running" across both surfaces.
         pty_session_count: usize,
     },
+
+    // ---- T18.6: PlanFlow Tasks bridge ----
+    //
+    // The wire is intentionally `data: Value`: PlanFlow's response
+    // shapes are already version-stable enough that the mobile client
+    // parses them with zod, and a discriminated Rust variant per
+    // response shape would force every API tweak through this module.
+    // Errors carry the upstream HTTP status when available so the PWA
+    // can branch on 401/403 to re-prompt for a token without parsing
+    // prose. Kept as a dedicated variant (not the generic `Error`
+    // above) precisely so it can carry `status`.
+    PlanflowResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        data: Value,
+    },
+    PlanflowError {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        kind: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+    },
 }
 
 /// PWA-facing view of the small subset of `app_settings` we surface
@@ -290,6 +396,26 @@ impl ServerMessage {
             session_id: Some(session_id),
             kind: kind.into(),
             message: message.into(),
+        }
+    }
+
+    /// Convenience: PlanFlow bridge success reply (T18.6).
+    pub(crate) fn planflow_result(id: Option<String>, data: Value) -> Self {
+        Self::PlanflowResult { id, data }
+    }
+
+    /// Convenience: PlanFlow bridge error reply (T18.6).
+    pub(crate) fn planflow_error(
+        id: Option<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        status: Option<u16>,
+    ) -> Self {
+        Self::PlanflowError {
+            id,
+            kind: kind.into(),
+            message: message.into(),
+            status,
         }
     }
 }

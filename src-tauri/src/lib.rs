@@ -190,7 +190,30 @@ pub fn run() {
                     }
                 };
 
-                match ws::init(&pool, manager, push_service, handle.clone()).await {
+                // T18.6: PlanFlow Tasks bridge. The bridge reuses the
+                // generic http::Client (retries, cache, rate-limit
+                // handling) and pulls the user's PlanFlow API token
+                // from the OS keychain on each call. A boot failure
+                // only disables the PlanFlow surface — the rest of
+                // the WS bridge (PTY, push, projects, system stats)
+                // still serves traffic, and /ws clients see a typed
+                // `planflow_error{unavailable}` when they hit a
+                // PlanFlow message variant.
+                let planflow_state = match crate::http::Client::new(
+                    pool.clone(),
+                    crate::http::ClientConfig::default(),
+                ) {
+                    Ok(client) => {
+                        tracing::info!(target: "ws", "planflow bridge ready");
+                        Some(ws::PlanflowState::new(client))
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "ws", %error, "planflow bridge init failed");
+                        None
+                    }
+                };
+
+                match ws::init(&pool, manager, push_service, handle.clone(), planflow_state).await {
                     Ok(addr) => {
                         tracing::info!(
                             target: "ws",

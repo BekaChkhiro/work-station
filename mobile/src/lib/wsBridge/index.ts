@@ -1,4 +1,9 @@
-export { WsBridgeClient, WsBridgeClosedError, WsBridgeServerError } from "./client";
+export {
+  WsBridgeClient,
+  WsBridgeClosedError,
+  WsBridgePlanflowError,
+  WsBridgeServerError,
+} from "./client";
 export type {
   ConnectionState,
   ExitHandler,

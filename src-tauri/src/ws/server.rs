@@ -1,3 +1,7 @@
+// T18.6 prose names PlanFlow / http_cache; backticking each mention hurts
+// readability. Allow doc_markdown for the module.
+#![allow(clippy::doc_markdown)]
+
 //! axum HTTP + WebSocket server boot (T18.1 + T18.2).
 //!
 //! Runs on a Tauri-managed tokio task next to the GUI. The listener is
@@ -33,6 +37,7 @@ use crate::pty::PtyManager;
 use crate::push::{self, PushService};
 
 use super::auth::{check_auth, AuthResult, AuthToken};
+use super::planflow_bridge::PlanflowState;
 use super::projects_bridge::AppEvents;
 use super::pty_bridge;
 use super::system_monitor::{self, SystemMonitorHandle};
@@ -67,6 +72,11 @@ struct AppState {
     /// `/ws` upgrade clones a subscriber off this so every connection
     /// receives the same poll tick.
     monitor: SystemMonitorHandle,
+    /// T18.6 — `PlanFlow` Tasks bridge state. `None` when the HTTP
+    /// client couldn't initialise at boot; handlers reply with
+    /// `planflow_error{kind:"unavailable"}` so the mobile side gets a
+    /// typed frame instead of a silent drop.
+    planflow: Option<PlanflowState>,
 }
 
 /// Build the axum [`Router`] with all routes wired up.
@@ -79,9 +89,18 @@ pub(crate) fn router(
     push_service: Option<PushService>,
     pool: SqlitePool,
     events: Arc<dyn AppEvents>,
+    planflow: Option<PlanflowState>,
 ) -> Router {
     let monitor = system_monitor::start(manager.clone());
-    router_with_monitor(token, manager, push_service, pool, events, monitor)
+    router_with_monitor(
+        token,
+        manager,
+        push_service,
+        pool,
+        events,
+        monitor,
+        planflow,
+    )
 }
 
 /// Same as [`router`] but lets the caller inject a pre-built monitor.
@@ -94,6 +113,7 @@ pub(crate) fn router_with_monitor(
     pool: SqlitePool,
     events: Arc<dyn AppEvents>,
     monitor: SystemMonitorHandle,
+    planflow: Option<PlanflowState>,
 ) -> Router {
     let state = Arc::new(AppState {
         token,
@@ -101,6 +121,7 @@ pub(crate) fn router_with_monitor(
         pool,
         events,
         monitor,
+        planflow,
     });
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
@@ -179,6 +200,7 @@ pub async fn spawn(
     push_service: Option<PushService>,
     pool: SqlitePool,
     events: Arc<dyn AppEvents>,
+    planflow: Option<PlanflowState>,
 ) -> std::io::Result<SocketAddr> {
     let host = std::env::var(HOST_ENV)
         .ok()
@@ -189,7 +211,7 @@ pub async fn spawn(
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
 
-    let app = router(token, manager, push_service, pool, events);
+    let app = router(token, manager, push_service, pool, events, planflow);
     let addr = SocketAddr::new(host, port);
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -228,8 +250,9 @@ async fn ws_handler(
     let pool = state.pool.clone();
     let events = state.events.clone();
     let monitor = state.monitor.clone();
+    let planflow = state.planflow.clone();
     upgrade.on_upgrade(move |socket| {
-        pty_bridge::run_connection(socket, manager, pool, events, monitor)
+        pty_bridge::run_connection(socket, manager, pool, events, monitor, planflow)
     })
 }
 
@@ -267,7 +290,7 @@ mod tests {
         let manager = PtyManager::new();
         let pool = test_pool().await;
         let events: Arc<dyn AppEvents> = Arc::new(NoopEvents);
-        let app = router(token, manager, None, pool, events);
+        let app = router(token, manager, None, pool, events, None);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         tokio::spawn(async move {
@@ -395,6 +418,7 @@ mod tests {
             pool,
             events,
             monitor,
+            None,
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
