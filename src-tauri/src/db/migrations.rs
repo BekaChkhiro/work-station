@@ -81,6 +81,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "create planflow_chat_sessions table",
         sql: include_str!("../../migrations/0010_planflow_chat_sessions.sql"),
     },
+    Migration {
+        version: 11,
+        name: "create push_subscriptions table",
+        sql: include_str!("../../migrations/0011_push_subscriptions.sql"),
+    },
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -285,7 +290,7 @@ mod tests {
         let pool = fresh_pool().await;
 
         let first = run(&pool, MIGRATIONS, None).await.expect("first run");
-        assert_eq!(first.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(first.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         assert!(first.skipped.is_empty());
 
         // All marker tables exist after a fresh apply.
@@ -312,7 +317,7 @@ mod tests {
 
         let second = run(&pool, MIGRATIONS, None).await.expect("second run");
         assert!(second.applied.is_empty(), "no migrations should re-apply");
-        assert_eq!(second.skipped, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(second.skipped, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 
     #[tokio::test]
@@ -393,12 +398,12 @@ mod tests {
             .expect("run with legacy seed");
         // v1 should be skipped (seeded), v2..v8 newly applied.
         assert_eq!(report.skipped, vec![1]);
-        assert_eq!(report.applied, vec![2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(report.applied, vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
         let versions = applied_versions(&pool).await.expect("read schema_version");
         assert_eq!(
             versions.iter().copied().collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
     }
 
@@ -424,7 +429,7 @@ mod tests {
         let report = run(&pool, MIGRATIONS, Some(&backups))
             .await
             .expect("run with backups");
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
         let entries: Vec<_> = std::fs::read_dir(&backups)
             .expect("backups dir created")

@@ -18,7 +18,12 @@ mod http;
 mod ipc;
 mod logging;
 mod menu;
+// T18.19 — Web Push subsystem. Boots after migrations (depends on the
+// `app_settings` and `push_subscriptions` tables) and registers itself
+// in a process-global `OnceLock` so the eventual T18.6 PlanFlow Tasks
+// bridge can call `push::notify(...)` without threading state.
 mod pty;
+mod push;
 mod shell_path;
 // T18.1 / T18.2 / T18.3 — embedded HTTP + WebSocket server that bridges
 // the mobile PWA to the existing PtyManager. Started in `setup` below
@@ -166,7 +171,26 @@ pub fn run() {
                         return;
                     }
                 };
-                match ws::init(&pool, manager).await {
+
+                // T18.19: boot the Web Push subsystem. Failure here is
+                // not fatal — the WS bridge still serves /ws + /healthz
+                // without the /push/* surface. The desktop GUI continues
+                // working either way.
+                let push_service = match push::init(pool.clone()).await {
+                    Ok(service) => {
+                        tracing::info!(
+                            target: "push",
+                            "web push subsystem booted",
+                        );
+                        Some(service)
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "push", %error, "web push init failed");
+                        None
+                    }
+                };
+
+                match ws::init(&pool, manager, push_service).await {
                     Ok(addr) => {
                         tracing::info!(
                             target: "ws",
@@ -216,6 +240,10 @@ pub fn run() {
             commands::credentials::credentials_get,
             commands::credentials::credentials_delete,
             commands::credentials::credentials_has,
+            commands::push::push_notify,
+            commands::push::push_notify_task_done,
+            commands::push::push_notify_task_error,
+            commands::push::push_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

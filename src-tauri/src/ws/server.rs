@@ -29,6 +29,7 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 
 use crate::pty::PtyManager;
+use crate::push::{self, PushService};
 
 use super::auth::{check_auth, AuthResult, AuthToken};
 use super::pty_bridge;
@@ -57,7 +58,11 @@ struct AppState {
 ///
 /// Exposed (crate-internal) for tests that want to drive the server
 /// against a real `TcpListener` without going through [`spawn`].
-pub(crate) fn router(token: AuthToken, manager: PtyManager) -> Router {
+pub(crate) fn router(
+    token: AuthToken,
+    manager: PtyManager,
+    push_service: Option<PushService>,
+) -> Router {
     let state = Arc::new(AppState { token, manager });
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
@@ -69,10 +74,24 @@ pub(crate) fn router(token: AuthToken, manager: PtyManager) -> Router {
                 state.clone(),
                 require_bearer,
             ));
-    Router::new()
+
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
-        .merge(ws_routes)
-        .with_state(state)
+        .merge(ws_routes);
+
+    // T18.19: mount the Web Push HTTP surface under the same bearer-
+    // token middleware. Push routes need their own typed state
+    // (PushService), so we attach them as a nested router with
+    // `route_layer(require_bearer)` instead of merging into the WS state.
+    if let Some(service) = push_service {
+        let push_routes = push::http::routes(service).route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ));
+        router = router.merge(push_routes);
+    }
+
+    router.with_state(state)
 }
 
 /// Bearer-token middleware. Runs before extractors so a missing /
@@ -116,7 +135,11 @@ async fn require_bearer(State(state): State<Arc<AppState>>, req: Request, next: 
 /// future runs on a background tokio task; cancelling that task (or
 /// dropping its handle) gracefully shuts the server down with the
 /// rest of the app.
-pub async fn spawn(token: AuthToken, manager: PtyManager) -> std::io::Result<SocketAddr> {
+pub async fn spawn(
+    token: AuthToken,
+    manager: PtyManager,
+    push_service: Option<PushService>,
+) -> std::io::Result<SocketAddr> {
     let host = std::env::var(HOST_ENV)
         .ok()
         .and_then(|s| s.parse::<IpAddr>().ok())
@@ -126,7 +149,7 @@ pub async fn spawn(token: AuthToken, manager: PtyManager) -> std::io::Result<Soc
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
 
-    let app = router(token, manager);
+    let app = router(token, manager, push_service);
     let addr = SocketAddr::new(host, port);
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -183,7 +206,7 @@ mod tests {
     /// loopback (none we ship to, but cargo test on weird sandboxes).
     async fn spawn_test_server(token: AuthToken) -> SocketAddr {
         let manager = PtyManager::new();
-        let app = router(token, manager);
+        let app = router(token, manager, None);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         tokio::spawn(async move {

@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use sqlx::sqlite::SqlitePool;
 
 use crate::pty::PtyManager;
+use crate::push::PushService;
 
 mod auth;
 mod protocol;
@@ -50,8 +51,17 @@ pub enum InitError {
 /// Returns the actual bound [`SocketAddr`] (port may differ from
 /// [`DEFAULT_PORT`] if `WS_PORT` was set or `0` was requested for an
 /// ephemeral port in tests).
-pub async fn init(pool: &SqlitePool, manager: PtyManager) -> Result<SocketAddr, InitError> {
+///
+/// `push` is optional: when present, the `/push/*` HTTP routes are
+/// mounted behind the same bearer-token middleware. Boot failures in
+/// the push subsystem must not take down the WebSocket bridge, so
+/// callers pass `None` to skip wiring.
+pub async fn init(
+    pool: &SqlitePool,
+    manager: PtyManager,
+    push: Option<PushService>,
+) -> Result<SocketAddr, InitError> {
     let token = auth::load_or_create_token(pool).await?;
-    let addr = server::spawn(token, manager).await?;
+    let addr = server::spawn(token, manager, push).await?;
     Ok(addr)
 }
