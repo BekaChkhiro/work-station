@@ -19,18 +19,23 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use sqlx::sqlite::SqlitePool;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
 
-use super::protocol::{ClientMessage, ServerMessage};
+use super::projects_bridge::{
+    self, AppEvents,
+};
+use super::protocol::{ClientMessage, ServerMessage, KNOWN_CLIENT_TYPES};
 
 /// Capacity for the per-connection outbound mpsc.
 ///
@@ -93,8 +98,15 @@ impl Drop for Connection {
 ///
 /// `manager` is the app-scoped [`PtyManager`] — cloning the wrapper is
 /// cheap (it's an `Arc` internally) so each connection gets its own
-/// handle.
-pub async fn run_connection(socket: WebSocket, manager: PtyManager) {
+/// handle. `pool` and `events` are passed through to the projects /
+/// settings bridge (T18.4); pty handlers ignore them, so adding them
+/// here doesn't bloat per-session PTY state.
+pub async fn run_connection(
+    socket: WebSocket,
+    manager: PtyManager,
+    pool: SqlitePool,
+    events: Arc<dyn AppEvents>,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
 
@@ -122,7 +134,7 @@ pub async fn run_connection(socket: WebSocket, manager: PtyManager) {
         };
         match msg {
             Message::Text(payload) => {
-                handle_text(&mut conn, &payload).await;
+                handle_text(&mut conn, &payload, &pool, &events).await;
             }
             Message::Binary(_) => {
                 // Binary frames aren't part of the protocol; reply with
@@ -149,16 +161,66 @@ pub async fn run_connection(socket: WebSocket, manager: PtyManager) {
     let _ = sink_task.await;
 }
 
-async fn handle_text(conn: &mut Connection, payload: &str) {
-    let msg = match serde_json::from_str::<ClientMessage>(payload) {
+async fn handle_text(
+    conn: &mut Connection,
+    payload: &str,
+    pool: &SqlitePool,
+    events: &Arc<dyn AppEvents>,
+) {
+    // Two-phase parse so we can distinguish "unknown message type"
+    // (T18.4: reply `error{kind: "unsupported"}`) from "malformed
+    // payload for a known type" (`invalid_json`). Routing on the raw
+    // `type` string also lets us forward the request's `id` back on
+    // either failure path so PWA promises resolve cleanly.
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(error) => {
+            let err = ServerMessage::Error {
+                id: None,
+                kind: "invalid_json".into(),
+                message: format!("failed to parse client message: {error}"),
+            };
+            send_value(&conn.out_tx, &err).await;
+            return;
+        }
+    };
+
+    let echo_id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let type_str = match value.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => {
+            let err = ServerMessage::Error {
+                id: echo_id,
+                kind: "invalid_json".into(),
+                message: "missing required field `type`".into(),
+            };
+            send_value(&conn.out_tx, &err).await;
+            return;
+        }
+    };
+
+    if !KNOWN_CLIENT_TYPES.contains(&type_str) {
+        let err = ServerMessage::Error {
+            id: echo_id,
+            kind: "unsupported".into(),
+            message: format!("unknown message type: {type_str}"),
+        };
+        send_value(&conn.out_tx, &err).await;
+        return;
+    }
+
+    let msg = match serde_json::from_value::<ClientMessage>(value) {
         Ok(msg) => msg,
         Err(error) => {
-            let err = ServerMessage::error(
-                None,
-                "invalid_json",
-                format!("failed to parse client message: {error}"),
-            );
-            send(&conn.out_tx, &err).await;
+            let err = ServerMessage::Error {
+                id: echo_id,
+                kind: "invalid_json".into(),
+                message: format!("failed to parse client message: {error}"),
+            };
+            send_value(&conn.out_tx, &err).await;
             return;
         }
     };
@@ -206,6 +268,28 @@ async fn handle_text(conn: &mut Connection, payload: &str) {
             conn.unsubscribe(session_id);
             send(&conn.out_tx, &ServerMessage::PtyAck { id }).await;
         }
+        ClientMessage::ProjectsList { id } => {
+            projects_bridge::handle_projects_list(&conn.out_tx, pool, id).await;
+        }
+        ClientMessage::ProjectGet { id, project_id } => {
+            projects_bridge::handle_project_get(&conn.out_tx, pool, id, project_id).await;
+        }
+        ClientMessage::ProjectSwitch { id, project_id } => {
+            projects_bridge::handle_project_switch(&conn.out_tx, pool, events, id, project_id)
+                .await;
+        }
+        ClientMessage::SettingsGet { id } => {
+            projects_bridge::handle_settings_get(&conn.out_tx, pool, id).await;
+        }
+    }
+}
+
+/// Like [`send`] but accepts any [`ServerMessage`] (including the new
+/// generic `Error` variant) — the helper at the bottom of the module
+/// is kept as an alias so the pty-side call sites don't need to change.
+async fn send_value(out_tx: &mpsc::Sender<String>, msg: &ServerMessage) {
+    if let Ok(payload) = serde_json::to_string(msg) {
+        let _ = out_tx.send(payload).await;
     }
 }
 
@@ -678,5 +762,70 @@ mod tests {
         handle_resize(&conn, Some("r-1".into()), Uuid::nil(), 0, 24).await;
         let frame = out_rx.recv().await.expect("frame");
         assert!(frame.contains(r#""kind":"invalid_args""#), "got {frame}");
+    }
+
+    /// Test stub for `AppEvents` — the pty-bridge dispatch tests below
+    /// don't exercise project-switch, but `handle_text` requires an
+    /// `Arc<dyn AppEvents>` to compile, so we hand it a no-op.
+    struct NoopEvents;
+    impl AppEvents for NoopEvents {
+        fn emit_active_project_changed(&self, _: Option<&str>) {}
+    }
+
+    async fn empty_pool() -> SqlitePool {
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite")
+    }
+
+    #[tokio::test]
+    async fn handle_text_unknown_type_replies_with_unsupported() {
+        let manager = PtyManager::new();
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
+        let mut conn = Connection::new(manager, out_tx);
+        let pool = empty_pool().await;
+        let events: Arc<dyn AppEvents> = Arc::new(NoopEvents);
+
+        handle_text(
+            &mut conn,
+            r#"{"type":"definitely_not_a_real_type","id":"r1"}"#,
+            &pool,
+            &events,
+        )
+        .await;
+        let frame = out_rx.recv().await.expect("frame");
+        assert!(frame.contains(r#""type":"error""#), "got {frame}");
+        assert!(frame.contains(r#""kind":"unsupported""#), "got {frame}");
+        assert!(frame.contains(r#""id":"r1""#), "id must echo, got {frame}");
+    }
+
+    #[tokio::test]
+    async fn handle_text_missing_type_replies_with_invalid_json() {
+        let manager = PtyManager::new();
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
+        let mut conn = Connection::new(manager, out_tx);
+        let pool = empty_pool().await;
+        let events: Arc<dyn AppEvents> = Arc::new(NoopEvents);
+
+        handle_text(&mut conn, r#"{"id":"r2"}"#, &pool, &events).await;
+        let frame = out_rx.recv().await.expect("frame");
+        assert!(frame.contains(r#""type":"error""#), "got {frame}");
+        assert!(frame.contains(r#""kind":"invalid_json""#), "got {frame}");
+        assert!(frame.contains(r#""id":"r2""#), "id must echo, got {frame}");
+    }
+
+    #[tokio::test]
+    async fn handle_text_malformed_json_replies_with_invalid_json_no_id() {
+        let manager = PtyManager::new();
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
+        let mut conn = Connection::new(manager, out_tx);
+        let pool = empty_pool().await;
+        let events: Arc<dyn AppEvents> = Arc::new(NoopEvents);
+
+        handle_text(&mut conn, r#"{"type": broken"#, &pool, &events).await;
+        let frame = out_rx.recv().await.expect("frame");
+        assert!(frame.contains(r#""type":"error""#), "got {frame}");
+        assert!(frame.contains(r#""kind":"invalid_json""#), "got {frame}");
     }
 }

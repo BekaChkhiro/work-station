@@ -19,13 +19,16 @@
 #![allow(dead_code)] // T18.4+ wire the public re-exports.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use sqlx::sqlite::SqlitePool;
+use tauri::AppHandle;
 
 use crate::pty::PtyManager;
 use crate::push::PushService;
 
 mod auth;
+mod projects_bridge;
 mod protocol;
 mod pty_bridge;
 mod server;
@@ -56,12 +59,19 @@ pub enum InitError {
 /// mounted behind the same bearer-token middleware. Boot failures in
 /// the push subsystem must not take down the WebSocket bridge, so
 /// callers pass `None` to skip wiring.
+///
+/// `app` is the Tauri [`AppHandle`] used by the projects/settings
+/// bridge (T18.4) to emit `active-project-changed` so the desktop
+/// frontend mirrors a PWA-driven project switch.
 pub async fn init(
     pool: &SqlitePool,
     manager: PtyManager,
     push: Option<PushService>,
+    app: AppHandle,
 ) -> Result<SocketAddr, InitError> {
     let token = auth::load_or_create_token(pool).await?;
-    let addr = server::spawn(token, manager, push).await?;
+    let events: Arc<dyn projects_bridge::AppEvents> =
+        Arc::new(projects_bridge::TauriAppEvents::new(app));
+    let addr = server::spawn(token, manager, push, pool.clone(), events).await?;
     Ok(addr)
 }

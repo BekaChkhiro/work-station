@@ -357,6 +357,16 @@ pub async fn update_workspace_tabs(
     Ok(())
 }
 
+/// Fetch a single project by id. Returns [`ProjectError::NotFound`] if
+/// the row is gone (raced with a delete, or the id never existed).
+///
+/// Used by the WS bridge (T18.4 `project_get` / `project_switch`) so
+/// the existence check shares the same canonical row reader as the
+/// other write paths in this module.
+pub async fn get(pool: &SqlitePool, id: &str) -> Result<Project, ProjectError> {
+    fetch_one(pool, id).await
+}
+
 /// Hard-delete a project. Sessions cascade via the FK on
 /// `sessions.project_id` (see `migrations/0002_sessions.sql`).
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), ProjectError> {

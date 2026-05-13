@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::db::projects::Project;
+
 /// Default scrollback request size when the client omits `limit`.
 /// 64 KiB matches the upper bound used by the desktop xterm bridge.
 const DEFAULT_SCROLLBACK_LIMIT: usize = 64 * 1024;
@@ -21,6 +23,25 @@ const DEFAULT_SCROLLBACK_LIMIT: usize = 64 * 1024;
 const fn default_scrollback_limit() -> usize {
     DEFAULT_SCROLLBACK_LIMIT
 }
+
+/// Set of `type` discriminators the server understands. Used by the
+/// dispatcher in `pty_bridge` to distinguish "unknown message type"
+/// (reply with [`ServerMessage::Error`] kind `unsupported`) from
+/// "malformed payload for a known type" (reply with `invalid_json`).
+/// Keep in lockstep with the [`ClientMessage`] variants below.
+pub const KNOWN_CLIENT_TYPES: &[&str] = &[
+    "pty_spawn",
+    "pty_write",
+    "pty_resize",
+    "pty_kill",
+    "pty_scrollback",
+    "pty_subscribe",
+    "pty_unsubscribe",
+    "projects_list",
+    "project_get",
+    "project_switch",
+    "settings_get",
+];
 
 /// Client → server frame.
 #[derive(Debug, Deserialize)]
@@ -86,6 +107,33 @@ pub enum ClientMessage {
         id: Option<String>,
         session_id: Uuid,
     },
+    /// T18.4: list every project (mirrors `db::projects::list`).
+    ProjectsList {
+        #[serde(default)]
+        id: Option<String>,
+    },
+    /// T18.4: fetch a single project by id.
+    ProjectGet {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    /// T18.4: switch the active project. Verifies the project exists,
+    /// persists `app_settings.last_active_project`, and emits an
+    /// `active-project-changed` Tauri event so the desktop frontend
+    /// mirrors the PWA without a separate IPC round-trip.
+    ProjectSwitch {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    /// T18.4: read the small subset of `app_settings` the PWA needs
+    /// (theme + last-active project). Other settings stay desktop-only
+    /// to keep the wire surface tight.
+    SettingsGet {
+        #[serde(default)]
+        id: Option<String>,
+    },
 }
 
 /// Server → client frame.
@@ -132,6 +180,68 @@ pub enum ServerMessage {
     /// (child exited or session was killed). Subscribers can drop
     /// their xterm.js instance.
     PtyExit { session_id: Uuid },
+    /// T18.4: generic, non-PTY error envelope used by the projects /
+    /// settings handlers and by the unknown-type dispatch path.
+    ///
+    /// Distinct from [`ServerMessage::PtyError`] so the `kind` discriminator
+    /// space stays scoped to one feature area at a time. The PWA
+    /// branches on `type` first; a generic `error` frame here means
+    /// "the request you sent failed" without implying anything about
+    /// PTY session state.
+    Error {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        kind: String,
+        message: String,
+    },
+    /// T18.4: response to `projects_list`.
+    ProjectsListResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        projects: Vec<Project>,
+    },
+    /// T18.4: response to `project_get`.
+    ProjectResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        project: Project,
+    },
+    /// T18.4: response to `project_switch` after the row was persisted
+    /// and the Tauri event fired.
+    ProjectSwitched {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        project_id: String,
+    },
+    /// T18.4: response to `settings_get`.
+    SettingsResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        settings: SettingsView,
+    },
+    /// T18.4: server-initiated event broadcast when the active project
+    /// changes (omits `id` per the events-have-no-correlation-id rule).
+    /// Currently emitted only as a Tauri event; reserved here so a
+    /// future cross-WS broadcast can land without a wire-format break.
+    ActiveProjectChanged {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
+}
+
+/// PWA-facing view of the small subset of `app_settings` we surface
+/// over the bridge. CamelCase on the wire matches the rest of the
+/// project's JSON contracts (see [`Project`] and the TS settings
+/// wrapper) so the mobile client doesn't need a per-field renamer.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsView {
+    /// `"light" | "dark" | "system"` — falls back to `"dark"` (the TS
+    /// default) when the row is missing or corrupt.
+    pub theme: String,
+    /// `null` when no project has been activated yet, or when the
+    /// stored row has been explicitly cleared.
+    pub last_active_project: Option<String>,
 }
 
 impl ServerMessage {
@@ -252,5 +362,144 @@ mod tests {
         let msg = ServerMessage::PtyAck { id: None };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert_eq!(json, r#"{"type":"pty_ack"}"#);
+    }
+
+    #[test]
+    fn parses_projects_list_with_optional_id() {
+        let raw = r#"{"type":"projects_list","id":"req-1"}"#;
+        let msg: ClientMessage = serde_json::from_str(raw).expect("parse");
+        match msg {
+            ClientMessage::ProjectsList { id } => assert_eq!(id.as_deref(), Some("req-1")),
+            other => panic!("expected ProjectsList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_project_switch_payload() {
+        let raw = r#"{"type":"project_switch","id":"r","project_id":"abc"}"#;
+        let msg: ClientMessage = serde_json::from_str(raw).expect("parse");
+        match msg {
+            ClientMessage::ProjectSwitch { id, project_id } => {
+                assert_eq!(id.as_deref(), Some("r"));
+                assert_eq!(project_id, "abc");
+            }
+            other => panic!("expected ProjectSwitch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_settings_get() {
+        let raw = r#"{"type":"settings_get"}"#;
+        let msg: ClientMessage = serde_json::from_str(raw).expect("parse");
+        assert!(matches!(msg, ClientMessage::SettingsGet { id: None }));
+    }
+
+    #[test]
+    fn settings_view_serializes_with_camel_case() {
+        let view = SettingsView {
+            theme: "dark".into(),
+            last_active_project: Some("p1".into()),
+        };
+        let json = serde_json::to_string(&view).expect("serialize");
+        assert!(json.contains(r#""theme":"dark""#), "got {json}");
+        assert!(
+            json.contains(r#""lastActiveProject":"p1""#),
+            "expected camelCase, got {json}"
+        );
+    }
+
+    #[test]
+    fn settings_view_serializes_null_active_project() {
+        let view = SettingsView {
+            theme: "dark".into(),
+            last_active_project: None,
+        };
+        let json = serde_json::to_string(&view).expect("serialize");
+        assert!(
+            json.contains(r#""lastActiveProject":null"#),
+            "explicit null required, got {json}"
+        );
+    }
+
+    #[test]
+    fn settings_result_round_trips_id() {
+        let msg = ServerMessage::SettingsResult {
+            id: Some("req-1".into()),
+            settings: SettingsView {
+                theme: "light".into(),
+                last_active_project: None,
+            },
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"settings_result""#), "got {json}");
+        assert!(json.contains(r#""id":"req-1""#), "got {json}");
+    }
+
+    #[test]
+    fn project_switched_serializes_with_snake_case_type_and_project_id() {
+        let msg = ServerMessage::ProjectSwitched {
+            id: None,
+            project_id: "abc".into(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"project_switched""#), "got {json}");
+        assert!(json.contains(r#""project_id":"abc""#), "got {json}");
+        assert!(!json.contains(r#""id""#), "id must be omitted, got {json}");
+    }
+
+    #[test]
+    fn active_project_changed_event_omits_id_field() {
+        let msg = ServerMessage::ActiveProjectChanged {
+            project_id: Some("p1".into()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(
+            json.contains(r#""type":"active_project_changed""#),
+            "got {json}"
+        );
+        assert!(json.contains(r#""project_id":"p1""#), "got {json}");
+    }
+
+    #[test]
+    fn generic_error_uses_distinct_type_from_pty_error() {
+        let msg = ServerMessage::Error {
+            id: Some("r".into()),
+            kind: "unsupported".into(),
+            message: "unknown message type: foo".into(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"error""#), "got {json}");
+        assert!(json.contains(r#""kind":"unsupported""#), "got {json}");
+        assert!(
+            !json.contains("session_id"),
+            "generic error must not carry session_id, got {json}"
+        );
+    }
+
+    #[test]
+    fn known_client_types_match_variants() {
+        // Soft contract: the dispatcher reads `KNOWN_CLIENT_TYPES` to
+        // distinguish "unsupported" from "invalid_json". A drift here
+        // would silently push valid client messages onto the
+        // unsupported branch, so smoke-test that every entry parses.
+        for raw_type in KNOWN_CLIENT_TYPES {
+            // A bare `{"type":"X"}` payload is enough to exercise the
+            // tag dispatch; missing required fields return Err but
+            // serde still recognises the variant — which is what we
+            // care about here.
+            let payload = format!(r#"{{"type":"{raw_type}"}}"#);
+            let result = serde_json::from_str::<ClientMessage>(&payload);
+            // Either it parsed (variants without required fields) or
+            // it failed for "missing field" — both prove the type is
+            // known. An "unknown variant" failure would mean the
+            // constant array is out of sync.
+            if let Err(error) = result {
+                let msg = error.to_string();
+                assert!(
+                    !msg.contains("unknown variant"),
+                    "{raw_type}: variant missing — KNOWN_CLIENT_TYPES drifted ({msg})"
+                );
+            }
+        }
     }
 }

@@ -7,6 +7,7 @@
 //! concurrency pragmas at boot — see [`apply_pragmas`]. T3.10 snapshots
 //! the database before pending migrations run — see [`backup`].
 
+pub mod app_settings;
 pub mod backup;
 pub mod integration_write_queue;
 pub mod migrations;

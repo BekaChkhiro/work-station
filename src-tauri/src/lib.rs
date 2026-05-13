@@ -190,7 +190,7 @@ pub fn run() {
                     }
                 };
 
-                match ws::init(&pool, manager, push_service).await {
+                match ws::init(&pool, manager, push_service, handle.clone()).await {
                     Ok(addr) => {
                         tracing::info!(
                             target: "ws",

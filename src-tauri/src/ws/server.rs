@@ -26,12 +26,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
+use sqlx::sqlite::SqlitePool;
 use tokio::net::TcpListener;
 
 use crate::pty::PtyManager;
 use crate::push::{self, PushService};
 
 use super::auth::{check_auth, AuthResult, AuthToken};
+use super::projects_bridge::AppEvents;
 use super::pty_bridge;
 
 /// Default port — matches `PROJECT_PLAN` T18.1 ("default 7420").
@@ -52,6 +54,14 @@ pub const HOST_ENV: &str = "WS_HOST";
 struct AppState {
     token: AuthToken,
     manager: PtyManager,
+    /// SQLite pool — cloned per WS upgrade so the projects/settings
+    /// bridge handlers (T18.4) can read/write `app_settings` and the
+    /// `projects` table without re-resolving the pool.
+    pool: SqlitePool,
+    /// Cross-runtime "active project changed" hop (T18.4). Boxed so
+    /// tests can swap the Tauri-backed impl for a recorder without
+    /// touching this layer.
+    events: Arc<dyn AppEvents>,
 }
 
 /// Build the axum [`Router`] with all routes wired up.
@@ -62,8 +72,15 @@ pub(crate) fn router(
     token: AuthToken,
     manager: PtyManager,
     push_service: Option<PushService>,
+    pool: SqlitePool,
+    events: Arc<dyn AppEvents>,
 ) -> Router {
-    let state = Arc::new(AppState { token, manager });
+    let state = Arc::new(AppState {
+        token,
+        manager,
+        pool,
+        events,
+    });
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
@@ -139,6 +156,8 @@ pub async fn spawn(
     token: AuthToken,
     manager: PtyManager,
     push_service: Option<PushService>,
+    pool: SqlitePool,
+    events: Arc<dyn AppEvents>,
 ) -> std::io::Result<SocketAddr> {
     let host = std::env::var(HOST_ENV)
         .ok()
@@ -149,7 +168,7 @@ pub async fn spawn(
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
 
-    let app = router(token, manager, push_service);
+    let app = router(token, manager, push_service, pool, events);
     let addr = SocketAddr::new(host, port);
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -185,7 +204,11 @@ async fn ws_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let manager = state.manager.clone();
-    upgrade.on_upgrade(move |socket| pty_bridge::run_connection(socket, manager))
+    let pool = state.pool.clone();
+    let events = state.events.clone();
+    upgrade.on_upgrade(move |socket| {
+        pty_bridge::run_connection(socket, manager, pool, events)
+    })
 }
 
 fn unauthorized(message: &'static str) -> Response {
@@ -201,12 +224,28 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Test stub for [`AppEvents`] — the server-level integration
+    /// tests don't drive `project_switch`, so a no-op is enough.
+    struct NoopEvents;
+    impl AppEvents for NoopEvents {
+        fn emit_active_project_changed(&self, _: Option<&str>) {}
+    }
+
+    async fn test_pool() -> SqlitePool {
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite")
+    }
+
     /// Helper: spawn the server bound to an ephemeral port and return
     /// the bound socket address. Skipped on hosts without IPv4
     /// loopback (none we ship to, but cargo test on weird sandboxes).
     async fn spawn_test_server(token: AuthToken) -> SocketAddr {
         let manager = PtyManager::new();
-        let app = router(token, manager, None);
+        let pool = test_pool().await;
+        let events: Arc<dyn AppEvents> = Arc::new(NoopEvents);
+        let app = router(token, manager, None, pool, events);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         tokio::spawn(async move {
