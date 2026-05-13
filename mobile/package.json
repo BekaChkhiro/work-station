@@ -14,6 +14,9 @@
     "@solidjs/router": "^0.15.3",
     "@solidjs/start": "^1.1.7",
     "@tailwindcss/vite": "^4.2.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
     "solid-js": "1.9.12",
     "tailwindcss": "^4.2.4",
     "vinxi": "^0.5.3"
