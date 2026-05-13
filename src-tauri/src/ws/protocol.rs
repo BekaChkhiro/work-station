@@ -57,6 +57,10 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "planflow_start_work",
     "planflow_stop_work",
     "planflow_update_task_status",
+    // T18.16 — PlanFlow Chat on mobile.
+    "planflow_chat_send",
+    "planflow_chat_history",
+    "planflow_chat_clear",
 ];
 
 /// Client → server frame.
@@ -216,6 +220,32 @@ pub enum ClientMessage {
         /// enforces the enum.
         status: String,
     },
+
+    // ---- T18.16: PlanFlow Chat on mobile ----
+    //
+    // The mobile client posts a chat message intended for the desktop's
+    // active PlanFlow Chat session for a project. The server persists
+    // the row to `planflow_chats` and emits a Tauri event so the
+    // desktop frontend can route the content into the live PTY
+    // (where the assistant sees it just like a keystroke).
+    PlanflowChatSend {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        content: String,
+    },
+    PlanflowChatHistory {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    PlanflowChatClear {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
 }
 
 /// Server → client frame.
@@ -353,6 +383,43 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<u16>,
     },
+
+    // ---- T18.16: PlanFlow Chat replies ----
+    //
+    // `planflow_chat_ack` confirms the row was persisted and the Tauri
+    // event was emitted (best effort — emit failures still ack).
+    // `planflow_chat_history_result` ships oldest-first messages.
+    // `planflow_chat_cleared` confirms a clear and reports the row count.
+    PlanflowChatAck {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        message_id: i64,
+        created_at: i64,
+    },
+    PlanflowChatHistoryResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        messages: Vec<ChatMessageView>,
+    },
+    PlanflowChatCleared {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        rows_deleted: i64,
+    },
+}
+
+/// Wire shape for a chat message row (T18.16). Mirrors the TypeScript
+/// `ChatMessage` schema in `src/db/planflowChats.ts` with camelCase
+/// fields so the mobile zod parser can use it directly.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageView {
+    pub id: i64,
+    pub project_id: String,
+    pub role: String,
+    pub content: String,
+    pub cli: Option<String>,
+    pub created_at: i64,
 }
 
 /// PWA-facing view of the small subset of `app_settings` we surface

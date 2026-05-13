@@ -40,6 +40,14 @@ pub trait AppEvents: Send + Sync + 'static {
     /// explicitly cleared (reserved for a future "deselect" path —
     /// today every successful switch carries an id).
     fn emit_active_project_changed(&self, project_id: Option<&str>);
+
+    /// T18.16 — a chat message arrived from the mobile PWA. The desktop
+    /// frontend listens for this event and routes the content into the
+    /// active PlanFlow chat session's PTY so the message appears in
+    /// the live chat panel. Default impl is a no-op so callers that
+    /// only stub `emit_active_project_changed` (e.g. tests) don't have
+    /// to implement this until they exercise the chat path.
+    fn emit_planflow_chat_message(&self, _project_id: &str, _content: &str) {}
 }
 
 /// Wire name of the Tauri event the desktop frontend listens on.
@@ -48,6 +56,11 @@ pub trait AppEvents: Send + Sync + 'static {
 /// (`file:external-change`, `menu:*`). Bumping this string is a
 /// breaking change for the desktop listener.
 pub const ACTIVE_PROJECT_CHANGED_EVENT: &str = "active-project-changed";
+
+/// T18.16 — Tauri event name the desktop frontend listens on to route
+/// a mobile-originated chat message into the active PlanFlow chat
+/// session's PTY. Kebab-case matches the rest of the app-level events.
+pub const PLANFLOW_CHAT_MESSAGE_EVENT: &str = "planflow-chat-mobile-message";
 
 /// Production [`AppEvents`] impl backed by a Tauri [`AppHandle`].
 pub struct TauriAppEvents {
@@ -68,6 +81,13 @@ struct ActiveProjectChangedPayload<'a> {
     project_id: Option<&'a str>,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PlanflowChatMessagePayload<'a> {
+    project_id: &'a str,
+    content: &'a str,
+}
+
 impl AppEvents for TauriAppEvents {
     fn emit_active_project_changed(&self, project_id: Option<&str>) {
         let payload = ActiveProjectChangedPayload { project_id };
@@ -76,6 +96,20 @@ impl AppEvents for TauriAppEvents {
                 target: "ws",
                 %error,
                 "failed to emit active-project-changed Tauri event",
+            );
+        }
+    }
+
+    fn emit_planflow_chat_message(&self, project_id: &str, content: &str) {
+        let payload = PlanflowChatMessagePayload {
+            project_id,
+            content,
+        };
+        if let Err(error) = self.app.emit(PLANFLOW_CHAT_MESSAGE_EVENT, payload) {
+            tracing::warn!(
+                target: "ws",
+                %error,
+                "failed to emit planflow-chat-mobile-message Tauri event",
             );
         }
     }

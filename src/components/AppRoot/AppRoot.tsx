@@ -75,6 +75,7 @@ import { listProjectLinks } from "../../db/projectLinks";
 import { Integration } from "../../integrations";
 import { setFocusedSessionCliResolver, setTaskCliLauncher } from "../../stores/taskCliLauncher";
 import { closeAllPlanflowChatRuntimes } from "../../stores/planflowChatSessions";
+import { installChatMobileListener } from "../../integrations/planflow/chatMobileListener";
 import type { WorkspaceTabKind } from "../../types/workspaceTab";
 import {
   collectPanes,
@@ -290,6 +291,23 @@ export function AppRoot(): JSX.Element {
       if (cliName) recordSessionCli(sessionId, cliName);
     },
     onSessionClosed: (sessionId) => forgetSessionCli(sessionId),
+  });
+
+  // T18.16 — listen for mobile-originated PlanFlow chat messages and
+  // route them into the active chat session's PTY so the message
+  // appears in the desktop chat panel.
+  onMount(() => {
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        unlisten = await installChatMobileListener();
+      } catch (error) {
+        console.warn("[planflow-chat] mobile listener failed to install", error);
+      }
+    })();
+    onCleanup(() => {
+      if (unlisten) unlisten();
+    });
   });
 
   onMount(() => {

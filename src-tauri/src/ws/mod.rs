@@ -31,6 +31,7 @@ use crate::pty::PtyManager;
 use crate::push::PushService;
 
 mod auth;
+mod chat_bridge;
 mod planflow_bridge;
 mod projects_bridge;
 mod protocol;
