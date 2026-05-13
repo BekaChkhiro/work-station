@@ -1,0 +1,28 @@
+{
+  "name": "work-station-mobile",
+  "version": "0.5.0",
+  "description": "Work Station companion PWA — remote terminal, tasks, and monitor over WebSocket.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vinxi dev --port 3000",
+    "build": "vinxi build",
+    "start": "vinxi start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@solidjs/router": "^0.15.3",
+    "@solidjs/start": "^1.1.7",
+    "@tailwindcss/vite": "^4.2.4",
+    "solid-js": "1.9.12",
+    "tailwindcss": "^4.2.4",
+    "vinxi": "^0.5.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite-plugin-pwa": "^0.21.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
