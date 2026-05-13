@@ -94,6 +94,16 @@ export type ServerMessage =
   | { type: "project_switched"; id?: string; project_id: string }
   | { type: "settings_result"; id?: string; settings: WsBridgeSettings }
   | { type: "active_project_changed"; project_id?: string | null }
+  // T18.5 — live host stats. Server-pushed every ~2 s to every authenticated
+  // socket (no subscribe message needed); the Monitor tab renders it, other
+  // tabs ignore it.
+  | {
+      type: "system_stats";
+      cpu_percent: number;
+      ram_used_bytes: number;
+      ram_total_bytes: number;
+      pty_session_count: number;
+    }
   // Generic error envelope used by chat / projects / settings handlers
   // (distinct from `pty_error`).
   | { type: "error"; id?: string; kind: string; message: string };
