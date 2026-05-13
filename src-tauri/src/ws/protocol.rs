@@ -227,6 +227,26 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
     },
+    /// Server-initiated event (T18.5): live host stats. Emitted on a
+    /// fixed cadence (currently every 2 seconds) to every authenticated
+    /// WebSocket — the PWA's Monitor tab plots the stream, other tabs
+    /// can ignore it. Fields are flat so the PWA can render them
+    /// without a nested deserialiser.
+    SystemStats {
+        /// Global CPU usage as a percentage in `[0, 100]`. Computed by
+        /// sysinfo as the average across all logical cores since the
+        /// previous refresh tick.
+        cpu_percent: f32,
+        /// Currently-used RAM in bytes. Matches sysinfo's `used_memory`
+        /// (active + wired on macOS, `MemTotal` - `MemAvailable` on Linux).
+        ram_used_bytes: u64,
+        /// Total physical RAM in bytes.
+        ram_total_bytes: u64,
+        /// Number of live PTY sessions tracked by `PtyManager`. Includes
+        /// sessions spawned from the desktop GUI as well as the PWA so
+        /// the user can see "what's running" across both surfaces.
+        pty_session_count: usize,
+    },
 }
 
 /// PWA-facing view of the small subset of `app_settings` we surface
@@ -501,5 +521,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn system_stats_serializes_with_flat_snake_case_fields() {
+        let msg = ServerMessage::SystemStats {
+            cpu_percent: 12.5,
+            ram_used_bytes: 1_073_741_824,
+            ram_total_bytes: 17_179_869_184,
+            pty_session_count: 3,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"system_stats""#), "got {json}");
+        assert!(json.contains(r#""cpu_percent":12.5"#), "got {json}");
+        assert!(
+            json.contains(r#""ram_used_bytes":1073741824"#),
+            "got {json}"
+        );
+        assert!(
+            json.contains(r#""ram_total_bytes":17179869184"#),
+            "got {json}"
+        );
+        assert!(json.contains(r#""pty_session_count":3"#), "got {json}");
     }
 }

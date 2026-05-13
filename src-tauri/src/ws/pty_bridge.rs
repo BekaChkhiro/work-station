@@ -32,10 +32,9 @@ use uuid::Uuid;
 
 use crate::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
 
-use super::projects_bridge::{
-    self, AppEvents,
-};
+use super::projects_bridge::{self, AppEvents};
 use super::protocol::{ClientMessage, ServerMessage, KNOWN_CLIENT_TYPES};
+use super::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
 /// Capacity for the per-connection outbound mpsc.
 ///
@@ -100,12 +99,16 @@ impl Drop for Connection {
 /// cheap (it's an `Arc` internally) so each connection gets its own
 /// handle. `pool` and `events` are passed through to the projects /
 /// settings bridge (T18.4); pty handlers ignore them, so adding them
-/// here doesn't bloat per-session PTY state.
+/// here doesn't bloat per-session PTY state. `monitor` is the
+/// app-scoped system-stats broadcaster (T18.5); we subscribe once per
+/// connection and a dedicated task forwards every snapshot through
+/// the shared outbound mpsc.
 pub async fn run_connection(
     socket: WebSocket,
     manager: PtyManager,
     pool: SqlitePool,
     events: Arc<dyn AppEvents>,
+    monitor: SystemMonitorHandle,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
@@ -123,6 +126,13 @@ pub async fn run_connection(
         // which we ignore.
         let _ = ws_tx.close().await;
     });
+
+    // T18.5 — subscribe to the shared system-stats broadcaster and run
+    // a forwarder that ships each snapshot through the same outbound
+    // mpsc as PTY frames. The handle is held in `_stats_forwarder` so
+    // it's aborted when the connection task drops, mirroring how the
+    // per-session forwarders are torn down via `Connection::drop`.
+    let stats_forwarder = tokio::spawn(forward_stats(monitor.subscribe(), out_tx.clone()));
 
     let mut conn = Connection::new(manager, out_tx);
 
@@ -155,10 +165,43 @@ pub async fn run_connection(
         }
     }
 
-    drop(conn); // aborts forwarders
-                // Closing the mpsc sender drains the sink_task; await it for a
-                // clean WebSocket close.
+    drop(conn); // aborts per-session forwarders
+                // Stop the system-stats forwarder before the mpsc senders
+                // it holds get dropped — otherwise its next `send` would
+                // hit a closed channel and log a noisy error.
+    stats_forwarder.abort();
+    // Closing the mpsc sender drains the sink_task; await it for a
+    // clean WebSocket close.
     let _ = sink_task.await;
+}
+
+/// Forward every broadcast snapshot to the per-connection outbound
+/// mpsc as a `system_stats` JSON frame. Exits when the broadcast
+/// closes (monitor task panicked) or the mpsc receiver is dropped.
+///
+/// On `Lagged` we deliberately drop the missed snapshots and keep
+/// going — stats are time-series, replaying old samples would just
+/// stall the UI with stale data. The PWA will see a fresh snapshot on
+/// the next live tick.
+async fn forward_stats(mut rx: broadcast::Receiver<StatsSnapshot>, out_tx: mpsc::Sender<String>) {
+    loop {
+        match rx.recv().await {
+            Ok(snapshot) => {
+                let frame = snapshot.into_message();
+                if let Ok(payload) = serde_json::to_string(&frame) {
+                    if out_tx.send(payload).await.is_err() {
+                        return; // peer gone — connection task is tearing down
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                // Skip stale frames; the next `recv` lands on the freshest one.
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                return;
+            }
+        }
+    }
 }
 
 async fn handle_text(
