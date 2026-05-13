@@ -88,13 +88,41 @@ export type ServerMessage =
       id?: string;
       rows_deleted: number;
     }
-  // Generic error envelope (sent by chat handlers + projects/settings handlers).
-  | {
-      type: "error";
-      id?: string;
-      kind: string;
-      message: string;
-    };
+  // T18.4 — projects + settings bridge response frames.
+  | { type: "projects_list_result"; id?: string; projects: WsBridgeProject[] }
+  | { type: "project_result"; id?: string; project: WsBridgeProject }
+  | { type: "project_switched"; id?: string; project_id: string }
+  | { type: "settings_result"; id?: string; settings: WsBridgeSettings }
+  | { type: "active_project_changed"; project_id?: string | null }
+  // Generic error envelope used by chat / projects / settings handlers
+  // (distinct from `pty_error`).
+  | { type: "error"; id?: string; kind: string; message: string };
+
+/** T18.4 — desktop project as it appears on the WS bridge.
+ *
+ * Camel-cased to match the Rust `Project` struct's serde rename. The PWA
+ * uses a subset of these fields (T18.17 only reads name + path), but the
+ * full shape is reflected here so future surfaces can pick what they
+ * need without re-typing. */
+export interface WsBridgeProject {
+  id: string;
+  name: string;
+  path: string;
+  color?: string | null;
+  icon?: string | null;
+  defaultCli?: string | null;
+  env?: Record<string, string>;
+  startupCommands?: string[];
+  workspaceTabs?: string[];
+  activeWorkspaceTab?: string;
+  position: number;
+  createdAt: number;
+}
+
+export interface WsBridgeSettings {
+  theme: string;
+  lastActiveProject: string | null;
+}
 
 export interface PtySpawnPayload {
   command: string;
@@ -166,6 +194,23 @@ export class WsBridgeServerError extends Error {
   ) {
     super(message);
     this.name = "WsBridgeServerError";
+  }
+}
+
+/** T18.4 — error returned by the projects / settings bridge.
+ *
+ * `kind` is one of: `not_found` (unknown project id), `invalid_args`
+ * (validation), `name_already_exists`, `invalid_path`, `internal`. The
+ * mobile UI surfaces `message` directly — these strings come from
+ * `ProjectError::Display` on the desktop side.
+ */
+export class WsBridgeError extends Error {
+  constructor(
+    public readonly kind: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WsBridgeError";
   }
 }
 
@@ -503,6 +548,46 @@ export class WsBridgeClient {
     return reply.data;
   }
 
+  // ---- T18.4: projects + settings bridge ----------------------------------
+  //
+  // Drives the PWA's Projects view (T18.17). The desktop persists the
+  // active project in `app_settings.last_active_project` and fires a
+  // Tauri event so the desktop frontend mirrors a PWA-driven switch.
+
+  async projectsList(): Promise<WsBridgeProject[]> {
+    const reply = await this.request({ type: "projects_list" });
+    if (reply.type !== "projects_list_result") {
+      throw new WsBridgeError("protocol", `expected projects_list_result, got ${reply.type}`);
+    }
+    return reply.projects;
+  }
+
+  async projectSwitch(projectId: string): Promise<void> {
+    const reply = await this.request({ type: "project_switch", project_id: projectId });
+    if (reply.type !== "project_switched") {
+      throw new WsBridgeError("protocol", `expected project_switched, got ${reply.type}`);
+    }
+  }
+
+  async settingsGet(): Promise<WsBridgeSettings> {
+    const reply = await this.request({ type: "settings_get" });
+    if (reply.type !== "settings_result") {
+      throw new WsBridgeError("protocol", `expected settings_result, got ${reply.type}`);
+    }
+    return reply.settings;
+  }
+
+  /** Listen to `active_project_changed` server-initiated events. Reserved
+   *  in the protocol for a future broadcast; safe to register today. */
+  onActiveProjectChanged(handler: (projectId: string | null) => void): () => void {
+    const wrapped: MessageHandler = (msg) => {
+      if (msg.type === "active_project_changed") {
+        handler(msg.project_id ?? null);
+      }
+    };
+    return this.onMessage(wrapped);
+  }
+
   // ---- internals ----------------------------------------------------------
 
   private buildUrl(): string {
@@ -614,14 +699,14 @@ export class WsBridgeClient {
       case "error": {
         // Generic error envelope used by chat / projects / settings
         // handlers + the unknown-type fallback. Reject the pending
-        // promise using the same Server error class as PTY failures so
-        // callers can branch on `.kind` without per-feature plumbing.
+        // promise with the typed bridge error so callers can branch
+        // on `.kind` without per-feature plumbing.
         const id = parsed.id;
         if (id !== undefined) {
           const pending = this.pending.get(id);
           if (pending) {
             this.pending.delete(id);
-            pending.reject(new WsBridgeServerError(parsed.kind, parsed.message));
+            pending.reject(new WsBridgeError(parsed.kind, parsed.message));
           }
         }
         return;
@@ -632,7 +717,11 @@ export class WsBridgeClient {
       case "planflow_result":
       case "planflow_chat_ack":
       case "planflow_chat_history_result":
-      case "planflow_chat_cleared": {
+      case "planflow_chat_cleared":
+      case "projects_list_result":
+      case "project_result":
+      case "project_switched":
+      case "settings_result": {
         const id = parsed.id;
         if (id !== undefined) {
           const pending = this.pending.get(id);
