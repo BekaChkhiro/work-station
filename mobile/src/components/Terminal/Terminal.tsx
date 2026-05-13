@@ -7,17 +7,14 @@ import { bridgeLastError, bridgeState, getBridge } from "../../stores/wsBridge";
 import "@xterm/xterm/css/xterm.css";
 
 interface TerminalProps {
-  /** Shell to spawn. Defaults to bash on the server side. */
-  command?: string;
-  /** Optional cwd for the PTY session. */
-  cwd?: string;
+  /** Existing session to attach to. The session must already exist on
+   *  the server — spawning is handled by the sessions store. */
+  sessionId: string;
 }
-
-const DEFAULT_COMMAND = "/bin/bash";
 
 export function Terminal(props: TerminalProps) {
   let host!: HTMLDivElement;
-  const [phase, setPhase] = createSignal<"connecting" | "ready" | "error" | "closed">("connecting");
+  const [phase, setPhase] = createSignal<"attaching" | "ready" | "error" | "closed">("attaching");
   const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
 
   onMount(() => {
@@ -58,7 +55,7 @@ export function Terminal(props: TerminalProps) {
       }
     });
 
-    let sessionId: string | null = null;
+    const sessionId = props.sessionId;
     let disposed = false;
 
     const offOutput = bridge.onPtyOutput((bytes, sid) => {
@@ -73,7 +70,6 @@ export function Terminal(props: TerminalProps) {
     });
 
     const onKey = xterm.onData((data) => {
-      if (!sessionId) return;
       bridge.ptyWrite(sessionId, data).catch((err) => {
         if (!(err instanceof WsBridgeClosedError)) {
           // Surface server-side write rejections without nuking the session.
@@ -94,50 +90,54 @@ export function Terminal(props: TerminalProps) {
         } catch {
           return;
         }
-        if (sessionId) {
-          bridge.ptyResize(sessionId, xterm.cols, xterm.rows).catch(() => {
-            // Silently ignore — a transient resize failure shouldn't break the UI.
-          });
-        }
+        bridge.ptyResize(sessionId, xterm.cols, xterm.rows).catch(() => {
+          // Silently ignore — a transient resize failure shouldn't break the UI.
+        });
       });
     });
     resizeObserver.observe(host);
 
-    const spawn = async () => {
+    const attach = async () => {
       try {
-        const { sessionId: sid } = await bridge.ptySpawn({
-          command: props.command ?? DEFAULT_COMMAND,
-          args: [],
-          cwd: props.cwd,
-          cols: xterm.cols || 80,
-          rows: xterm.rows || 24,
-        });
-        if (disposed) {
-          // Component unmounted during the spawn round-trip — clean up the orphan.
-          bridge.ptyKill(sid).catch(() => undefined);
-          return;
+        // Subscribe is idempotent server-side; the freshly-spawned session
+        // is auto-subscribed for the spawning client, but a session being
+        // re-attached after a tab switch isn't — issue subscribe either
+        // way to keep the code path uniform.
+        try {
+          await bridge.ptySubscribe(sessionId);
+        } catch (err) {
+          // already_subscribed is fine; anything else surfaces below.
+          if (!(err instanceof WsBridgeServerError) || err.kind !== "already_subscribed") {
+            throw err;
+          }
         }
-        sessionId = sid;
 
-        // Replay any pre-existing scrollback (T4.7 parity for mobile). Iterate
-        // chunks until we've drained the buffer.
+        // Push the current xterm dimensions before replay so the PTY
+        // wraps at the right column count.
+        await bridge
+          .ptyResize(sessionId, xterm.cols || 80, xterm.rows || 24)
+          .catch(() => undefined);
+
+        // Replay scrollback — drain chunks until the server reports we've
+        // reached totalBytes.
         let offset = 0;
-        while (true) {
-          const chunk = await bridge.ptyScrollback(sid, offset);
+        while (!disposed) {
+          const chunk = await bridge.ptyScrollback(sessionId, offset);
           if (chunk.data.byteLength === 0) break;
           xterm.write(chunk.data);
           if (chunk.nextOffset <= offset) break;
           offset = chunk.nextOffset;
           if (offset >= chunk.totalBytes) break;
         }
-        setPhase("ready");
+        if (!disposed) setPhase("ready");
       } catch (err) {
+        if (disposed) return;
         setPhase("error");
         setErrorMessage(describeError(err));
       }
     };
 
-    void spawn();
+    void attach();
 
     onCleanup(() => {
       disposed = true;
@@ -146,9 +146,11 @@ export function Terminal(props: TerminalProps) {
       offOutput();
       offExit();
       onKey.dispose();
-      if (sessionId) {
-        bridge.ptyKill(sessionId).catch(() => undefined);
-      }
+      // Don't kill the PTY on unmount — switching tabs or sessions should
+      // keep them running. Sessions are killed only via the sessions
+      // store (swipe-to-kill / explicit kill). We do unsubscribe so the
+      // server stops streaming output we no longer render.
+      bridge.ptyUnsubscribe(sessionId).catch(() => undefined);
       xterm.dispose();
     });
   });
@@ -157,14 +159,14 @@ export function Terminal(props: TerminalProps) {
     <div class="relative flex h-full w-full flex-col">
       <Show when={phase() !== "ready"}>
         <div class="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900/80 px-3 py-1.5 text-xs">
-          <Show when={phase() === "connecting"}>
+          <Show when={phase() === "attaching"}>
             <span class="size-1.5 rounded-full bg-amber-400" aria-hidden="true" />
-            <span class="text-neutral-300">Starting session…</span>
+            <span class="text-neutral-300">Attaching session…</span>
             <span class="ml-auto text-neutral-500">{bridgeState()}</span>
           </Show>
           <Show when={phase() === "error"}>
             <span class="size-1.5 rounded-full bg-red-500" aria-hidden="true" />
-            <span class="text-red-300">{errorMessage() ?? "Failed to start"}</span>
+            <span class="text-red-300">{errorMessage() ?? "Failed to attach"}</span>
           </Show>
           <Show when={phase() === "closed"}>
             <span class="size-1.5 rounded-full bg-neutral-500" aria-hidden="true" />

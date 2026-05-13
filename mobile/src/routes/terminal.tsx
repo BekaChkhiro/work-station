@@ -1,14 +1,50 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, onMount, Show } from "solid-js";
 import { Terminal } from "../components/Terminal";
+import { SessionsSheet } from "../components/SessionsSheet";
 import {
   readBridgeConfig,
   resetBridge,
   writeBridgeConfig,
   type BridgeConfig,
 } from "../stores/wsBridge";
+import {
+  activeSession,
+  activeSessionId,
+  hydrateSessions,
+  isHydrating,
+  sessions,
+  spawnSession,
+} from "../stores/sessions";
 
 export default function TerminalRoute() {
   const [config, setConfig] = createSignal<BridgeConfig | null>(readBridgeConfig());
+  const [sheetOpen, setSheetOpen] = createSignal(false);
+  const [autoSpawnError, setAutoSpawnError] = createSignal<string | null>(null);
+  let autoSpawnPending = false;
+
+  onMount(() => {
+    if (config()) {
+      void hydrateSessions().then(maybeAutoSpawn);
+    }
+  });
+
+  // When we have a configured bridge but no sessions, auto-spawn one so
+  // the user lands on a usable terminal instead of an empty state on
+  // first visit. We guard with `autoSpawnPending` so re-renders during
+  // hydration don't trigger multiple spawns.
+  function maybeAutoSpawn() {
+    if (autoSpawnPending) return;
+    if (isHydrating()) return;
+    if (sessions().length > 0) return;
+    autoSpawnPending = true;
+    spawnSession()
+      .catch((err) => {
+        setAutoSpawnError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        autoSpawnPending = false;
+      });
+  }
 
   return (
     <section
@@ -25,13 +61,84 @@ export default function TerminalRoute() {
               writeBridgeConfig(c);
               resetBridge();
               setConfig(c);
+              void hydrateSessions().then(maybeAutoSpawn);
             }}
           />
         }
       >
-        <Terminal />
+        <SessionsBar onOpen={() => setSheetOpen(true)} />
+        <Show
+          when={activeSessionId()}
+          fallback={
+            <EmptySessions
+              hydrating={isHydrating()}
+              error={autoSpawnError()}
+              onSpawn={() => {
+                setAutoSpawnError(null);
+                maybeAutoSpawn();
+              }}
+            />
+          }
+        >
+          {(sid) => <Terminal sessionId={sid()} />}
+        </Show>
+      </Show>
+      <Show when={sheetOpen()}>
+        <SessionsSheet onClose={() => setSheetOpen(false)} />
       </Show>
     </section>
+  );
+}
+
+function SessionsBar(props: { onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={props.onOpen}
+      class="flex w-full min-h-[44px] items-center gap-2 border-b border-neutral-800 bg-neutral-900/60 px-3 py-1.5 text-left text-xs hover:bg-neutral-900"
+      aria-label="Open sessions"
+    >
+      <Show
+        when={activeSession()}
+        fallback={<span class="text-neutral-400">No active session</span>}
+      >
+        {(session) => (
+          <>
+            <span class="size-1.5 rounded-full bg-cyan-400" aria-hidden="true" />
+            <span class="truncate font-medium text-neutral-100">{session().label}</span>
+            <span class="rounded-full border border-neutral-700 bg-neutral-950 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-neutral-300">
+              {session().cli}
+            </span>
+          </>
+        )}
+      </Show>
+      <span class="ml-auto text-neutral-500">
+        {sessions().length} session{sessions().length === 1 ? "" : "s"} ▾
+      </span>
+    </button>
+  );
+}
+
+function EmptySessions(props: { hydrating: boolean; error: string | null; onSpawn: () => void }) {
+  return (
+    <div class="m-auto flex max-w-sm flex-col items-center gap-3 px-6 text-center">
+      <Show
+        when={!props.hydrating}
+        fallback={<p class="text-sm text-neutral-400">Restoring sessions…</p>}
+      >
+        <p class="text-sm text-neutral-300">No active session.</p>
+        <Show when={props.error}>
+          <p class="text-xs text-red-400">{props.error}</p>
+        </Show>
+        <button
+          type="button"
+          onClick={props.onSpawn}
+          class="min-h-[44px] rounded-lg bg-cyan-500 px-4 py-2 text-sm font-medium text-neutral-950 hover:bg-cyan-400"
+        >
+          Start a session
+        </button>
+      </Show>
+    </div>
   );
 }
 
