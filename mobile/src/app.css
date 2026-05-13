@@ -1,0 +1,141 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+
+/* Map design tokens → Tailwind v4 theme. `inline` keeps refs as CSS vars
+ * so utilities (`bg-canvas`, `text-fg`, etc.) stay reactive to
+ * [data-theme] / [data-density] changes at runtime.
+ */
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-surface: var(--bg-surface);
+  --color-elevated: var(--bg-elevated);
+  --color-terminal: var(--bg-terminal);
+  --color-hover: var(--bg-hover);
+  --color-active: var(--bg-active);
+  --color-titlebar: var(--bg-titlebar);
+
+  --color-border-subtle: var(--border-subtle);
+  --color-border-default: var(--border-default);
+  --color-border-strong: var(--border-strong);
+  --color-border-focus: var(--border-focus);
+
+  --color-fg: var(--text-primary);
+  --color-fg-secondary: var(--text-secondary);
+  --color-fg-tertiary: var(--text-tertiary);
+  --color-fg-terminal: var(--text-terminal);
+
+  --color-accent: var(--accent);
+  --color-accent-muted: var(--accent-muted);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ring: var(--accent-ring);
+
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-info: var(--info);
+
+  --color-swatch-1: var(--swatch-1);
+  --color-swatch-2: var(--swatch-2);
+  --color-swatch-3: var(--swatch-3);
+  --color-swatch-4: var(--swatch-4);
+  --color-swatch-5: var(--swatch-5);
+  --color-swatch-6: var(--swatch-6);
+  --color-swatch-7: var(--swatch-7);
+  --color-swatch-8: var(--swatch-8);
+
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+
+  --text-xs: var(--fs-12);
+  --text-sm: var(--fs-13);
+  --text-base: var(--fs-14);
+  --text-md: var(--fs-15);
+  --text-lg: var(--fs-16);
+  --text-xl: var(--fs-18);
+  --text-2xl: var(--fs-22);
+  --text-3xl: var(--fs-28);
+
+  --spacing-1: var(--sp-1);
+  --spacing-2: var(--sp-2);
+  --spacing-3: var(--sp-3);
+  --spacing-4: var(--sp-4);
+  --spacing-5: var(--sp-5);
+  --spacing-6: var(--sp-6);
+  --spacing-8: var(--sp-8);
+  --spacing-12: var(--sp-12);
+
+  --spacing-touch: var(--touch-target);
+  --spacing-safe-top: var(--safe-top);
+  --spacing-safe-right: var(--safe-right);
+  --spacing-safe-bottom: var(--safe-bottom);
+  --spacing-safe-left: var(--safe-left);
+
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+
+  --shadow-popover: var(--shadow-popover);
+  --shadow-modal: var(--shadow-modal);
+  --shadow-sheet: var(--shadow-sheet);
+
+  --ease-out-soft: var(--ease);
+  --duration-fast: var(--dur-fast);
+  --duration-base: var(--dur-base);
+  --duration-modal: var(--dur-modal);
+}
+
+/* Base styles */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+html {
+  /* Lock iOS Safari zoom on input focus by sizing root to 16px; the actual
+   * UI scale comes from --fs-* tokens applied at the element level.
+   */
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-14);
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Disable pull-to-refresh + overscroll bounce — feels native for a
+   * full-screen PWA workspace.
+   */
+  overscroll-behavior-y: contain;
+  /* Prevent tap-highlight flash on iOS */
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+/* Tabular numerals helper — mirrors desktop. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}

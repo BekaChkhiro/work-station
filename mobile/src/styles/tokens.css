@@ -1,0 +1,244 @@
+/* Work Station mobile PWA — design tokens (T18.11)
+ *
+ * Mirrors the desktop tokens (src/styles/tokens.css) so themed surfaces
+ * read identically across both clients. Mobile-specific additions:
+ *   - touch-target sizing (--touch-target)
+ *   - safe-area-inset helpers for notch / home-indicator avoidance
+ *   - density default is comfortable (finger > pointer)
+ *
+ * Tailwind v4 (@theme inline in app.css) exposes these as utilities
+ * (e.g. `bg-canvas`, `text-fg`, `min-h-touch`).
+ */
+
+:root {
+  /* Accent — teal. Same value as desktop so brand is consistent. */
+  --accent-h: 188;
+  --accent: oklch(0.74 0.11 var(--accent-h));
+  --accent-muted: oklch(0.74 0.06 var(--accent-h));
+  --accent-soft: oklch(0.74 0.11 var(--accent-h) / 0.14);
+  --accent-ring: oklch(0.74 0.11 var(--accent-h) / 0.55);
+
+  /* Touch & density — mobile defaults to comfortable (finger ergonomics).
+   * --touch-target is the Apple HIG / Material minimum (44px).
+   */
+  --touch-target: 44px;
+  --density-row: 44px;
+  --density-pad: 12px;
+  --density-tab: 44px;
+
+  /* Safe-area insets — fall back to 0 on non-notched devices.
+   * Use via padding: var(--safe-top) var(--safe-right) ...
+   */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+
+  /* Typography */
+  --font-ui:
+    "Inter", "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable",
+    "SF Pro Text", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+  /* Mobile font scale — 1px larger across the board vs desktop to keep
+   * legibility at arm's length on a 5–6.7" screen.
+   */
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-15: 15px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-22: 22px;
+  --fs-28: 28px;
+
+  /* Spacing scale (4px grid) — same as desktop */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-12: 48px;
+
+  /* Radius — mobile leans slightly larger so cards/sheets feel softer */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+  --dur-fast: 100ms;
+  --dur-base: 150ms;
+  --dur-modal: 220ms;
+
+  /* Project swatches — identical to desktop for cross-client recognition. */
+  --swatch-1: oklch(0.72 0.16 25); /* coral  */
+  --swatch-2: oklch(0.78 0.15 70); /* amber  */
+  --swatch-3: oklch(0.78 0.16 130); /* lime   */
+  --swatch-4: oklch(0.74 0.13 175); /* teal   */
+  --swatch-5: oklch(0.74 0.13 220); /* sky    */
+  --swatch-6: oklch(0.68 0.16 265); /* blue   */
+  --swatch-7: oklch(0.68 0.18 310); /* violet */
+  --swatch-8: oklch(0.72 0.18 355); /* pink   */
+}
+
+[data-density="compact"] {
+  --density-row: 36px;
+  --density-pad: 10px;
+  --density-tab: 36px;
+}
+[data-density="comfortable"] {
+  --density-row: 44px;
+  --density-pad: 12px;
+  --density-tab: 44px;
+}
+
+/* Dark theme — primary, matches desktop dark exactly */
+[data-theme="dark"] {
+  --bg-canvas: #0b0c0e;
+  --bg-surface: #111316;
+  --bg-elevated: #181b1f;
+  --bg-terminal: #0b0c0e;
+  --bg-hover: rgba(255, 255, 255, 0.04);
+  --bg-active: rgba(255, 255, 255, 0.06);
+  --bg-titlebar: #0e1013;
+
+  --border-subtle: rgba(255, 255, 255, 0.045);
+  --border-default: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --border-focus: var(--accent-ring);
+
+  --text-primary: #e6e7e9;
+  --text-secondary: #9098a1;
+  --text-tertiary: #5b626b;
+  --text-terminal: #d6d3c9;
+
+  --success: oklch(0.74 0.11 155);
+  --warning: oklch(0.78 0.12 75);
+  --error: oklch(0.7 0.15 25);
+  --info: oklch(0.74 0.11 230);
+
+  --shadow-popover: 0 12px 36px rgba(0, 0, 0, 0.46), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+  --shadow-sheet: 0 -8px 30px rgba(0, 0, 0, 0.5);
+
+  color-scheme: dark;
+}
+
+/* Light theme — derived. Matches desktop light. */
+[data-theme="light"] {
+  --bg-canvas: #f6f5f1;
+  --bg-surface: #fbfaf7;
+  --bg-elevated: #ffffff;
+  --bg-terminal: #1a1c1f;
+  --bg-hover: rgba(0, 0, 0, 0.035);
+  --bg-active: rgba(0, 0, 0, 0.055);
+  --bg-titlebar: #efeeea;
+
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --border-default: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.18);
+  --border-focus: var(--accent-ring);
+
+  --text-primary: #1b1d20;
+  --text-secondary: #565c63;
+  --text-tertiary: #8a9098;
+  --text-terminal: #d6d3c9;
+
+  --success: oklch(0.55 0.12 155);
+  --warning: oklch(0.62 0.14 75);
+  --error: oklch(0.55 0.17 25);
+  --info: oklch(0.55 0.13 230);
+
+  --shadow-popover: 0 12px 30px rgba(20, 20, 30, 0.1), 0 1px 0 rgba(255, 255, 255, 0.6) inset;
+  --shadow-modal: 0 24px 50px rgba(20, 20, 30, 0.14), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+  --shadow-sheet: 0 -8px 30px rgba(20, 20, 30, 0.12);
+
+  color-scheme: light;
+}
+
+/* System theme — follow OS. Resolved via `prefers-color-scheme` when the
+ * user hasn't pinned data-theme. Identical values to the explicit themes.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg-canvas: #0b0c0e;
+    --bg-surface: #111316;
+    --bg-elevated: #181b1f;
+    --bg-terminal: #0b0c0e;
+    --bg-hover: rgba(255, 255, 255, 0.04);
+    --bg-active: rgba(255, 255, 255, 0.06);
+    --bg-titlebar: #0e1013;
+
+    --border-subtle: rgba(255, 255, 255, 0.045);
+    --border-default: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --border-focus: var(--accent-ring);
+
+    --text-primary: #e6e7e9;
+    --text-secondary: #9098a1;
+    --text-tertiary: #5b626b;
+    --text-terminal: #d6d3c9;
+
+    --success: oklch(0.74 0.11 155);
+    --warning: oklch(0.78 0.12 75);
+    --error: oklch(0.7 0.15 25);
+    --info: oklch(0.74 0.11 230);
+
+    --shadow-popover: 0 12px 36px rgba(0, 0, 0, 0.46), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+    --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+    --shadow-sheet: 0 -8px 30px rgba(0, 0, 0, 0.5);
+
+    color-scheme: dark;
+  }
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg-canvas: #f6f5f1;
+    --bg-surface: #fbfaf7;
+    --bg-elevated: #ffffff;
+    --bg-terminal: #1a1c1f;
+    --bg-hover: rgba(0, 0, 0, 0.035);
+    --bg-active: rgba(0, 0, 0, 0.055);
+    --bg-titlebar: #efeeea;
+
+    --border-subtle: rgba(0, 0, 0, 0.06);
+    --border-default: rgba(0, 0, 0, 0.1);
+    --border-strong: rgba(0, 0, 0, 0.18);
+    --border-focus: var(--accent-ring);
+
+    --text-primary: #1b1d20;
+    --text-secondary: #565c63;
+    --text-tertiary: #8a9098;
+    --text-terminal: #d6d3c9;
+
+    --success: oklch(0.55 0.12 155);
+    --warning: oklch(0.62 0.14 75);
+    --error: oklch(0.55 0.17 25);
+    --info: oklch(0.55 0.13 230);
+
+    --shadow-popover: 0 12px 30px rgba(20, 20, 30, 0.1), 0 1px 0 rgba(255, 255, 255, 0.6) inset;
+    --shadow-modal: 0 24px 50px rgba(20, 20, 30, 0.14), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+    --shadow-sheet: 0 -8px 30px rgba(20, 20, 30, 0.12);
+
+    color-scheme: light;
+  }
+}
+
+/* Reduced motion — collapse durations + kill transitions. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-modal: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}
