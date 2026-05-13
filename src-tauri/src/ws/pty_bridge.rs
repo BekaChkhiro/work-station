@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use crate::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
 
+use super::chat_bridge;
 use super::planflow_bridge::{self, PlanflowState};
 use super::projects_bridge::{self, AppEvents};
 use super::protocol::{ClientMessage, ServerMessage, KNOWN_CLIENT_TYPES};
@@ -457,6 +458,24 @@ async fn handle_text(
                 },
             )
             .await;
+        }
+        ClientMessage::PlanflowChatSend {
+            id,
+            project_id,
+            content,
+        } => {
+            chat_bridge::handle_chat_send(&conn.out_tx, pool, events, id, project_id, content)
+                .await;
+        }
+        ClientMessage::PlanflowChatHistory {
+            id,
+            project_id,
+            limit,
+        } => {
+            chat_bridge::handle_chat_history(&conn.out_tx, pool, id, project_id, limit).await;
+        }
+        ClientMessage::PlanflowChatClear { id, project_id } => {
+            chat_bridge::handle_chat_clear(&conn.out_tx, pool, id, project_id).await;
         }
     }
 }

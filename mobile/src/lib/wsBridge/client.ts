@@ -29,6 +29,15 @@ export type ConnectionState =
   | "closed"
   | "reconnecting";
 
+export interface PlanflowChatMessage {
+  id: number;
+  projectId: string;
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  cli: string | null;
+  createdAt: number;
+}
+
 export type ServerMessage =
   | { type: "pty_spawned"; id?: string; session_id: string }
   | { type: "pty_ack"; id?: string }
@@ -61,6 +70,30 @@ export type ServerMessage =
       kind: string;
       message: string;
       status?: number;
+    }
+  // T18.16 — PlanFlow Chat bridge frames.
+  | {
+      type: "planflow_chat_ack";
+      id?: string;
+      message_id: number;
+      created_at: number;
+    }
+  | {
+      type: "planflow_chat_history_result";
+      id?: string;
+      messages: PlanflowChatMessage[];
+    }
+  | {
+      type: "planflow_chat_cleared";
+      id?: string;
+      rows_deleted: number;
+    }
+  // Generic error envelope (sent by chat handlers + projects/settings handlers).
+  | {
+      type: "error";
+      id?: string;
+      kind: string;
+      message: string;
     };
 
 export interface PtySpawnPayload {
@@ -416,6 +449,52 @@ export class WsBridgeClient {
     });
   }
 
+  // ---- T18.16: PlanFlow Chat bridge ----
+
+  async planflowChatSend(
+    projectId: string,
+    content: string,
+  ): Promise<{ messageId: number; createdAt: number }> {
+    const reply = await this.request({
+      type: "planflow_chat_send",
+      project_id: projectId,
+      content,
+    });
+    if (reply.type !== "planflow_chat_ack") {
+      throw new WsBridgePlanflowError("protocol", `expected planflow_chat_ack, got ${reply.type}`);
+    }
+    return { messageId: reply.message_id, createdAt: reply.created_at };
+  }
+
+  async planflowChatHistory(projectId: string, limit?: number): Promise<PlanflowChatMessage[]> {
+    const reply = await this.request({
+      type: "planflow_chat_history",
+      project_id: projectId,
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    if (reply.type !== "planflow_chat_history_result") {
+      throw new WsBridgePlanflowError(
+        "protocol",
+        `expected planflow_chat_history_result, got ${reply.type}`,
+      );
+    }
+    return reply.messages;
+  }
+
+  async planflowChatClear(projectId: string): Promise<number> {
+    const reply = await this.request({
+      type: "planflow_chat_clear",
+      project_id: projectId,
+    });
+    if (reply.type !== "planflow_chat_cleared") {
+      throw new WsBridgePlanflowError(
+        "protocol",
+        `expected planflow_chat_cleared, got ${reply.type}`,
+      );
+    }
+    return reply.rows_deleted;
+  }
+
   private async planflowRequest(payload: Record<string, unknown>): Promise<unknown> {
     const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
@@ -532,10 +611,28 @@ export class WsBridgeClient {
         }
         return;
       }
+      case "error": {
+        // Generic error envelope used by chat / projects / settings
+        // handlers + the unknown-type fallback. Reject the pending
+        // promise using the same Server error class as PTY failures so
+        // callers can branch on `.kind` without per-feature plumbing.
+        const id = parsed.id;
+        if (id !== undefined) {
+          const pending = this.pending.get(id);
+          if (pending) {
+            this.pending.delete(id);
+            pending.reject(new WsBridgeServerError(parsed.kind, parsed.message));
+          }
+        }
+        return;
+      }
       case "pty_spawned":
       case "pty_ack":
       case "pty_scrollback_chunk":
-      case "planflow_result": {
+      case "planflow_result":
+      case "planflow_chat_ack":
+      case "planflow_chat_history_result":
+      case "planflow_chat_cleared": {
         const id = parsed.id;
         if (id !== undefined) {
           const pending = this.pending.get(id);

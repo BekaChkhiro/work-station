@@ -9,6 +9,7 @@ export type {
   ExitHandler,
   MessageHandler,
   OutputHandler,
+  PlanflowChatMessage,
   PtyScrollbackChunk,
   PtySpawnPayload,
   ReconnectOptions,
