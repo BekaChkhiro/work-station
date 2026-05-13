@@ -73,6 +73,15 @@ reqwest = { version = "=0.13.3", default-features = false, features = ["rustls",
 axum = { version = "=0.7.9", features = ["ws"] }
 futures-util = "=0.3.31"
 
+# T18.19 — Web Push notifications. `web-push` brings the JWT/VAPID
+# signing, AES-128-GCM payload encryption, and an isahc-backed HTTP
+# client for outbound push delivery. `p256` + `rand_core` mint a fresh
+# VAPID keypair on first launch; the private key is persisted as PKCS#8
+# PEM in `app_settings` so subsequent launches reuse the same identity.
+web-push = "=0.10.4"
+p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "pem", "pkcs8", "std"] }
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+
 # T2.8: SIGTERM for graceful PTY shutdown (Unix only — portable-pty's
 # `Child::kill` always sends SIGKILL).
 [target.'cfg(unix)'.dependencies]

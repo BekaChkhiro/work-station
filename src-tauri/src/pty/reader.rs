@@ -239,6 +239,15 @@ async fn run_coalescer(
                         "pty reader: remove on EOF: session already gone",
                     );
                 }
+                // T18.19: tell the PWA (and any other push subscriber)
+                // that the session ended. We can't classify "expected"
+                // vs "unexpected" here without piping the exit status
+                // through — keeping that for a follow-up; for now the
+                // mobile client gets one notification per session end.
+                crate::push::notify(crate::push::PushPayload::session_exit(format!(
+                    "session {}",
+                    &session_id.to_string()[..8]
+                )));
                 return;
             }
             Event::Timer => {
