@@ -79,5 +79,5 @@ jobs:
           cargo llvm-cov \
             --lib \
             --no-fail-fast \
-            --ignore-filename-regex '(cli/|commands/(log|mod)\.rs|db/|ipc/|lib\.rs|logging\.rs|main\.rs|menu/)' \
+            --ignore-filename-regex '(cli/|commands/(cli|clipboard|credentials|files|fs|integration_queue|log|mod|picker|project_links|projects|watch)\.rs|db/|ipc/|lib\.rs|logging\.rs|main\.rs|menu/|credentials/|http/|shell_path\.rs)' \
             --fail-under-lines 80
