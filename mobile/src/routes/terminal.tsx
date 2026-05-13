@@ -1,5 +1,5 @@
 import { createSignal, onMount, Show } from "solid-js";
-import { Terminal } from "../components/Terminal";
+import { KeyboardToolbar, Terminal } from "../components/Terminal";
 import { SessionsSheet } from "../components/SessionsSheet";
 import {
   readBridgeConfig,
@@ -80,7 +80,12 @@ export default function TerminalRoute() {
             />
           }
         >
-          {(sid) => <Terminal sessionId={sid()} />}
+          {(sid) => (
+            <>
+              <Terminal sessionId={sid()} />
+              <KeyboardToolbar sessionId={sid()} />
+            </>
+          )}
         </Show>
       </Show>
       <Show when={sheetOpen()}>
