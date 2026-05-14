@@ -803,6 +803,13 @@ async fn handle_subscribe(conn: &mut Connection, id: Option<String>, session_id:
 /// forward the next live frame as normal — desktop subscribers handle
 /// the same case via the backpressure counters, and the PWA replays
 /// scrollback to recover.
+/// Cap on a single coalesced `pty_output` frame so a runaway producer
+/// (e.g. `cat huge.bin`) can't pin the WebSocket pump on one giant
+/// base64 payload. 64 KiB leaves plenty of room for natural bursts
+/// (most prompt repaints + ANSI clears fit in <4 KiB) without letting
+/// pathological cases monopolise a frame.
+const PTY_COALESCE_CAP_BYTES: usize = 64 * 1024;
+
 async fn forward_output(
     session_id: Uuid,
     mut rx: broadcast::Receiver<Bytes>,
@@ -810,8 +817,35 @@ async fn forward_output(
 ) {
     loop {
         match rx.recv().await {
-            Ok(chunk) => {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk);
+            Ok(first) => {
+                // Opportunistic batching: if the producer has already
+                // emitted more chunks before the WebSocket pump woke
+                // up, drain them into one frame. This is the common
+                // case for interactive CLIs (Claude, codex) which emit
+                // many small chunks per visible "line" — without
+                // coalescing every chunk became a separate base64+JSON
+                // WS frame, and over a Cloudflare quick tunnel each
+                // extra round-trip turned scrollback into a slideshow.
+                let mut combined: Vec<u8> = Vec::with_capacity(first.len());
+                combined.extend_from_slice(&first);
+                while combined.len() < PTY_COALESCE_CAP_BYTES {
+                    match rx.try_recv() {
+                        Ok(more) => combined.extend_from_slice(&more),
+                        Err(broadcast::error::TryRecvError::Empty) => break,
+                        Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                            // Burned chunks; the *next* `try_recv` will
+                            // either return a real frame or Empty. The
+                            // PWA replays scrollback if it cares.
+                            continue;
+                        }
+                        Err(broadcast::error::TryRecvError::Closed) => {
+                            // Will be observed by the next blocking
+                            // `rx.recv().await` at the top of the loop.
+                            break;
+                        }
+                    }
+                }
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&combined);
                 let frame = ServerMessage::PtyOutput {
                     session_id,
                     data: encoded,

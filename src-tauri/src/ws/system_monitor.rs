@@ -34,8 +34,13 @@ use crate::pty::PtyManager;
 
 use super::protocol::ServerMessage;
 
-/// `PROJECT_PLAN` T18.5: "every 2 seconds".
-pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(2);
+// Original PROJECT_PLAN T18.5 budget was "every 2 seconds". Bumped to
+// 4s in v0.1.7 — every connected mobile client receives a fresh frame
+// on every tick, so each tick is one Cloudflare-tunnel round-trip per
+// connection. Halving the tick rate cuts that idle chatter roughly in
+// half without making the Monitor view feel stale (the snapshot still
+// updates inside the user's perception window).
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(4);
 
 /// Broadcast lane width. Snapshots are produced once every
 /// [`DEFAULT_INTERVAL`], so a lagging receiver only needs a handful of
