@@ -4,7 +4,6 @@ import {
   Match,
   Show,
   Switch,
-  batch,
   createEffect,
   createMemo,
   createResource,
@@ -13,14 +12,40 @@ import {
   type JSX,
 } from "solid-js";
 import { rememberTab } from "../components/TabBar";
-import {
-  PlanFlowApiError,
-  PlanFlowClient,
-  type Project,
-  type Task,
-  type TaskStatus,
-} from "../lib/planflowClient";
+import { type Project, type Task, type TaskStatus } from "../lib/planflowClient";
+import { WsBridgePlanflowError } from "../lib/wsBridge";
 import { settingsStore } from "../lib/settingsStore";
+import { bridgeState, getBridge } from "../stores/wsBridge";
+
+// Thin shim with the same surface PlanFlowClient exposed — routed through
+// the desktop WS bridge so the mobile PWA never handles the PlanFlow
+// token directly. The desktop loads the token from the OS keychain.
+interface PlanFlowBridgeClient {
+  listProjects(): Promise<Project[]>;
+  listTasks(projectId: string): Promise<Task[]>;
+  startWork(projectId: string, taskId: string): Promise<unknown>;
+}
+
+function bridgeClient(): PlanFlowBridgeClient {
+  function bridge() {
+    const b = getBridge();
+    if (!b) throw new WsBridgePlanflowError("unavailable", "Desktop bridge not connected");
+    return b;
+  }
+  return {
+    async listProjects() {
+      const data = await bridge().planflowListProjects();
+      return data as Project[];
+    },
+    async listTasks(projectId: string) {
+      const data = await bridge().planflowListTasks(projectId);
+      return data as Task[];
+    },
+    async startWork(projectId: string, taskId: string) {
+      return bridge().planflowStartWork(projectId, taskId);
+    },
+  };
+}
 
 // Groups & order — DONE/DROPPED collapse by default to mirror desktop T12.3.
 const STATUS_GROUPS: { key: TaskStatus; label: string; collapsedByDefault: boolean }[] = [
@@ -49,20 +74,22 @@ const COMPLEXITY_DOTS: Record<string, string> = {
 };
 
 export default function TasksRoute() {
-  const [token, setTokenSignal] = createSignal<string | null>(settingsStore.getToken());
   const [activeProjectId, setActiveProjectIdSignal] = createSignal<string | null>(
     settingsStore.getActiveProjectId(),
   );
 
-  const client = createMemo(() => new PlanFlowClient({ getToken: () => token() }));
+  const client = createMemo(() => bridgeClient());
 
-  const [projects, { refetch: refetchProjects }] = createResource(token, async (t) => {
-    if (!t) return [] as Project[];
-    return client().listProjects();
-  });
+  const [projects, { refetch: refetchProjects }] = createResource(
+    () => bridgeState(),
+    async (state) => {
+      if (state !== "open") return [] as Project[];
+      return client().listProjects();
+    },
+  );
 
   const [tasks, { refetch: refetchTasks }] = createResource(
-    () => (token() && activeProjectId() ? activeProjectId() : null),
+    () => (bridgeState() === "open" && activeProjectId() ? activeProjectId() : null),
     async (projectId: string | null) => {
       if (!projectId) return [] as Task[];
       return client().listTasks(projectId);
@@ -92,17 +119,6 @@ export default function TasksRoute() {
     return map;
   });
 
-  function applyToken(next: string | null) {
-    settingsStore.setToken(next);
-    batch(() => {
-      setTokenSignal(next);
-      if (!next) {
-        settingsStore.setActiveProjectId(null);
-        setActiveProjectIdSignal(null);
-      }
-    });
-  }
-
   function applyActiveProject(id: string | null) {
     settingsStore.setActiveProjectId(id);
     setActiveProjectIdSignal(id);
@@ -120,14 +136,14 @@ export default function TasksRoute() {
           <h1 class="text-fg text-xl font-semibold tracking-tight">Tasks</h1>
           <p class="text-fg-tertiary text-xs">
             <Switch>
-              <Match when={!token()}>Paste a PlanFlow token to begin.</Match>
+              <Match when={bridgeState() !== "open"}>Reconnecting to desktop…</Match>
               <Match when={!activeProjectId()}>Pick a project.</Match>
               <Match when={tasks.loading}>Loading…</Match>
               <Match when={true}>{(tasks()?.length ?? 0).toString()} tasks</Match>
             </Switch>
           </p>
         </div>
-        <Show when={token()}>
+        <Show when={bridgeState() === "open"}>
           <button
             type="button"
             onClick={refreshAll}
@@ -141,8 +157,8 @@ export default function TasksRoute() {
       </header>
 
       <Switch>
-        <Match when={!token()}>
-          <TokenOnboarding onSave={applyToken} />
+        <Match when={bridgeState() !== "open"}>
+          <BridgeOffline />
         </Match>
         <Match when={!activeProjectId()}>
           <ProjectPicker
@@ -150,7 +166,6 @@ export default function TasksRoute() {
             loading={projects.loading}
             error={projects.error as unknown}
             onPick={applyActiveProject}
-            onClearToken={() => applyToken(null)}
             onRetry={() => void refetchProjects()}
           />
         </Match>
@@ -174,52 +189,15 @@ export default function TasksRoute() {
   );
 }
 
-// ---------- Onboarding (paste token) ----------
-
-function TokenOnboarding(props: { onSave: (token: string) => void }) {
-  const [value, setValue] = createSignal("");
+function BridgeOffline() {
   return (
-    <form
-      class="bg-surface border-border-default mx-auto mt-6 w-full max-w-md rounded-lg border p-4"
-      onSubmit={(e) => {
-        e.preventDefault();
-        const v = value().trim();
-        if (v) props.onSave(v);
-      }}
-    >
-      <label class="text-fg block text-sm font-medium" for="pf-token">
-        PlanFlow API token
-      </label>
+    <div class="bg-surface border-border-default mx-auto mt-6 w-full max-w-md rounded-lg border p-4">
+      <p class="text-fg text-sm font-medium">Desktop not connected</p>
       <p class="text-fg-tertiary mt-1 text-xs">
-        Get one at{" "}
-        <a
-          href="https://planflow.tools/settings/api-tokens"
-          target="_blank"
-          rel="noreferrer"
-          class="text-accent underline"
-        >
-          planflow.tools/settings/api-tokens
-        </a>
-        . Stored locally on this device only.
+        Tasks live on the desktop's PlanFlow connection. Reconnect from the auth screen and your
+        token comes with you automatically — no separate token needed here.
       </p>
-      <input
-        id="pf-token"
-        type="password"
-        autocomplete="off"
-        spellcheck={false}
-        value={value()}
-        onInput={(e) => setValue(e.currentTarget.value)}
-        placeholder="pf_…"
-        class="bg-elevated border-border-default focus:border-accent focus:ring-accent-ring/40 mt-3 block w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2"
-      />
-      <button
-        type="submit"
-        disabled={!value().trim()}
-        class="bg-accent hover:bg-accent-muted text-canvas mt-3 inline-flex h-10 min-h-touch w-full items-center justify-center rounded-md text-sm font-medium transition-colors disabled:opacity-50"
-      >
-        Save token
-      </button>
-    </form>
+    </div>
   );
 }
 
@@ -230,17 +208,12 @@ function ProjectPicker(props: {
   loading: boolean;
   error: unknown;
   onPick: (id: string) => void;
-  onClearToken: () => void;
   onRetry: () => void;
 }) {
   return (
     <div class="mt-4 flex flex-col gap-3">
       <Show when={!props.loading && props.error}>
-        <ErrorBanner
-          error={props.error}
-          onRetry={props.onRetry}
-          onClearToken={props.onClearToken}
-        />
+        <ErrorBanner error={props.error} onRetry={props.onRetry} />
       </Show>
       <Show when={props.loading && !props.projects.length}>
         <Skeleton rows={4} />
@@ -282,13 +255,6 @@ function ProjectPicker(props: {
           )}
         </For>
       </ul>
-      <button
-        type="button"
-        onClick={props.onClearToken}
-        class="text-fg-tertiary hover:text-fg mx-auto mt-2 text-xs underline"
-      >
-        Use a different token
-      </button>
     </div>
   );
 }
@@ -300,7 +266,7 @@ interface TaskListBodyProps {
   grouped: () => Map<TaskStatus, Task[]>;
   activeProjectId: string;
   projectName: string;
-  client: () => PlanFlowClient;
+  client: () => PlanFlowBridgeClient;
   onSwitchProject: () => void;
   onTaskMutated: () => void;
 }
@@ -354,11 +320,7 @@ function TaskListBody(props: TaskListBodyProps) {
       </div>
 
       <Show when={props.tasks.error}>
-        <ErrorBanner
-          error={props.tasks.error}
-          onRetry={props.onTaskMutated}
-          onClearToken={undefined}
-        />
+        <ErrorBanner error={props.tasks.error} onRetry={props.onTaskMutated} />
       </Show>
 
       <Show when={props.tasks.loading && !props.tasks()?.length}>
@@ -474,7 +436,7 @@ function TaskRow(props: { task: Task; onOpen: () => void }) {
 function TaskDetailSheet(props: {
   task: Task | null;
   projectId: string;
-  client: () => PlanFlowClient;
+  client: () => PlanFlowBridgeClient;
   onClose: () => void;
   onTaskMutated: () => void;
 }) {
@@ -707,11 +669,8 @@ function PullToRefresh(props: { children: JSX.Element; onRefresh: () => Promise<
 
 // ---------- Helpers ----------
 
-function ErrorBanner(props: { error: unknown; onRetry: () => void; onClearToken?: () => void }) {
+function ErrorBanner(props: { error: unknown; onRetry: () => void }) {
   const message = formatError(props.error);
-  const isAuth =
-    props.error instanceof PlanFlowApiError &&
-    (props.error.status === 401 || props.error.status === 403);
   return (
     <div class="border-error/40 bg-error/10 flex flex-col gap-2 rounded-lg border p-3">
       <p class="text-error text-sm">{message}</p>
@@ -723,15 +682,6 @@ function ErrorBanner(props: { error: unknown; onRetry: () => void; onClearToken?
         >
           Retry
         </button>
-        <Show when={isAuth && props.onClearToken}>
-          <button
-            type="button"
-            onClick={props.onClearToken}
-            class="text-fg-secondary hover:bg-hover inline-flex h-8 items-center rounded-md px-3 text-xs font-medium transition-colors"
-          >
-            Re-enter token
-          </button>
-        </Show>
       </div>
     </div>
   );
@@ -748,11 +698,13 @@ function Skeleton(props: { rows: number }) {
 }
 
 function formatError(err: unknown): string {
-  if (err instanceof PlanFlowApiError) {
-    if (err.status === 401 || err.status === 403)
-      return "Token rejected — re-enter your PlanFlow token.";
-    if (err.status === 0) return `Network error: ${err.message}`;
-    return `PlanFlow error (${err.status}): ${err.message}`;
+  if (err instanceof WsBridgePlanflowError) {
+    if (err.kind === "no_credential")
+      return "PlanFlow token isn't set on the desktop — add it under Settings → Integrations on the desktop app.";
+    if (err.kind === "unauthorized" || err.kind === "forbidden")
+      return "PlanFlow rejected the desktop's token. Re-enter it on the desktop.";
+    if (err.kind === "unavailable") return err.message;
+    return `PlanFlow error: ${err.message}`;
   }
   if (err instanceof Error) return err.message;
   return "Unknown error";

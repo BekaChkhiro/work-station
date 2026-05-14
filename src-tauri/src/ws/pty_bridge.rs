@@ -282,7 +282,16 @@ async fn handle_text(
             env,
             cols,
             rows,
-        } => handle_spawn(conn, id, command, args, cwd, env, cols, rows).await,
+        } => {
+            // When the client doesn't provide a cwd (the mobile PWA
+            // never does), fall back to the desktop's active project
+            // path so the shell opens where the user expects.
+            let resolved = match cwd {
+                Some(value) => Some(PathBuf::from(value)),
+                None => active_project_cwd(pool).await,
+            };
+            handle_spawn(conn, id, command, args, resolved, env, cols, rows).await;
+        }
         ClientMessage::PtyWrite {
             id,
             session_id,
@@ -523,7 +532,7 @@ async fn handle_spawn(
     id: Option<String>,
     command: String,
     args: Vec<String>,
-    cwd: Option<String>,
+    cwd: Option<PathBuf>,
     env: HashMap<String, String>,
     cols: u16,
     rows: u16,
@@ -553,7 +562,7 @@ async fn handle_spawn(
     let config = SpawnConfig {
         command,
         args,
-        cwd: cwd.map(PathBuf::from),
+        cwd,
         env,
         cols,
         rows,
@@ -593,6 +602,20 @@ async fn handle_spawn(
             .await;
         }
     }
+}
+
+/// Resolve the active project's filesystem path so a `pty_spawn` with
+/// no explicit `cwd` lands in the same folder a desktop terminal would.
+/// Returns `None` when no project is active or the lookup fails — the
+/// caller treats that as "use PtyManager's default" (the user's home).
+async fn active_project_cwd(pool: &SqlitePool) -> Option<PathBuf> {
+    let project_id: String =
+        crate::db::app_settings::get_json(pool, crate::db::app_settings::LAST_ACTIVE_PROJECT_KEY)
+            .await
+            .ok()
+            .flatten()?;
+    let project = crate::db::projects::get(pool, &project_id).await.ok()?;
+    Some(PathBuf::from(project.path))
 }
 
 async fn handle_write(conn: &Connection, id: Option<String>, session_id: Uuid, data_b64: &str) {
