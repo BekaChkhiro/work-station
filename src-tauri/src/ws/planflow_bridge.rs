@@ -70,6 +70,12 @@ pub struct PlanflowState {
     http: http::Client,
     base_url: String,
     token_loader: TokenLoader,
+    /// Cached "first organization id" so the auto-resolve path in
+    /// `handle_list_projects` doesn't pay a /organizations round-trip
+    /// on every Tasks-tab load. Cleared on bridge boot — orgs rarely
+    /// change for a given user so this is safe for the lifetime of an
+    /// app run.
+    cached_org_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for PlanflowState {
@@ -90,6 +96,7 @@ impl PlanflowState {
             http,
             base_url: trim_trailing_slash(&base_url),
             token_loader: Arc::new(load_token_from_keychain),
+            cached_org_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -106,6 +113,7 @@ impl PlanflowState {
             http,
             base_url: trim_trailing_slash(&base_url.into()),
             token_loader,
+            cached_org_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -172,18 +180,35 @@ pub async fn handle_list_projects(
 
 /// Hit `/organizations` and pick the first id, matching the desktop
 /// client's auto-pick behaviour (see `src/integrations/planflow/client.ts`).
-/// Returns `Ok(None)` for accounts with zero organizations so the
-/// caller can surface a friendly error.
+/// The result is cached for the lifetime of `PlanflowState` so the
+/// PWA's repeated Tasks-tab loads only pay the extra `/organizations`
+/// round-trip once per app boot. Returns `Ok(None)` for accounts with
+/// zero organizations so the caller can surface a friendly error.
 async fn resolve_first_org_id(state: &PlanflowState) -> Result<Option<String>, ProxyError> {
+    if let Some(id) = state
+        .cached_org_id
+        .lock()
+        .expect("planflow org cache poisoned")
+        .clone()
+    {
+        return Ok(Some(id));
+    }
     let value = proxy_request(state, http::Method::Get, "/organizations", None).await?;
     let orgs = value
         .get("organizations")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    Ok(orgs
+    let first = orgs
         .into_iter()
-        .find_map(|o| o.get("id").and_then(|v| v.as_str()).map(str::to_owned)))
+        .find_map(|o| o.get("id").and_then(|v| v.as_str()).map(str::to_owned));
+    if let Some(ref id) = first {
+        *state
+            .cached_org_id
+            .lock()
+            .expect("planflow org cache poisoned") = Some(id.clone());
+    }
+    Ok(first)
 }
 
 pub async fn handle_list_tasks(
