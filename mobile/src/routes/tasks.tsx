@@ -32,14 +32,28 @@ function bridgeClient(): PlanFlowBridgeClient {
     if (!b) throw new WsBridgePlanflowError("unavailable", "Desktop bridge not connected");
     return b;
   }
+  // PlanFlow's `/projects` and `/projects/{id}/tasks` endpoints both
+  // wrap their array in a single-key object (`{ projects: [...] }`,
+  // `{ tasks: [...] }`). The bridge strips the outer `{ data: ... }`
+  // envelope but leaves the inner shape alone, so we have to unwrap
+  // here. Some upstream paths return the array directly (older
+  // PlanFlow builds), so be defensive.
+  function unwrap<T>(data: unknown, key: string): T[] {
+    if (Array.isArray(data)) return data as T[];
+    if (data && typeof data === "object") {
+      const inner = (data as Record<string, unknown>)[key];
+      if (Array.isArray(inner)) return inner as T[];
+    }
+    return [];
+  }
   return {
     async listProjects() {
       const data = await bridge().planflowListProjects();
-      return data as Project[];
+      return unwrap<Project>(data, "projects");
     },
     async listTasks(projectId: string) {
       const data = await bridge().planflowListTasks(projectId);
-      return data as Task[];
+      return unwrap<Task>(data, "tasks");
     },
     async startWork(projectId: string, taskId: string) {
       return bridge().planflowStartWork(projectId, taskId);
