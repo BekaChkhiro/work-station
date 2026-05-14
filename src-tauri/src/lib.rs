@@ -26,6 +26,10 @@ mod pairing;
 mod pty;
 mod push;
 mod shell_path;
+// Cloudflare quick-tunnel manager. Spawned after the WS bridge binds so
+// the mobile PWA (HTTPS origin) can reach the loopback-only listener
+// without LAN reachability / mixed-content headaches.
+mod tunnel;
 // T18.1 / T18.2 / T18.3 — embedded HTTP + WebSocket server that bridges
 // the mobile PWA to the existing PtyManager. Started in `setup` below
 // once the SQLite migrations have run (auth token lives in
@@ -224,8 +228,14 @@ pub fn run() {
                             addr = %info.addr,
                             "ws bridge listening",
                         );
+                        let port = info.addr.port();
                         let state = handle.state::<pairing::PairingState>();
-                        state.set(info.addr, info.token);
+                        state.set_bridge(info.addr, info.token);
+                        // Open a Cloudflare quick tunnel so the mobile
+                        // PWA can reach the loopback-bound bridge via
+                        // HTTPS. Failure is non-fatal — the Settings UI
+                        // surfaces the reason and falls back to LAN.
+                        tunnel::spawn(handle.clone(), port);
                     }
                     Err(error) => {
                         tracing::error!(target: "ws", %error, "ws bridge: init failed");

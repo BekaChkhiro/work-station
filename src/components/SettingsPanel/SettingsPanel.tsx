@@ -1520,12 +1520,20 @@ function AboutSection(): JSX.Element {
 
 /* ─── Mobile pairing ────────────────────────────────────────────────── */
 
+type TunnelState =
+  | { state: "disabled" }
+  | { state: "starting" }
+  | { state: "running"; url: string }
+  | { state: "failed"; reason: string }
+  | { state: "unavailable"; reason: string };
+
 interface PairingInfo {
   bound_host: string;
   bound_port: number;
   bound_to_loopback: boolean;
   lan_addresses: string[];
   token: string;
+  tunnel: TunnelState;
 }
 
 const MOBILE_ORIGIN_STORAGE_KEY = "ws.mobile.pairingOrigin";
@@ -1550,47 +1558,66 @@ function MobileSection(): JSX.Element {
     localStorage.setItem(MOBILE_ORIGIN_STORAGE_KEY, pwaOrigin().trim());
   });
 
-  async function load(): Promise<void> {
-    setLoading(true);
+  async function load(initial = false): Promise<void> {
+    if (initial) setLoading(true);
     setError(null);
     try {
       const result = await invoke<PairingInfo | null>("get_pairing_info");
       setInfo(result);
-      if (result) {
-        // Prefer the first LAN address; fall back to the bound host (only
-        // useful when the user bound to a specific IP via WS_HOST).
+      if (result && !chosenHost()) {
         const preferred = result.lan_addresses[0] ?? result.bound_host;
         setChosenHost(preferred);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (initial) setLoading(false);
     }
   }
 
   onMount(() => {
-    void load();
+    void load(true);
+    // Poll while the tunnel is starting — cloudflared takes 1-3s to
+    // publish the quick-tunnel URL, and the user is staring at the
+    // Settings panel waiting for the QR to render. Stop polling once
+    // the tunnel resolves (running / failed / unavailable).
+    const id = setInterval(() => {
+      const tunnel = info()?.tunnel?.state;
+      if (tunnel === "running" || tunnel === "failed" || tunnel === "unavailable") {
+        clearInterval(id);
+        return;
+      }
+      void load();
+    }, 1500);
+    onCleanup(() => clearInterval(id));
+  });
+
+  // The host encoded in the QR. Cloudflare quick tunnel (HTTPS, public)
+  // is strongly preferred — the PWA is served over HTTPS so a plain
+  // `http://<lan-ip>:<port>` would be blocked as mixed content. We
+  // fall back to LAN only when the tunnel is unavailable / failed and
+  // the user has manually opted into LAN mode by picking an address.
+  const effectiveHostUrl = createMemo<string | null>(() => {
+    const i = info();
+    if (!i) return null;
+    if (i.tunnel.state === "running") return i.tunnel.url;
+    const host = chosenHost();
+    if (!host) return null;
+    return `http://${host}:${i.bound_port}`;
   });
 
   const pairingUrl = createMemo<string | null>(() => {
     const i = info();
-    const host = chosenHost();
+    const hostUrl = effectiveHostUrl();
     const origin = pwaOrigin().trim().replace(/\/+$/, "");
-    if (!i || !host || !origin) return null;
-    const hostUrl = `http://${host}:${i.bound_port}`;
+    if (!i || !hostUrl || !origin) return null;
     const url = new URL(origin);
     url.searchParams.set("h", hostUrl);
     url.searchParams.set("t", i.token);
     return url.toString();
   });
 
-  const wsHostUrl = createMemo<string | null>(() => {
-    const i = info();
-    const host = chosenHost();
-    if (!i || !host) return null;
-    return `http://${host}:${i.bound_port}`;
-  });
+  const wsHostUrl = effectiveHostUrl;
 
   // Regenerate the QR whenever the URL changes. `errorCorrectionLevel: "M"`
   // is the sweet spot — still scans cleanly through a phone case, doesn't
@@ -1640,25 +1667,79 @@ function MobileSection(): JSX.Element {
           </div>
         </div>
 
-        <Show when={!loading() && info()?.bound_to_loopback}>
-          <div
-            class="ws-settings-page__row col"
-            style={{
-              border: "1px solid var(--warning)",
-              "border-radius": "8px",
-              padding: "12px",
-              background: "color-mix(in srgb, var(--warning) 8%, transparent)",
-            }}
-          >
-            <div style={{ color: "var(--warning)", "font-weight": 600 }}>
-              Bridge bound to {info()?.bound_host} — phones on the same Wi-Fi cannot reach it.
-            </div>
-            <div class="ws-settings-page__hint">
-              Restart Work Station with{" "}
-              <span style={{ "font-family": "var(--font-mono)" }}>WS_HOST=0.0.0.0</span> in the
-              environment so the WebSocket listener accepts LAN connections, then come back here.
-            </div>
-          </div>
+        <Show when={!loading() && info()}>
+          {(i) => {
+            const tunnel = () => i().tunnel;
+            return (
+              <Switch>
+                <Match when={tunnel().state === "running"}>
+                  <div
+                    class="ws-settings-page__row col"
+                    style={{
+                      border: "1px solid var(--success, #2ea043)",
+                      "border-radius": "8px",
+                      padding: "12px",
+                      background: "color-mix(in srgb, var(--success, #2ea043) 8%, transparent)",
+                    }}
+                  >
+                    <div style={{ color: "var(--success, #2ea043)", "font-weight": 600 }}>
+                      Cloudflare tunnel connected
+                    </div>
+                    <div
+                      class="ws-settings-page__hint"
+                      style={{ "font-family": "var(--font-mono)", "word-break": "break-all" }}
+                    >
+                      {tunnel().state === "running" ? (tunnel() as { url: string }).url : ""}
+                    </div>
+                  </div>
+                </Match>
+                <Match when={tunnel().state === "starting"}>
+                  <div class="ws-settings-page__hint">
+                    Opening Cloudflare quick tunnel… the QR will appear in a moment.
+                  </div>
+                </Match>
+                <Match when={tunnel().state === "unavailable"}>
+                  <div
+                    class="ws-settings-page__row col"
+                    style={{
+                      border: "1px solid var(--warning)",
+                      "border-radius": "8px",
+                      padding: "12px",
+                      background: "color-mix(in srgb, var(--warning) 8%, transparent)",
+                    }}
+                  >
+                    <div style={{ color: "var(--warning)", "font-weight": 600 }}>
+                      Cloudflare tunnel unavailable
+                    </div>
+                    <div class="ws-settings-page__hint">
+                      {(tunnel() as { reason: string }).reason}. Falling back to LAN — the phone
+                      must be on the same Wi-Fi <em>and</em> the PWA must be loaded over HTTP (not
+                      the public HTTPS origin) for the connection to succeed.
+                    </div>
+                  </div>
+                </Match>
+                <Match when={tunnel().state === "failed"}>
+                  <div
+                    class="ws-settings-page__row col"
+                    style={{
+                      border: "1px solid var(--error)",
+                      "border-radius": "8px",
+                      padding: "12px",
+                      background: "color-mix(in srgb, var(--error) 8%, transparent)",
+                    }}
+                  >
+                    <div style={{ color: "var(--error)", "font-weight": 600 }}>
+                      Cloudflare tunnel failed
+                    </div>
+                    <div class="ws-settings-page__hint">
+                      {(tunnel() as { reason: string }).reason}. Restart Work Station to retry, or
+                      use LAN fallback below.
+                    </div>
+                  </div>
+                </Match>
+              </Switch>
+            );
+          }}
         </Show>
 
         <Show when={loading()}>

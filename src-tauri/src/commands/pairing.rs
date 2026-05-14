@@ -5,21 +5,23 @@
 //!
 //!   * the WebSocket server's bound port,
 //!   * the bearer token,
-//!   * a list of LAN-reachable IPv4 addresses (skipping loopback /
-//!     link-local / virtual interfaces) so the user can pick the one
-//!     their phone shares a network with.
+//!   * a list of LAN-reachable IPv4 addresses (kept for the manual
+//!     fallback when the tunnel is unavailable),
+//!   * the Cloudflare quick-tunnel URL — preferred for the QR because
+//!     it's an HTTPS public endpoint the PWA can reach from any
+//!     network, no mixed-content blocks.
 //!
 //! When the server is bound to `127.0.0.1` (the default) the PWA on a
-//! phone cannot reach it — the UI surfaces `bound_to_loopback: true`
-//! so it can render a warning explaining `WS_HOST=0.0.0.0` or the
-//! `loopback-only` bind.
+//! phone cannot reach it over LAN — but the tunnel makes that
+//! irrelevant. The `bound_to_loopback` flag is still reported so the
+//! UI can flag any LAN-mode fallback.
 
 use std::net::IpAddr;
 
 use serde::Serialize;
 use tauri::State;
 
-use crate::pairing::PairingState;
+use crate::pairing::{PairingState, TunnelState};
 
 #[derive(Debug, Serialize)]
 pub struct PairingInfo {
@@ -31,11 +33,12 @@ pub struct PairingInfo {
     /// the same Wi-Fi cannot reach this address.
     pub bound_to_loopback: bool,
     /// All non-loopback IPv4 addresses on this machine. Useful when the
-    /// server binds to `0.0.0.0` and we need to pick one to encode in
-    /// the QR.
+    /// server binds to `0.0.0.0` and the tunnel is unavailable.
     pub lan_addresses: Vec<String>,
     /// The bearer token the PWA must present.
     pub token: String,
+    /// Current state of the Cloudflare quick tunnel.
+    pub tunnel: TunnelState,
 }
 
 #[tauri::command]
@@ -45,12 +48,14 @@ pub fn get_pairing_info(state: State<'_, PairingState>) -> Option<PairingInfo> {
     let bound_host = addr.ip().to_string();
     let bound_to_loopback = addr.ip().is_loopback();
     let lan_addresses = enumerate_lan_addresses();
+    let tunnel = state.tunnel();
     Some(PairingInfo {
         bound_host,
         bound_port: addr.port(),
         bound_to_loopback,
         lan_addresses,
         token,
+        tunnel,
     })
 }
 
