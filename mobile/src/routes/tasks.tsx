@@ -1,5 +1,6 @@
 import { useNavigate } from "@solidjs/router";
 import {
+  ErrorBoundary,
   For,
   Match,
   Show,
@@ -88,6 +89,34 @@ const COMPLEXITY_DOTS: Record<string, string> = {
 };
 
 export default function TasksRoute() {
+  return (
+    <ErrorBoundary
+      fallback={(err: unknown, reset: () => void) => (
+        <section class="flex min-h-[calc(100vh-128px)] flex-col px-4 pt-4">
+          <div class="border-error/40 bg-error/10 mt-4 flex flex-col gap-2 rounded-lg border p-4">
+            <p class="text-error text-sm font-medium">Tasks view crashed</p>
+            <pre class="text-fg-tertiary whitespace-pre-wrap break-words text-xs">
+              {err instanceof Error
+                ? `${err.name}: ${err.message}\n${err.stack ?? ""}`
+                : String(err)}
+            </pre>
+            <button
+              type="button"
+              onClick={reset}
+              class="text-error hover:bg-error/20 inline-flex h-8 w-fit items-center rounded-md px-3 text-xs font-medium transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </section>
+      )}
+    >
+      <TasksRouteInner />
+    </ErrorBoundary>
+  );
+}
+
+function TasksRouteInner() {
   const [activeProjectId, setActiveProjectIdSignal] = createSignal<string | null>(
     settingsStore.getActiveProjectId(),
   );
