@@ -22,6 +22,7 @@ mod menu;
 // `app_settings` and `push_subscriptions` tables) and registers itself
 // in a process-global `OnceLock` so the eventual T18.6 PlanFlow Tasks
 // bridge can call `push::notify(...)` without threading state.
+mod pairing;
 mod pty;
 mod push;
 mod shell_path;
@@ -89,6 +90,9 @@ pub fn run() {
         // open-file hash bookkeeping so we can spot external writes without
         // chasing spurious mtime events. Created eagerly, watcher lazily.
         .manage(commands::watch::FileWatchManager::new())
+        // Mobile-pairing state — populated once the WS bridge binds; read
+        // by `get_pairing_info` to render the Settings QR.
+        .manage(pairing::PairingState::default())
         .setup(|app| {
             if let Err(error) = menu::install(app) {
                 tracing::error!(target: "menu", %error, "native menu install failed");
@@ -214,12 +218,14 @@ pub fn run() {
                 };
 
                 match ws::init(&pool, manager, push_service, handle.clone(), planflow_state).await {
-                    Ok(addr) => {
+                    Ok(info) => {
                         tracing::info!(
                             target: "ws",
-                            %addr,
+                            addr = %info.addr,
                             "ws bridge listening",
                         );
+                        let state = handle.state::<pairing::PairingState>();
+                        state.set(info.addr, info.token);
                     }
                     Err(error) => {
                         tracing::error!(target: "ws", %error, "ws bridge: init failed");
@@ -267,6 +273,7 @@ pub fn run() {
             commands::push::push_notify_task_done,
             commands::push::push_notify_task_error,
             commands::push::push_status,
+            commands::pairing::get_pairing_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

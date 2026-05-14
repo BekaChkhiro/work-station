@@ -1,0 +1,19 @@
+{
+  "buildCommand": "pnpm run build",
+  "outputDirectory": ".output/public",
+  "framework": null,
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/_build/(.*)", "destination": "/_build/$1" },
+    {
+      "source": "/((?!_build|_server|sw\\.js|workbox-.*|favicon\\.svg|icon-.*\\.svg|manifest\\.webmanifest|robots\\.txt).*)",
+      "destination": "/"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/_build/assets/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "public, immutable, max-age=31536000" }]
+    }
+  ]
+}

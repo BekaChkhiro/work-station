@@ -7,6 +7,7 @@ pub mod files;
 pub mod fs;
 pub mod integration_queue;
 pub mod log;
+pub mod pairing;
 pub mod picker;
 pub mod project_links;
 pub mod projects;

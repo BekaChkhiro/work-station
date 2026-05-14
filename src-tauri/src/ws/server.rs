@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -150,7 +150,42 @@ pub(crate) fn router_with_monitor(
         router = router.merge(push_routes);
     }
 
-    router.with_state(state)
+    router
+        .with_state(state)
+        // PWA dev server runs on a different origin (e.g. http://localhost:3000)
+        // than the bridge (e.g. http://127.0.0.1:7420). Browsers block the
+        // auth probe's cross-origin fetch unless we advertise CORS. Permissive
+        // policy is fine here because the bridge is loopback-bound by default
+        // and gates every authenticated route behind a bearer token.
+        .layer(middleware::from_fn(cors_middleware))
+}
+
+/// Permissive CORS middleware: short-circuits `OPTIONS` preflights with a 204
+/// + the standard `Access-Control-*` headers, and stamps the same allow
+/// headers on every other response so the PWA's `fetch(/healthz)` and
+/// `fetch(/ws, { Authorization })` calls aren't blocked by the browser.
+async fn cors_middleware(req: Request, next: Next) -> Response {
+    if req.method() == Method::OPTIONS {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        apply_cors_headers(response.headers_mut());
+        return response;
+    }
+    let mut response = next.run(req).await;
+    apply_cors_headers(response.headers_mut());
+    response
+}
+
+fn apply_cors_headers(headers: &mut HeaderMap) {
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("Authorization, Content-Type"),
+    );
+    headers.insert("access-control-max-age", HeaderValue::from_static("600"));
 }
 
 /// Bearer-token middleware. Runs before extractors so a missing /

@@ -6,13 +6,17 @@ export default defineConfig({
   ssr: false,
   server: {
     preset: "static",
+    prerender: { crawlLinks: false, routes: [] },
   },
   vite: {
     plugins: [
       tailwindcss(),
       VitePWA({
-        registerType: "autoUpdate",
-        injectRegister: "auto",
+        // Prompt the user before activating the new SW — we surface a
+        // toast in <UpdateToast /> that calls updateSW() on tap. See
+        // virtual:pwa-register usage in src/components/UpdateToast.tsx.
+        registerType: "prompt",
+        injectRegister: false,
         devOptions: { enabled: true, type: "module" },
         workbox: {
           globPatterns: ["**/*.{js,css,html,svg,png,ico,webmanifest}"],

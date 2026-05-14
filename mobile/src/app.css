@@ -119,9 +119,15 @@ body {
   /* Disable pull-to-refresh + overscroll bounce — feels native for a
    * full-screen PWA workspace.
    */
-  overscroll-behavior-y: contain;
+  overscroll-behavior: contain;
   /* Prevent tap-highlight flash on iOS */
   -webkit-tap-highlight-color: transparent;
+  /* Chrome (header, tab bar, sheets) is non-selectable; text inside
+   * content nodes opts back in via `.selectable` or native <input>/<textarea>.
+   */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 button,
@@ -132,6 +138,18 @@ textarea {
   font-size: inherit;
   letter-spacing: inherit;
   color: inherit;
+  /* Skip the 300 ms touch delay and disable double-tap-to-zoom on
+   * controls. */
+  touch-action: manipulation;
+}
+
+input,
+textarea,
+[contenteditable],
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
 }
 
 /* Tabular numerals helper — mirrors desktop. */

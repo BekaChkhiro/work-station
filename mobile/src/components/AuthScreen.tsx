@@ -1,5 +1,6 @@
 import { Show, createSignal, type JSX } from "solid-js";
 import { authStore, connect } from "../lib/auth";
+import { ScanQrSheet } from "./ScanQrSheet";
 
 interface AuthScreenProps {
   /** Pre-fill the form — used by Settings to re-edit current credentials. */
@@ -16,6 +17,7 @@ interface AuthScreenProps {
 export function AuthScreen(props: AuthScreenProps) {
   const [host, setHost] = createSignal(props.initialHost ?? authStore.host());
   const [token, setToken] = createSignal(props.initialToken ?? authStore.token());
+  const [scanOpen, setScanOpen] = createSignal(false);
 
   const status = authStore.status;
   const busy = () => status().kind === "connecting";
@@ -39,9 +41,19 @@ export function AuthScreen(props: AuthScreenProps) {
         </div>
         <h1 class="text-xl font-semibold tracking-tight">Connect to Work Station</h1>
         <p class="max-w-xs text-sm text-fg-secondary">
-          Open the desktop app → Settings to copy the host URL and bearer token.
+          Scan the pairing QR from desktop Settings, or paste the host + token below.
         </p>
       </header>
+
+      <button
+        type="button"
+        onClick={() => setScanOpen(true)}
+        disabled={busy()}
+        class="flex min-h-[44px] items-center justify-center gap-2 rounded-lg border border-accent/60 bg-accent/10 px-3 text-sm font-semibold text-accent hover:bg-accent/15 disabled:opacity-60"
+      >
+        <ScanIcon />
+        Scan pairing QR
+      </button>
 
       <label class="flex flex-col gap-1.5">
         <span class="text-xs font-medium uppercase tracking-wider text-fg-tertiary">Host</span>
@@ -100,10 +112,56 @@ export function AuthScreen(props: AuthScreenProps) {
     </form>
   );
 
-  if (props.inline) return card;
+  const scanner = (
+    <Show when={scanOpen()}>
+      <ScanQrSheet
+        onClose={() => setScanOpen(false)}
+        onResult={(payload) => {
+          setHost(payload.host);
+          setToken(payload.token);
+          setScanOpen(false);
+          void connect(payload.host, payload.token);
+        }}
+      />
+    </Show>
+  );
+
+  if (props.inline) {
+    return (
+      <>
+        {card}
+        {scanner}
+      </>
+    );
+  }
 
   return (
-    <div class="flex min-h-screen items-center justify-center bg-canvas px-4 py-6">{card}</div>
+    <div class="flex min-h-screen items-center justify-center bg-canvas px-4 py-6">
+      {card}
+      {scanner}
+    </div>
+  );
+}
+
+function ScanIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+      <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+      <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+      <rect x="7" y="7" width="10" height="10" rx="1" />
+    </svg>
   );
 }
 

@@ -71,16 +71,29 @@ pub enum InitError {
 /// `app` is the Tauri [`AppHandle`] used by the projects/settings
 /// bridge (T18.4) to emit `active-project-changed` so the desktop
 /// frontend mirrors a PWA-driven project switch.
+/// Boot result — the bound address and the token string used by the
+/// `/ws` upgrade. The token is duplicated here (it also lives inside
+/// the running `AuthToken` shared with the server) so the QR-pairing
+/// command can render it without re-reading the SQLite row.
+pub struct BootInfo {
+    pub addr: SocketAddr,
+    pub token: String,
+}
+
 pub async fn init(
     pool: &SqlitePool,
     manager: PtyManager,
     push: Option<PushService>,
     app: AppHandle,
     planflow: Option<PlanflowState>,
-) -> Result<SocketAddr, InitError> {
+) -> Result<BootInfo, InitError> {
     let token = auth::load_or_create_token(pool).await?;
+    let token_string = token.as_str_public().to_string();
     let events: Arc<dyn projects_bridge::AppEvents> =
         Arc::new(projects_bridge::TauriAppEvents::new(app));
     let addr = server::spawn(token, manager, push, pool.clone(), events, planflow).await?;
-    Ok(addr)
+    Ok(BootInfo {
+        addr,
+        token: token_string,
+    })
 }

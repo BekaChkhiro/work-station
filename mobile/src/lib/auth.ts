@@ -14,6 +14,7 @@
 
 import { createSignal } from "solid-js";
 import { isServer } from "solid-js/web";
+import { configureBridge, tearDownBridge } from "../stores/wsBridge";
 
 export type ConnectionStatus =
   | { kind: "idle" }
@@ -84,6 +85,7 @@ export function signOut(): void {
   setHost(DEFAULT_HOST);
   setToken("");
   setStatus({ kind: "idle" });
+  tearDownBridge();
 }
 
 /**
@@ -207,6 +209,12 @@ export async function connect(
   persist({ host: origin, token: trimmedToken });
   setHost(origin);
   setToken(trimmedToken);
+  // Hand the verified credentials to the WS bridge so every route
+  // (Terminal, Tasks, Chat, Projects, Monitor) sees a live socket the
+  // moment the user lands on the shell. Without this, routes would
+  // keep returning `null` from `getBridge()` and show "Reconnecting…"
+  // forever even though auth succeeded.
+  configureBridge(origin, trimmedToken);
   return finalise({ kind: "connected" });
 }
 

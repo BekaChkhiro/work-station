@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vinxi dev --port 3000",
-    "build": "vinxi build",
+    "build": "vinxi build && node scripts/postbuild.mjs",
     "start": "vinxi start",
     "typecheck": "tsc --noEmit"
   },
@@ -17,13 +17,15 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
+    "jsqr": "^1.4.0",
     "solid-js": "1.9.12",
     "tailwindcss": "^4.2.4",
     "vinxi": "^0.5.3"
   },
   "devDependencies": {
     "typescript": "^5.7.2",
-    "vite-plugin-pwa": "^0.21.1"
+    "vite-plugin-pwa": "^0.21.1",
+    "workbox-window": "^7.4.1"
   },
   "engines": {
     "node": ">=20"

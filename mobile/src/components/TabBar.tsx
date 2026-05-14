@@ -47,7 +47,7 @@ export function TabBar() {
 
   return (
     <nav
-      class="fixed inset-x-0 bottom-0 z-50 border-t border-neutral-800 bg-neutral-950/95 backdrop-blur"
+      class="fixed inset-x-0 bottom-0 z-50 border-t border-border-default bg-canvas/95 backdrop-blur"
       style={{ "padding-bottom": "env(safe-area-inset-bottom)" }}
       aria-label="Primary"
     >
@@ -66,7 +66,7 @@ export function TabBar() {
                   aria-current={active() ? "page" : undefined}
                   aria-label={tab.label}
                   class={`flex h-[56px] w-full min-h-[44px] flex-col items-center justify-center gap-0.5 text-[11px] font-medium outline-none transition-colors ${
-                    active() ? "text-cyan-400" : "text-neutral-500 hover:text-neutral-300"
+                    active() ? "text-accent" : "text-fg-tertiary hover:text-fg-secondary"
                   }`}
                 >
                   <span
@@ -80,7 +80,7 @@ export function TabBar() {
                   <span>{tab.label}</span>
                   <span
                     class={`mt-0.5 h-0.5 w-6 rounded-full transition-colors ${
-                      active() ? "bg-cyan-400" : "bg-transparent"
+                      active() ? "bg-accent" : "bg-transparent"
                     }`}
                     aria-hidden="true"
                   />

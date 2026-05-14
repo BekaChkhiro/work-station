@@ -62,6 +62,13 @@ impl AuthToken {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Public read accessor used by the QR-pairing command to render the
+    /// bearer the PWA must present. Not const-time — callers don't
+    /// compare strings, they encode them.
+    pub fn as_str_public(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Load the token from `app_settings`, generating + persisting a fresh

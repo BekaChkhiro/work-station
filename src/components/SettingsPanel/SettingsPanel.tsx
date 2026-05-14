@@ -26,6 +26,8 @@ import {
 import type { JSX } from "solid-js";
 
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
+import QRCode from "qrcode";
 
 import {
   bindingsEqual,
@@ -97,7 +99,15 @@ export interface SettingsPanelProps {
   onClose: () => void;
 }
 
-type SectionId = "general" | "appearance" | "keys" | "clis" | "integrations" | "privacy" | "about";
+type SectionId =
+  | "general"
+  | "appearance"
+  | "keys"
+  | "clis"
+  | "integrations"
+  | "mobile"
+  | "privacy"
+  | "about";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "general", label: "General" },
@@ -105,6 +115,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "keys", label: "Keybindings" },
   { id: "clis", label: "CLIs" },
   { id: "integrations", label: "Integrations" },
+  { id: "mobile", label: "Mobile pairing" },
   { id: "privacy", label: "Privacy" },
   { id: "about", label: "About" },
 ];
@@ -190,6 +201,9 @@ export function SettingsPanel(props: SettingsPanelProps): JSX.Element {
                   </Match>
                   <Match when={section() === "integrations"}>
                     <IntegrationsSection />
+                  </Match>
+                  <Match when={section() === "mobile"}>
+                    <MobileSection />
                   </Match>
                   <Match when={section() === "privacy"}>
                     <PrivacySection />
@@ -1499,6 +1513,358 @@ function AboutSection(): JSX.Element {
         <div class="ws-settings-page__row col">
           <div class="ws-settings-page__hint">MIT licensed. Source available on GitHub.</div>
         </div>
+      </div>
+    </>
+  );
+}
+
+/* ─── Mobile pairing ────────────────────────────────────────────────── */
+
+interface PairingInfo {
+  bound_host: string;
+  bound_port: number;
+  bound_to_loopback: boolean;
+  lan_addresses: string[];
+  token: string;
+}
+
+const MOBILE_ORIGIN_STORAGE_KEY = "ws.mobile.pairingOrigin";
+const DEFAULT_MOBILE_ORIGIN = "https://mobile-iota-sand.vercel.app";
+
+function MobileSection(): JSX.Element {
+  const [info, setInfo] = createSignal<PairingInfo | null>(null);
+  const [loading, setLoading] = createSignal(true);
+  const [error, setError] = createSignal<string | null>(null);
+  const [pwaOrigin, setPwaOrigin] = createSignal<string>(
+    (typeof localStorage !== "undefined" && localStorage.getItem(MOBILE_ORIGIN_STORAGE_KEY)) ||
+      DEFAULT_MOBILE_ORIGIN,
+  );
+  const [chosenHost, setChosenHost] = createSignal<string | null>(null);
+  const [qrDataUrl, setQrDataUrl] = createSignal<string | null>(null);
+  const [revealToken, setRevealToken] = createSignal(false);
+  const [copied, setCopied] = createSignal<"url" | "host" | "token" | null>(null);
+
+  // Persist the PWA origin so the user only types it once.
+  createEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(MOBILE_ORIGIN_STORAGE_KEY, pwaOrigin().trim());
+  });
+
+  async function load(): Promise<void> {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await invoke<PairingInfo | null>("get_pairing_info");
+      setInfo(result);
+      if (result) {
+        // Prefer the first LAN address; fall back to the bound host (only
+        // useful when the user bound to a specific IP via WS_HOST).
+        const preferred = result.lan_addresses[0] ?? result.bound_host;
+        setChosenHost(preferred);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  onMount(() => {
+    void load();
+  });
+
+  const pairingUrl = createMemo<string | null>(() => {
+    const i = info();
+    const host = chosenHost();
+    const origin = pwaOrigin().trim().replace(/\/+$/, "");
+    if (!i || !host || !origin) return null;
+    const hostUrl = `http://${host}:${i.bound_port}`;
+    const url = new URL(origin);
+    url.searchParams.set("h", hostUrl);
+    url.searchParams.set("t", i.token);
+    return url.toString();
+  });
+
+  const wsHostUrl = createMemo<string | null>(() => {
+    const i = info();
+    const host = chosenHost();
+    if (!i || !host) return null;
+    return `http://${host}:${i.bound_port}`;
+  });
+
+  // Regenerate the QR whenever the URL changes. `errorCorrectionLevel: "M"`
+  // is the sweet spot — still scans cleanly through a phone case, doesn't
+  // blow up the QR density for the ~120 char payload.
+  createEffect(() => {
+    const url = pairingUrl();
+    if (!url) {
+      setQrDataUrl(null);
+      return;
+    }
+    void QRCode.toDataURL(url, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: 320,
+      color: { dark: "#0a0a0a", light: "#ffffff" },
+    })
+      .then(setQrDataUrl)
+      .catch((err: unknown) => {
+        console.error("[pairing] qr render failed", err);
+        setQrDataUrl(null);
+      });
+  });
+
+  async function copy(value: string, what: "url" | "host" | "token"): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(what);
+      setTimeout(() => setCopied((cur) => (cur === what ? null : cur)), 1500);
+    } catch (err) {
+      console.error("[pairing] clipboard write failed", err);
+    }
+  }
+
+  return (
+    <>
+      <h2 class="ws-settings-page__section-title">Mobile pairing</h2>
+      <div class="ws-settings-page__group">
+        <div class="ws-settings-page__row col">
+          <div>
+            <div class="ws-settings-page__lbl">Pair the companion PWA</div>
+            <div class="ws-settings-page__hint">
+              Scan this QR with the phone running{" "}
+              <span style={{ "font-family": "var(--font-mono)" }}>{pwaOrigin()}</span> — either with
+              the camera app (opens the PWA pre-filled) or with the in-app <em>Scan pairing QR</em>{" "}
+              button on the auth screen. The token never leaves your LAN.
+            </div>
+          </div>
+        </div>
+
+        <Show when={!loading() && info()?.bound_to_loopback}>
+          <div
+            class="ws-settings-page__row col"
+            style={{
+              border: "1px solid var(--warning)",
+              "border-radius": "8px",
+              padding: "12px",
+              background: "color-mix(in srgb, var(--warning) 8%, transparent)",
+            }}
+          >
+            <div style={{ color: "var(--warning)", "font-weight": 600 }}>
+              Bridge bound to {info()?.bound_host} — phones on the same Wi-Fi cannot reach it.
+            </div>
+            <div class="ws-settings-page__hint">
+              Restart Work Station with{" "}
+              <span style={{ "font-family": "var(--font-mono)" }}>WS_HOST=0.0.0.0</span> in the
+              environment so the WebSocket listener accepts LAN connections, then come back here.
+            </div>
+          </div>
+        </Show>
+
+        <Show when={loading()}>
+          <div class="ws-settings-page__hint">Loading pairing info…</div>
+        </Show>
+        <Show when={error()}>
+          <div class="ws-settings-page__hint" style={{ color: "var(--error)" }}>
+            Couldn’t read pairing info: {error()}
+          </div>
+        </Show>
+
+        <Show when={!loading() && !error() && !info()}>
+          <div
+            class="ws-settings-page__row col"
+            style={{
+              border: "1px solid var(--error)",
+              "border-radius": "8px",
+              padding: "12px",
+              background: "color-mix(in srgb, var(--error) 8%, transparent)",
+            }}
+          >
+            <div style={{ color: "var(--error)", "font-weight": 600 }}>
+              The WebSocket bridge isn’t running on this instance.
+            </div>
+            <div class="ws-settings-page__hint">
+              Another Work Station process is probably holding port 7420 (the installed app is the
+              most common culprit). Quit any extra copies, then restart this one. Check the dev
+              console for{" "}
+              <span style={{ "font-family": "var(--font-mono)" }}>ws bridge: init failed</span> to
+              confirm.
+            </div>
+            <button
+              type="button"
+              class="ws-settings-page__btn ws-settings-page__btn--ghost"
+              style={{ "align-self": "flex-start", "margin-top": "8px" }}
+              onClick={() => void load()}
+            >
+              Retry
+            </button>
+          </div>
+        </Show>
+
+        <Show when={!loading() && info()}>
+          {(i) => (
+            <>
+              <div class="ws-settings-page__row col">
+                <div class="ws-settings-page__lbl">PWA origin</div>
+                <input
+                  class="ws-settings-page__input"
+                  type="url"
+                  value={pwaOrigin()}
+                  spellcheck={false}
+                  autocapitalize="none"
+                  onInput={(e) => setPwaOrigin(e.currentTarget.value)}
+                  placeholder="https://mobile-iota-sand.vercel.app"
+                />
+                <div class="ws-settings-page__hint">
+                  Where the mobile PWA is hosted. Default is the public Vercel build.
+                </div>
+              </div>
+
+              <Show when={i().lan_addresses.length > 1}>
+                <div class="ws-settings-page__row col">
+                  <div class="ws-settings-page__lbl">LAN address</div>
+                  <div class="ws-settings-page__seg" role="radiogroup">
+                    <For each={i().lan_addresses}>
+                      {(addr) => (
+                        <button
+                          type="button"
+                          class="ws-settings-page__seg-btn"
+                          role="radio"
+                          aria-checked={chosenHost() === addr}
+                          data-on={chosenHost() === addr ? "true" : undefined}
+                          onClick={() => setChosenHost(addr)}
+                          style={{ "font-family": "var(--font-mono)" }}
+                        >
+                          {addr}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <div class="ws-settings-page__hint">
+                    Pick the interface your phone shares — usually the one matching your Wi-Fi
+                    router subnet.
+                  </div>
+                </div>
+              </Show>
+
+              <div
+                class="ws-settings-page__row"
+                style={{ "justify-content": "center", padding: "16px 0" }}
+              >
+                <Show
+                  when={qrDataUrl()}
+                  fallback={
+                    <div
+                      style={{
+                        width: "240px",
+                        height: "240px",
+                        display: "flex",
+                        "align-items": "center",
+                        "justify-content": "center",
+                        background: "var(--bg-elevated)",
+                        "border-radius": "12px",
+                        color: "var(--text-tertiary)",
+                        "font-size": "12px",
+                      }}
+                    >
+                      {pairingUrl() ? "Rendering QR…" : "Enter a PWA origin first"}
+                    </div>
+                  }
+                >
+                  {(src) => (
+                    <img
+                      src={src()}
+                      alt="Pairing QR code"
+                      width="240"
+                      height="240"
+                      style={{ "border-radius": "12px", background: "#fff" }}
+                    />
+                  )}
+                </Show>
+              </div>
+
+              <div class="ws-settings-page__row col">
+                <div class="ws-settings-page__lbl">Pairing link</div>
+                <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+                  <input
+                    class="ws-settings-page__input"
+                    readonly
+                    value={pairingUrl() ?? ""}
+                    spellcheck={false}
+                    style={{ "font-family": "var(--font-mono)", flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn ws-settings-page__btn--ghost"
+                    onClick={() => {
+                      const url = pairingUrl();
+                      if (url) void copy(url, "url");
+                    }}
+                  >
+                    {copied() === "url" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <div class="ws-settings-page__hint">
+                  Tap this on the phone too — the PWA auto-pairs from the query string.
+                </div>
+              </div>
+
+              <div class="ws-settings-page__row col">
+                <div class="ws-settings-page__lbl">Host (manual entry)</div>
+                <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+                  <input
+                    class="ws-settings-page__input"
+                    readonly
+                    value={wsHostUrl() ?? ""}
+                    spellcheck={false}
+                    style={{ "font-family": "var(--font-mono)", flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn ws-settings-page__btn--ghost"
+                    onClick={() => {
+                      const h = wsHostUrl();
+                      if (h) void copy(h, "host");
+                    }}
+                  >
+                    {copied() === "host" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+
+              <div class="ws-settings-page__row col">
+                <div class="ws-settings-page__lbl">Bearer token</div>
+                <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+                  <input
+                    class="ws-settings-page__input"
+                    readonly
+                    value={revealToken() ? i().token : "•".repeat(43)}
+                    spellcheck={false}
+                    style={{ "font-family": "var(--font-mono)", flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn ws-settings-page__btn--ghost"
+                    onClick={() => setRevealToken((v) => !v)}
+                  >
+                    {revealToken() ? "Hide" : "Show"}
+                  </button>
+                  <button
+                    type="button"
+                    class="ws-settings-page__btn ws-settings-page__btn--ghost"
+                    onClick={() => void copy(i().token, "token")}
+                  >
+                    {copied() === "token" ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <div class="ws-settings-page__hint">
+                  Anyone with this token can drive your terminals. Keep it on your phone, not in
+                  chats / screenshots.
+                </div>
+              </div>
+            </>
+          )}
+        </Show>
       </div>
     </>
   );

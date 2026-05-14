@@ -1,6 +1,6 @@
 [package]
 name = "work-station"
-version = "0.1.0"
+version = "0.1.1"
 description = "Work Station — desktop hub for managing CLI agent terminal sessions across projects."
 authors = ["Work Station maintainers"]
 edition = "2021"
@@ -78,6 +78,11 @@ futures-util = "=0.3.31"
 # (CPU + memory) so the 2-second poll stays cheap and the binary size
 # doesn't drift for one bridge.
 sysinfo = { version = "=0.39.1", default-features = false, features = ["system"] }
+
+# Mobile pairing (QR) — enumerate the host's LAN-reachable interfaces so
+# the Settings panel can render a QR with an IP the phone can actually
+# hit, instead of `127.0.0.1`.
+local-ip-address = "=0.6.5"
 
 # T18.19 — Web Push notifications. `web-push` brings the JWT/VAPID
 # signing, AES-128-GCM payload encryption, and an isahc-backed HTTP

@@ -5,3 +5,4 @@ dist
 .solid
 .DS_Store
 *.log
+.vercel
