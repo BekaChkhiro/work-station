@@ -76,8 +76,13 @@ jobs:
       # regex.
       - name: cargo llvm-cov (pty/, ≥80% lines)
         run: |
+          # Exclude every non-pty source file. As new top-level modules
+          # land (push/, ws/, tunnel.rs, pairing.rs, …) add them here
+          # so the gate stays scoped to pty/ and reflects the workflow
+          # name. cargo-llvm-cov's regex engine (rust-regex) does not
+          # support lookarounds, hence the explicit alternation.
           cargo llvm-cov \
             --lib \
             --no-fail-fast \
-            --ignore-filename-regex '(cli/|commands/(cli|clipboard|credentials|files|fs|integration_queue|log|mod|picker|project_links|projects|watch)\.rs|db/|ipc/|lib\.rs|logging\.rs|main\.rs|menu/|credentials/|http/|shell_path\.rs)' \
+            --ignore-filename-regex '(cli/|commands/(cli|clipboard|credentials|files|fs|integration_queue|log|mod|pairing|picker|project_links|projects|push|watch)\.rs|credentials/|db/|http/|ipc/|lib\.rs|logging\.rs|main\.rs|menu/|pairing\.rs|push/|shell_path\.rs|tunnel\.rs|ws/)' \
             --fail-under-lines 80
