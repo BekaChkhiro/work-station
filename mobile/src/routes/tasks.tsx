@@ -139,11 +139,19 @@ function TasksRouteInner() {
     },
   );
 
+  // `projects()` throws when the resource is in the error state — wrap
+  // every read site so the route never crashes its ErrorBoundary on a
+  // PlanFlow failure (the UI surfaces the error inline instead).
+  const projectsList = createMemo<Project[]>(() => {
+    if (projects.error) return [];
+    return projects() ?? [];
+  });
+
   // Clear stored project if it disappears from the user's projects list.
   createEffect(() => {
-    const list = projects();
+    const list = projectsList();
     const pid = activeProjectId();
-    if (!list || pid == null) return;
+    if (pid == null) return;
     if (list.length === 0) return;
     if (!list.some((p) => p.id === pid)) {
       settingsStore.setActiveProjectId(null);
@@ -151,10 +159,15 @@ function TasksRouteInner() {
     }
   });
 
+  const tasksList = createMemo<Task[]>(() => {
+    if (tasks.error) return [];
+    return tasks() ?? [];
+  });
+
   const grouped = createMemo(() => {
     const map = new Map<TaskStatus, Task[]>();
     for (const g of STATUS_GROUPS) map.set(g.key, []);
-    for (const t of tasks() ?? []) {
+    for (const t of tasksList()) {
       const bucket = map.get(t.status) ?? [];
       bucket.push(t);
       map.set(t.status, bucket);
@@ -182,7 +195,7 @@ function TasksRouteInner() {
               <Match when={bridgeState() !== "open"}>Reconnecting to desktop…</Match>
               <Match when={!activeProjectId()}>Pick a project.</Match>
               <Match when={tasks.loading}>Loading…</Match>
-              <Match when={true}>{(tasks()?.length ?? 0).toString()} tasks</Match>
+              <Match when={true}>{tasksList().length.toString()} tasks</Match>
             </Switch>
           </p>
         </div>
@@ -205,7 +218,7 @@ function TasksRouteInner() {
         </Match>
         <Match when={!activeProjectId()}>
           <ProjectPicker
-            projects={projects() ?? []}
+            projects={projectsList()}
             loading={projects.loading}
             error={projects.error as unknown}
             onPick={applyActiveProject}
@@ -219,7 +232,7 @@ function TasksRouteInner() {
               grouped={grouped}
               activeProjectId={activeProjectId() ?? ""}
               projectName={
-                (projects() ?? []).find((p) => p.id === activeProjectId())?.name ?? "Project"
+                projectsList().find((p) => p.id === activeProjectId())?.name ?? "Project"
               }
               client={client}
               onSwitchProject={() => applyActiveProject(null)}
@@ -324,6 +337,15 @@ function TaskListBody(props: TaskListBodyProps) {
   const [search, setSearch] = createSignal("");
   const [selected, setSelected] = createSignal<Task | null>(null);
 
+  // `props.tasks()` throws when the resource is in the error state.
+  // Reading it inside JSX would crash the route — collapse to a
+  // bucket-sum count derived from the safe `grouped()` accessor.
+  const safeTaskCount = createMemo(() => {
+    let total = 0;
+    for (const list of props.grouped().values()) total += list.length;
+    return total;
+  });
+
   function toggle(status: TaskStatus) {
     setCollapsed((prev) => ({ ...prev, [status]: !prev[status] }));
   }
@@ -366,7 +388,7 @@ function TaskListBody(props: TaskListBodyProps) {
         <ErrorBanner error={props.tasks.error} onRetry={props.onTaskMutated} />
       </Show>
 
-      <Show when={props.tasks.loading && !props.tasks()?.length}>
+      <Show when={props.tasks.loading && safeTaskCount() === 0}>
         <Skeleton rows={6} />
       </Show>
 
@@ -409,7 +431,7 @@ function TaskListBody(props: TaskListBodyProps) {
         <Show
           when={
             !props.tasks.loading &&
-            (props.tasks()?.length ?? 0) > 0 &&
+            safeTaskCount() > 0 &&
             Array.from(filteredGrouped().values()).every((v) => v.length === 0)
           }
         >
@@ -417,7 +439,7 @@ function TaskListBody(props: TaskListBodyProps) {
             No tasks match "{search()}".
           </li>
         </Show>
-        <Show when={!props.tasks.loading && (props.tasks()?.length ?? 0) === 0}>
+        <Show when={!props.tasks.loading && safeTaskCount() === 0}>
           <li class="text-fg-tertiary px-2 py-8 text-center text-sm">
             No tasks yet — open this project on{" "}
             <a

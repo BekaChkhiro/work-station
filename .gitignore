@@ -42,3 +42,4 @@ logs/
 *.pem
 .cache/
 .planflow/worktrees.json
+.vercel

@@ -137,11 +137,53 @@ pub async fn handle_list_projects(
     id: Option<String>,
     organization_id: Option<String>,
 ) {
-    let query: Vec<(&str, String)> = match organization_id {
-        Some(org) if !org.is_empty() => vec![("organizationId", org)],
-        _ => Vec::new(),
+    // PlanFlow's `/projects` requires `organizationId`. The desktop
+    // client handles this by listing organizations first and using the
+    // first one's id (see `src/integrations/planflow/client.ts`). The
+    // mobile PWA has no UI to pick orgs, so we mirror that fallback
+    // here: when the caller didn't pass one, resolve it on the fly.
+    let resolved_org = match organization_id {
+        Some(org) if !org.is_empty() => Some(org),
+        _ => match resolve_first_org_id(state).await {
+            Ok(Some(org)) => Some(org),
+            Ok(None) => {
+                send_error(
+                    out_tx,
+                    id,
+                    "invalid_args",
+                    "PlanFlow account has no organizations",
+                    None,
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                send_proxy_error(out_tx, id, error).await;
+                return;
+            }
+        },
+    };
+    let query: Vec<(&str, String)> = match resolved_org {
+        Some(org) => vec![("organizationId", org)],
+        None => Vec::new(),
     };
     proxy_get(state, out_tx, id, "/projects", &query).await;
+}
+
+/// Hit `/organizations` and pick the first id, matching the desktop
+/// client's auto-pick behaviour (see `src/integrations/planflow/client.ts`).
+/// Returns `Ok(None)` for accounts with zero organizations so the
+/// caller can surface a friendly error.
+async fn resolve_first_org_id(state: &PlanflowState) -> Result<Option<String>, ProxyError> {
+    let value = proxy_request(state, http::Method::Get, "/organizations", None).await?;
+    let orgs = value
+        .get("organizations")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(orgs
+        .into_iter()
+        .find_map(|o| o.get("id").and_then(|v| v.as_str()).map(str::to_owned)))
 }
 
 pub async fn handle_list_tasks(
