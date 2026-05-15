@@ -15,7 +15,11 @@
 //! / `pty_kill` / `pty_scrollback` / `pty_subscribe` / `pty_unsubscribe`
 //! now run real shells in the cloud-agent's process, with the same
 //! base64-on-the-wire shape and error taxonomy the desktop bridge uses
-//! so a single PWA branch table covers both backends.
+//! so a single PWA branch table covers both backends. T19.27 wires
+//! `fs_list` / `fs_read` / `fs_write` / `fs_delete` against the
+//! cloud-agent's project-root allow-list — every path is canonicalised
+//! against the project's `path` from SQLite, so a client can never
+//! escape into the rest of the VPS filesystem.
 //!
 //! The error taxonomy mirrors the desktop bridge so the PWA / desktop
 //! client doesn't need a second branch table:
@@ -33,6 +37,8 @@
 //!     `write_failed` / `write_to_closed` / `resize_failed` /
 //!     `reader_panic` — PTY-specific failures bubbled up from
 //!     `workstation_core::pty`.
+//!   * `out_of_scope` / `not_a_directory` / `too_large` — FS-specific
+//!     failures from the path-jail or size limits in [`crate::fs`].
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,6 +57,7 @@ use workstation_core::ws::protocol::{
 };
 
 use crate::db::{app_settings, projects};
+use crate::fs::{self as cfs, FsError};
 
 /// Capacity for the per-connection outbound mpsc.
 ///
@@ -216,19 +223,21 @@ async fn handle_text(conn: &mut Connection, pool: &SqlitePool, payload: &str) {
     let typed = match type_str.as_str() {
         "settings_get" | "projects_list" | "project_get" | "project_switch" | "pty_spawn"
         | "pty_write" | "pty_resize" | "pty_kill" | "pty_scrollback" | "pty_subscribe"
-        | "pty_unsubscribe" => match serde_json::from_value::<ClientMessage>(value) {
-            Ok(msg) => msg,
-            Err(error) => {
-                send_error(
-                    &conn.out_tx,
-                    echo_id,
-                    "invalid_json",
-                    format!("failed to parse client message: {error}"),
-                )
-                .await;
-                return;
+        | "pty_unsubscribe" | "fs_list" | "fs_read" | "fs_write" | "fs_delete" => {
+            match serde_json::from_value::<ClientMessage>(value) {
+                Ok(msg) => msg,
+                Err(error) => {
+                    send_error(
+                        &conn.out_tx,
+                        echo_id,
+                        "invalid_json",
+                        format!("failed to parse client message: {error}"),
+                    )
+                    .await;
+                    return;
+                }
             }
-        },
+        }
         other => {
             send_error(
                 &conn.out_tx,
@@ -249,6 +258,12 @@ async fn handle_text(conn: &mut Connection, pool: &SqlitePool, payload: &str) {
 /// balloon a single function past clippy's `too_many_lines` cap, and
 /// so unit tests can drive a handler from a synthetic typed message
 /// without re-serialising it through `handle_text`.
+///
+/// Each per-variant arm is intentionally a one-line forward to a
+/// dedicated handler, so growing past the default lint cap is the
+/// expected shape — splitting further would add ceremony without
+/// shrinking any individual arm.
+#[allow(clippy::too_many_lines)]
 async fn dispatch_typed(conn: &mut Connection, pool: &SqlitePool, typed: ClientMessage) {
     match typed {
         ClientMessage::SettingsGet { id } => {
@@ -314,6 +329,54 @@ async fn dispatch_typed(conn: &mut Connection, pool: &SqlitePool, typed: ClientM
             conn.unsubscribe(session_id);
             send(&conn.out_tx, &ServerMessage::PtyAck { id }).await;
         }
+        ClientMessage::FsList {
+            id,
+            project_id,
+            relative_path,
+            respect_gitignore,
+        } => {
+            handle_fs_list(
+                &conn.out_tx,
+                pool,
+                id,
+                project_id,
+                relative_path.unwrap_or_default(),
+                respect_gitignore.unwrap_or(true),
+            )
+            .await;
+        }
+        ClientMessage::FsRead {
+            id,
+            project_id,
+            relative_path,
+        } => {
+            handle_fs_read(&conn.out_tx, pool, id, project_id, relative_path).await;
+        }
+        ClientMessage::FsWrite {
+            id,
+            project_id,
+            relative_path,
+            content,
+            encoding,
+        } => {
+            handle_fs_write(
+                &conn.out_tx,
+                pool,
+                id,
+                project_id,
+                relative_path,
+                content,
+                encoding.unwrap_or_else(|| "utf-8".to_string()),
+            )
+            .await;
+        }
+        ClientMessage::FsDelete {
+            id,
+            project_id,
+            relative_path,
+        } => {
+            handle_fs_delete(&conn.out_tx, pool, id, project_id, relative_path).await;
+        }
         // Variants not in the typed-allowlist filter inside
         // [`handle_text`] are routed to `unimplemented` before reaching
         // this match, so the remaining arms are unreachable in practice.
@@ -330,11 +393,7 @@ async fn dispatch_typed(conn: &mut Connection, pool: &SqlitePool, typed: ClientM
 }
 
 /// DB-backed `settings_get` reply (T19.25).
-async fn handle_settings_get(
-    out_tx: &mpsc::Sender<String>,
-    pool: &SqlitePool,
-    id: Option<String>,
-) {
+async fn handle_settings_get(out_tx: &mpsc::Sender<String>, pool: &SqlitePool, id: Option<String>) {
     let theme = app_settings::get_json::<String>(pool, app_settings::THEME_KEY)
         .await
         .ok()
@@ -362,8 +421,8 @@ async fn handle_projects_list(
 ) {
     match projects::list(pool).await {
         Ok(rows) => {
-            let projects = serde_json::to_value(rows)
-                .expect("Project list always serializes to JSON");
+            let projects =
+                serde_json::to_value(rows).expect("Project list always serializes to JSON");
             send(out_tx, &ServerMessage::ProjectsListResult { id, projects }).await;
         }
         Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
@@ -378,8 +437,7 @@ async fn handle_project_get(
 ) {
     match projects::get(pool, &project_id).await {
         Ok(project) => {
-            let project =
-                serde_json::to_value(project).expect("Project always serializes to JSON");
+            let project = serde_json::to_value(project).expect("Project always serializes to JSON");
             send(out_tx, &ServerMessage::ProjectResult { id, project }).await;
         }
         Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
@@ -580,8 +638,7 @@ async fn handle_resize(
         return;
     }
     let manager = conn.manager.clone();
-    let result =
-        tokio::task::spawn_blocking(move || manager.resize(session_id, cols, rows)).await;
+    let result = tokio::task::spawn_blocking(move || manager.resize(session_id, cols, rows)).await;
     match result {
         Ok(Ok(())) => send(&conn.out_tx, &ServerMessage::PtyAck { id }).await,
         Ok(Err(error)) => {
@@ -687,6 +744,177 @@ async fn handle_scrollback(
     }
 }
 
+/// Resolve a project's root path for an FS request. Returns the
+/// generic `Error` frame the dispatcher should send back when the
+/// project lookup fails, so the four FS handlers below share one
+/// error path. Bundling the error construction here keeps the
+/// project-lookup → path-jail wiring tight: a single mistake in any
+/// handler can't accidentally bypass the allow-list.
+async fn resolve_project_root(
+    pool: &SqlitePool,
+    id: Option<&str>,
+    project_id: &str,
+) -> Result<PathBuf, ServerMessage> {
+    match projects::get(pool, project_id).await {
+        Ok(p) => Ok(PathBuf::from(p.path)),
+        Err(error) => Err(project_error_to_frame(id.map(str::to_owned), &error)),
+    }
+}
+
+fn fs_error_to_frame(id: Option<String>, error: &FsError) -> ServerMessage {
+    ServerMessage::Error {
+        id,
+        kind: error.kind().to_string(),
+        message: error.to_string(),
+    }
+}
+
+async fn handle_fs_list(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    relative_path: String,
+    respect_gitignore: bool,
+) {
+    let root = match resolve_project_root(pool, id.as_deref(), &project_id).await {
+        Ok(p) => p,
+        Err(frame) => {
+            send(out_tx, &frame).await;
+            return;
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        cfs::list_dir(&root, &relative_path, respect_gitignore)
+    })
+    .await;
+    match result {
+        Ok(Ok(entries)) => send(out_tx, &ServerMessage::FsListResult { id, entries }).await,
+        Ok(Err(error)) => send(out_tx, &fs_error_to_frame(id, &error)).await,
+        Err(join_err) => {
+            send(
+                out_tx,
+                &ServerMessage::Error {
+                    id,
+                    kind: "internal".into(),
+                    message: format!("fs_list task failed: {join_err}"),
+                },
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_fs_read(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    relative_path: String,
+) {
+    let root = match resolve_project_root(pool, id.as_deref(), &project_id).await {
+        Ok(p) => p,
+        Err(frame) => {
+            send(out_tx, &frame).await;
+            return;
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || cfs::read_file(&root, &relative_path)).await;
+    match result {
+        Ok(Ok(outcome)) => {
+            send(
+                out_tx,
+                &ServerMessage::FsReadResult {
+                    id,
+                    result: outcome,
+                },
+            )
+            .await;
+        }
+        Ok(Err(error)) => send(out_tx, &fs_error_to_frame(id, &error)).await,
+        Err(join_err) => {
+            send(
+                out_tx,
+                &ServerMessage::Error {
+                    id,
+                    kind: "internal".into(),
+                    message: format!("fs_read task failed: {join_err}"),
+                },
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_fs_write(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    relative_path: String,
+    content: String,
+    encoding: String,
+) {
+    let root = match resolve_project_root(pool, id.as_deref(), &project_id).await {
+        Ok(p) => p,
+        Err(frame) => {
+            send(out_tx, &frame).await;
+            return;
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        cfs::write_file(&root, &relative_path, &content, &encoding)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => send(out_tx, &ServerMessage::FsAck { id }).await,
+        Ok(Err(error)) => send(out_tx, &fs_error_to_frame(id, &error)).await,
+        Err(join_err) => {
+            send(
+                out_tx,
+                &ServerMessage::Error {
+                    id,
+                    kind: "internal".into(),
+                    message: format!("fs_write task failed: {join_err}"),
+                },
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_fs_delete(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    relative_path: String,
+) {
+    let root = match resolve_project_root(pool, id.as_deref(), &project_id).await {
+        Ok(p) => p,
+        Err(frame) => {
+            send(out_tx, &frame).await;
+            return;
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || cfs::delete_file(&root, &relative_path)).await;
+    match result {
+        Ok(Ok(())) => send(out_tx, &ServerMessage::FsAck { id }).await,
+        Ok(Err(error)) => send(out_tx, &fs_error_to_frame(id, &error)).await,
+        Err(join_err) => {
+            send(
+                out_tx,
+                &ServerMessage::Error {
+                    id,
+                    kind: "internal".into(),
+                    message: format!("fs_delete task failed: {join_err}"),
+                },
+            )
+            .await;
+        }
+    }
+}
+
 async fn handle_subscribe(conn: &mut Connection, id: Option<String>, session_id: Uuid) {
     if conn.subscribe_to(session_id) {
         send(&conn.out_tx, &ServerMessage::PtyAck { id }).await;
@@ -722,8 +950,10 @@ async fn forward_output(
                         // session is gone — the next blocking `recv` at the
                         // top of the loop observes it and emits `pty_exit`.
                         // Both stop the inner drain.
-                        Err(broadcast::error::TryRecvError::Empty
-                        | broadcast::error::TryRecvError::Closed) => break,
+                        Err(
+                            broadcast::error::TryRecvError::Empty
+                            | broadcast::error::TryRecvError::Closed,
+                        ) => break,
                         Err(broadcast::error::TryRecvError::Lagged(_)) => {
                             // Burned chunks; the next `try_recv` either
                             // returns a real frame or Empty. The PWA
@@ -1026,11 +1256,7 @@ mod tests {
         // green until those land. `pty_spawn` no longer qualifies — it
         // routes to the real handler now.
         let pool = fresh_pool().await;
-        let frames = drive(
-            &pool,
-            r#"{"type":"planflow_get_me","id":"req-3"}"#,
-        )
-        .await;
+        let frames = drive(&pool, r#"{"type":"planflow_get_me","id":"req-3"}"#).await;
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "unimplemented");
@@ -1283,5 +1509,200 @@ mod tests {
         let frame = out_rx.recv().await.expect("frame");
         assert!(frame.contains(r#""type":"pty_error""#), "got {frame}");
         assert!(frame.contains(r#""kind":"not_found""#), "got {frame}");
+    }
+
+    // ---- T19.27 dispatch wiring tests ----
+    //
+    // The fs:: module already has thorough path-jail and behaviour
+    // coverage; these tests verify the dispatch layer routes correctly
+    // (project lookup → handler → wire frame). We seed a project that
+    // points at a tempdir so the path-jail anchor is a real directory
+    // for the duration of the test.
+
+    async fn seed_project_with_path(pool: &SqlitePool, id: &str, path: &std::path::Path) {
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, env_json, position, created_at)
+             VALUES (?, ?, ?, '{}', 0, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(path.to_string_lossy().into_owned())
+        .bind(1_700_000_000_i64)
+        .execute(pool)
+        .await
+        .expect("seed project");
+    }
+
+    #[tokio::test]
+    async fn fs_list_returns_entries_from_project_root() {
+        let pool = fresh_pool().await;
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("README.md"), b"r").unwrap();
+        seed_project_with_path(&pool, "p-1", dir.path()).await;
+
+        let frames = drive(&pool, r#"{"type":"fs_list","id":"r1","project_id":"p-1"}"#).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "fs_list_result");
+        assert_eq!(frame["id"], "r1");
+        let names: Vec<_> = frame["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["src", "README.md"]);
+    }
+
+    #[tokio::test]
+    async fn fs_list_unknown_project_replies_not_found() {
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type":"fs_list","id":"r","project_id":"ghost"}"#).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "not_found");
+        assert_eq!(frame["id"], "r");
+    }
+
+    #[tokio::test]
+    async fn fs_read_returns_text_outcome() {
+        let pool = fresh_pool().await;
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi\n").unwrap();
+        seed_project_with_path(&pool, "p-r", dir.path()).await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"fs_read","id":"r","project_id":"p-r","relative_path":"hello.txt"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "fs_read_result");
+        assert_eq!(frame["result"]["kind"], "text");
+        assert_eq!(frame["result"]["content"], "hi\n");
+        assert_eq!(frame["result"]["encoding"], "utf-8");
+    }
+
+    #[tokio::test]
+    async fn fs_read_path_jail_rejects_escape() {
+        let pool = fresh_pool().await;
+        let outer = tempdir().unwrap();
+        let inner = tempdir().unwrap();
+        std::fs::write(outer.path().join("secret.txt"), "shhh").unwrap();
+        seed_project_with_path(&pool, "p-j", inner.path()).await;
+        // Relative path that walks out of `inner` into `outer`.
+        let escape = format!(
+            "../{}/secret.txt",
+            outer.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let payload = format!(
+            r#"{{"type":"fs_read","id":"j","project_id":"p-j","relative_path":"{escape}"}}"#
+        );
+        let frames = drive(&pool, &payload).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "out_of_scope");
+        // The victim file must remain untouched.
+        let still_there = std::fs::read_to_string(outer.path().join("secret.txt")).unwrap();
+        assert_eq!(still_there, "shhh");
+    }
+
+    #[tokio::test]
+    async fn fs_write_creates_file_and_acks() {
+        let pool = fresh_pool().await;
+        let dir = tempdir().unwrap();
+        seed_project_with_path(&pool, "p-w", dir.path()).await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"fs_write","id":"w","project_id":"p-w","relative_path":"new.txt","content":"hello\n"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "fs_ack");
+        assert_eq!(frame["id"], "w");
+        let on_disk = std::fs::read_to_string(dir.path().join("new.txt")).unwrap();
+        assert_eq!(on_disk, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn fs_write_path_jail_rejects_escape() {
+        let pool = fresh_pool().await;
+        let outer = tempdir().unwrap();
+        let inner = tempdir().unwrap();
+        std::fs::write(outer.path().join("victim.txt"), b"orig").unwrap();
+        seed_project_with_path(&pool, "p-wj", inner.path()).await;
+        let escape = format!(
+            "../{}/victim.txt",
+            outer.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let payload = format!(
+            r#"{{"type":"fs_write","id":"wj","project_id":"p-wj","relative_path":"{escape}","content":"pwned"}}"#
+        );
+        let frames = drive(&pool, &payload).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "out_of_scope");
+        // Victim must be untouched — the path-jail intercepts before
+        // any rename can land.
+        assert_eq!(
+            std::fs::read(outer.path().join("victim.txt")).unwrap(),
+            b"orig"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_delete_removes_file_and_acks() {
+        let pool = fresh_pool().await;
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("rm.txt"), b"x").unwrap();
+        seed_project_with_path(&pool, "p-d", dir.path()).await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"fs_delete","id":"d","project_id":"p-d","relative_path":"rm.txt"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "fs_ack");
+        assert!(!dir.path().join("rm.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn fs_delete_path_jail_rejects_escape() {
+        let pool = fresh_pool().await;
+        let outer = tempdir().unwrap();
+        let inner = tempdir().unwrap();
+        let victim = outer.path().join("victim.txt");
+        std::fs::write(&victim, b"orig").unwrap();
+        seed_project_with_path(&pool, "p-dj", inner.path()).await;
+        let escape = format!(
+            "../{}/victim.txt",
+            outer.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let payload = format!(
+            r#"{{"type":"fs_delete","id":"dj","project_id":"p-dj","relative_path":"{escape}"}}"#
+        );
+        let frames = drive(&pool, &payload).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "out_of_scope");
+        assert!(victim.exists(), "victim must not be deleted");
+    }
+
+    #[tokio::test]
+    async fn fs_write_missing_relative_path_replies_invalid_json() {
+        let pool = fresh_pool().await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"fs_write","id":"x","project_id":"p","content":"x"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "invalid_json");
     }
 }

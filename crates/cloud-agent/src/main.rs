@@ -21,6 +21,7 @@ mod cli;
 mod config;
 mod db;
 mod dispatch;
+mod fs;
 mod logging;
 mod pair;
 mod server;
