@@ -46,6 +46,15 @@ pub struct Config {
     /// the CLI overrides this for a single run.
     #[serde(default = "default_log_filter")]
     pub log_filter: String,
+
+    /// Bearer token the WebSocket listener accepts on the `/ws`
+    /// upgrade (T19.21). Optional in TOML so an unconfigured agent
+    /// still boots — when absent, the daemon mints an ephemeral token
+    /// at startup and logs it once so an operator can copy it into the
+    /// config file or paste it into a pairing flow. Production
+    /// deployments should pin this so the token survives restarts.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 impl Default for Config {
@@ -54,6 +63,7 @@ impl Default for Config {
             listen: default_listen(),
             state_dir: default_state_dir(),
             log_filter: default_log_filter(),
+            auth_token: None,
         }
     }
 }
@@ -140,6 +150,7 @@ mod tests {
             listen = "0.0.0.0:9000"
             state_dir = "/srv/cloud-agent"
             log_filter = "cloud_agent=debug,info"
+            auth_token = "pinned-token-abc"
         "#;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(toml.as_bytes()).unwrap();
@@ -147,6 +158,15 @@ mod tests {
         assert_eq!(cfg.listen.to_string(), "0.0.0.0:9000");
         assert_eq!(cfg.state_dir, PathBuf::from("/srv/cloud-agent"));
         assert_eq!(cfg.log_filter, "cloud_agent=debug,info");
+        assert_eq!(cfg.auth_token.as_deref(), Some("pinned-token-abc"));
+    }
+
+    #[test]
+    fn auth_token_defaults_to_none() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"").unwrap();
+        let cfg = Config::load(f.path()).unwrap();
+        assert!(cfg.auth_token.is_none());
     }
 
     #[test]

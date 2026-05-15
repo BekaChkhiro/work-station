@@ -14,11 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 # T19.1 — reuse PTY / push / pairing / credentials / logging primitives.
-# T19.2 only links the crate so the dependency graph and feature flags
-# are wired up; subsequent tasks (T19.7+) bring the modules into use.
+# T19.20 added the `ws` module (protocol + auth) which T19.21 links
+# against to scaffold the cloud-agent listener.
 workstation-core = { path = "../workstation-core" }
 
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 # CLI parsing — keep the binary self-describing (`--help`, `--version`)
@@ -30,8 +31,10 @@ clap = { version = "=4.5.20", features = ["derive"] }
 toml = "=1.1.2"
 
 # Daemon runtime + signal handling. systemd sends SIGTERM on stop, so
-# we listen for both Ctrl+C (dev) and SIGTERM (prod).
-tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+# we listen for both Ctrl+C (dev) and SIGTERM (prod). `net` powers the
+# WebSocket listener bind (T19.21); `sync` drives the graceful-shutdown
+# notifier handed to the server task.
+tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "signal", "fs", "net", "sync"] }
 
 # Stand-alone tracing subscriber for the daemon. systemd captures
 # stdout into the journal, so the file appender from workstation-core's
@@ -39,10 +42,20 @@ tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "signal"
 # with env-filter is the right shape for a headless service.
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
 
+# T19.21 — axum WebSocket server scaffold. Same version/features as
+# workstation-core so the workspace links a single copy.
+axum = { version = "=0.7.9", features = ["ws"] }
+
 thiserror = "=2.0.18"
 
 [dev-dependencies]
 tempfile = "=3.13.0"
+# T19.21 — drive the scaffolded server end-to-end from integration tests:
+# `reqwest` for the plain HTTP probes (healthz, 401 paths) and
+# `tokio-tungstenite` for the real WebSocket upgrade smoke test.
+reqwest = { version = "=0.13.3", default-features = false, features = ["rustls"] }
+tokio-tungstenite = "=0.24.0"
+futures-util = "=0.3.31"
 
 [lints.clippy]
 # Mirror the rest of the workspace (T1.3 / T19.1) so the daemon picks
