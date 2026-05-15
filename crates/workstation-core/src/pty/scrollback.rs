@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 
 /// Default per-session scrollback cap — 4 MiB, per `PROJECT_PLAN` T2.9.
-pub(crate) const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Bounded byte ring whose elements are reader-coalesced frames.
 ///
@@ -30,7 +30,7 @@ pub(crate) const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
 /// copy) and lets the future range-read walk frames directly. The
 /// total-byte counter is kept in lockstep with the deque so `push`
 /// never has to re-sum the queue to decide when to evict.
-pub(crate) struct Scrollback {
+pub struct Scrollback {
     chunks: VecDeque<Bytes>,
     total_bytes: usize,
     cap_bytes: usize,

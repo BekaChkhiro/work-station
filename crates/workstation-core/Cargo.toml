@@ -1,0 +1,87 @@
+[package]
+name = "workstation-core"
+version = "0.1.0"
+description = "Tauri-free runtime logic shared across Work Station surfaces."
+authors = ["Work Station maintainers"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# PTY runtime + push notifier both need a fuller tokio feature set
+# (broadcast / mpsc / spawn_blocking / time / process / sync). The
+# desktop binary already pulls these in via `features = ["full"]`,
+# so the union here is a no-cost listing.
+tokio = { version = "=1.52.1", features = ["process", "time", "sync", "rt", "rt-multi-thread", "macros", "io-util", "fs"] }
+
+# `logging` — daily-rotated file appender + env-filtered subscriber.
+tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
+tracing-appender = "=0.2.3"
+# `logging::resolve_log_dir` — platform-standard log directory.
+dirs = "=6.0.0"
+
+# `pty` runtime.
+portable-pty = "=0.9.0"
+bytes = "=1.11.1"
+uuid = { version = "=1.23.1", features = ["v4", "serde"] }
+thiserror = "=2.0.18"
+
+# `credentials` — OS-native keyring wrapper.
+# (target-gated below to keep the platform-specific backends honest.)
+
+# `push` — VAPID keypair, encrypted payload, axum surface.
+# `push::PushService::new` holds a `reqwest::Client` for outbound
+# delivery to the upstream push service. Same rustls flavour as
+# src-tauri so we don't double-link curl/native-tls.
+reqwest = { version = "=0.13.3", default-features = false, features = ["rustls", "json", "gzip"] }
+base64 = "0.22"
+sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio"] }
+axum = { version = "=0.7.9", features = ["ws"] }
+web-push = "=0.10.4"
+p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "pem", "pkcs8", "std"] }
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+# Same rationale as src-tauri/Cargo.toml: `web-push` transitively pulls
+# in openssl-sys via isahc/curl. Force the vendored build so Windows GH
+# Actions runners (which don't ship OpenSSL) can compile this crate.
+openssl = { version = "=0.10.79", features = ["vendored"] }
+
+[target.'cfg(unix)'.dependencies]
+# `pty::manager` sends SIGTERM for graceful shutdown on Unix
+# (portable-pty's `Child::kill` always sends SIGKILL).
+libc = "=0.2.186"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
+[dev-dependencies]
+# `cli::registry` unit tests build a synthetic PATH from a tempdir
+# so detection logic exercises the real filesystem walk without
+# depending on whatever's installed on the test host.
+tempfile = "=3.13.0"
+# `cli::version` / `cli::registry` async tests rely on the
+# multi-threaded runtime via `#[tokio::test]`.
+tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "process", "time", "sync"] }
+# `pty` tests stub broadcast channels; same dep listing for parity
+# with src-tauri's old block.
+base64 = "=0.22.1"
+
+[lints.clippy]
+# Mirror src-tauri's lint policy (T1.3) so moved modules don't lose
+# coverage when they cross the crate boundary.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+needless_pass_by_value = "allow"
+return_self_not_must_use = "allow"

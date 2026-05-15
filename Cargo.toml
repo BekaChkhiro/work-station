@@ -1,0 +1,18 @@
+[workspace]
+# T19.1 — Cargo workspace for extracting Tauri-free logic into a
+# reusable crate. `workstation-core` holds OS/runtime modules that
+# don't depend on Tauri (PATH scanning, shell-path hydration, …) so
+# future surfaces (CLI tooling, headless daemon) can link the same
+# code without dragging in the webview stack.
+members = ["src-tauri", "crates/workstation-core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.77"
+license = "Proprietary"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "=1"
+tracing = "=0.1.44"

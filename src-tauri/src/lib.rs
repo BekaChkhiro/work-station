@@ -2,12 +2,15 @@
 use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 
-mod cli;
+// T19.1 — Tauri-free runtime modules now live in `workstation-core`.
+// Re-export them under their old paths so command handlers and other
+// modules keep using `crate::cli::…`, `crate::shell_path::…`, etc.
+// without churning call sites. `credentials`, `pty`, and `push` are
+// included here because `commands/*` and `ws/*` reference them via
+// `crate::…`; the underlying logic has no Tauri coupling.
+pub use workstation_core::{cli, credentials, logging, pairing, pty, push, shell_path};
+
 mod commands;
-// T11.2: OS-native credential store. Used by the integrations layer
-// (T11.3 Settings panel, T12+ per-service flows) — the public surface
-// is the four Tauri commands wired into the handler below.
-mod credentials;
 mod db;
 // T11.4: HTTP client + cache. The downstream consumers (T11.6 connection
 // test, T11.8 token refresh, T11.9 offline queue, T12+ integrations) land
@@ -16,16 +19,7 @@ mod db;
 #[allow(dead_code)]
 mod http;
 mod ipc;
-mod logging;
 mod menu;
-// T18.19 — Web Push subsystem. Boots after migrations (depends on the
-// `app_settings` and `push_subscriptions` tables) and registers itself
-// in a process-global `OnceLock` so the eventual T18.6 PlanFlow Tasks
-// bridge can call `push::notify(...)` without threading state.
-mod pairing;
-mod pty;
-mod push;
-mod shell_path;
 // Cloudflare quick-tunnel manager. Spawned after the WS bridge binds so
 // the mobile PWA (HTTPS origin) can reach the loopback-only listener
 // without LAN reachability / mixed-content headaches.

@@ -59,7 +59,7 @@ const RAW_CHANNEL_CAPACITY: usize = 32;
 /// That means an external `manager.kill` can drop the registry's
 /// `Arc<PtySession>` without the reader holding the session alive
 /// indefinitely.
-pub(crate) fn spawn_reader(manager: PtyManager, session: &PtySession) {
+pub fn spawn_reader(manager: PtyManager, session: &PtySession) {
     let session_id = session.id;
     let pid = session.pid;
     let output_tx = session.output_tx.clone();

@@ -169,7 +169,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("pool");
-        sqlx::query(include_str!("../../migrations/0003_app_settings.sql"))
+        sqlx::query(include_str!(
+            "../../../../src-tauri/migrations/0003_app_settings.sql"
+        ))
             .execute(&pool)
             .await
             .expect("apply migration");

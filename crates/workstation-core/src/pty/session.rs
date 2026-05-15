@@ -45,23 +45,23 @@ use super::scrollback::Scrollback;
 /// counter and the bytes-counted invariant move under the same lock;
 /// the snapshot in `manager.rs` reads both in one shot.
 #[derive(Debug, Default)]
-pub(crate) struct BackpressureStats {
-    pub(crate) broadcast_lag_events: AtomicU64,
-    pub(crate) broadcast_dropped_frames: AtomicU64,
-    pub(crate) subscribers_disconnected_on_lag: AtomicU64,
+pub struct BackpressureStats {
+    pub broadcast_lag_events: AtomicU64,
+    pub broadcast_dropped_frames: AtomicU64,
+    pub subscribers_disconnected_on_lag: AtomicU64,
 }
 
 impl BackpressureStats {
     /// One observed `Lagged(n)` from a broadcast subscriber. `n` is the
     /// number of frames the broadcast channel silently overwrote between
     /// our last `recv` and now.
-    pub(crate) fn record_lag(&self, dropped: u64) {
+    pub fn record_lag(&self, dropped: u64) {
         self.broadcast_lag_events.fetch_add(1, Ordering::Relaxed);
         self.broadcast_dropped_frames
             .fetch_add(dropped, Ordering::Relaxed);
     }
 
-    pub(crate) fn record_subscriber_disconnect_on_lag(&self) {
+    pub fn record_subscriber_disconnect_on_lag(&self) {
         self.subscribers_disconnected_on_lag
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -71,7 +71,7 @@ impl BackpressureStats {
 ///
 /// 1024 frames lets the reader task (T2.4) buffer several hundred ms of
 /// output before slow subscribers start lagging.
-pub(crate) const DEFAULT_OUTPUT_CAPACITY: usize = 1024;
+pub const DEFAULT_OUTPUT_CAPACITY: usize = 1024;
 
 /// Polling cadence while waiting for a SIGTERM/EOF to land before we
 /// escalate to SIGKILL. 50ms gives sub-frame responsiveness without
@@ -87,26 +87,26 @@ const TERMINATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// behind a mutex (rather than `&mut self` access) so T2.8's graceful
 /// shutdown can call `try_wait` / `kill` / `wait` through the shared
 /// `Arc<PtySession>`.
-pub(crate) struct PtySession {
-    pub(crate) id: Uuid,
-    pub(crate) pid: u32,
-    pub(crate) master: Mutex<Box<dyn MasterPty + Send>>,
-    pub(crate) writer: Mutex<Box<dyn Write + Send>>,
-    pub(crate) child: Mutex<Box<dyn Child + Send + Sync>>,
-    pub(crate) output_tx: broadcast::Sender<Bytes>,
+pub struct PtySession {
+    pub id: Uuid,
+    pub pid: u32,
+    pub master: Mutex<Box<dyn MasterPty + Send>>,
+    pub writer: Mutex<Box<dyn Write + Send>>,
+    pub child: Mutex<Box<dyn Child + Send + Sync>>,
+    pub output_tx: broadcast::Sender<Bytes>,
     /// Bounded scrollback (T2.9) — `Arc` so the reader can clone-and-tap
     /// without keeping the whole session alive past EOF. Default cap is
     /// [`scrollback::DEFAULT_SCROLLBACK_BYTES`]; T3.4 will plumb the
     /// user-configured value from `app_settings`.
-    pub(crate) scrollback: Arc<Mutex<Scrollback>>,
+    pub scrollback: Arc<Mutex<Scrollback>>,
     /// Set when the reader thread or coalescer task panics (T2.15). The
     /// `Arc` is shared with the reader pipeline so a panic in either
     /// half can flip it without holding the whole session alive.
-    pub(crate) reader_panic: Arc<AtomicBool>,
+    pub reader_panic: Arc<AtomicBool>,
     /// Backpressure counters (T2.16). `Arc` so subscribers can clone-and-
     /// tap without holding the session past their own lifetime.
-    pub(crate) backpressure: Arc<BackpressureStats>,
-    pub(crate) created_at: SystemTime,
+    pub backpressure: Arc<BackpressureStats>,
+    pub created_at: SystemTime,
 }
 
 impl PtySession {
@@ -114,7 +114,7 @@ impl PtySession {
     ///
     /// The output broadcast channel is created here so callers don't have
     /// to thread it in; subscribe via `output_tx.subscribe()`.
-    pub(crate) fn new(
+    pub fn new(
         master: Box<dyn MasterPty + Send>,
         writer: Box<dyn Write + Send>,
         child: Box<dyn Child + Send + Sync>,
@@ -137,7 +137,7 @@ impl PtySession {
 
     /// `true` once the per-session reader pipeline has reported a panic.
     /// Surfaced through `pty_subscribe` as `ReaderPanic` (T2.15).
-    pub(crate) fn reader_panicked(&self) -> bool {
+    pub fn reader_panicked(&self) -> bool {
         self.reader_panic.load(Ordering::SeqCst)
     }
 
@@ -157,7 +157,7 @@ impl PtySession {
     /// `false` if it had to be force-killed. Errors are logged and
     /// swallowed — termination is best-effort and the registry must move
     /// on regardless.
-    pub(crate) fn terminate_gracefully(&self, grace: Duration) -> bool {
+    pub fn terminate_gracefully(&self, grace: Duration) -> bool {
         let id = self.id;
         let pid = self.pid;
 
