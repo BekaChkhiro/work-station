@@ -68,6 +68,19 @@ export type ServerMessage =
       ram_total_bytes: number;
       pty_session_count: number;
     }
+  // T19.13 — PlanFlow Tasks bridge response frames. `data` is the
+  // upstream payload with PlanFlow's `{success, data}` envelope already
+  // stripped server-side (see `unwrap_envelope` in
+  // `src-tauri/src/ws/planflow_bridge.rs`); the renderer re-validates
+  // through the existing Zod schemas in `src/integrations/planflow/schemas.ts`.
+  | { type: "planflow_result"; id?: string; data: unknown }
+  | {
+      type: "planflow_error";
+      id?: string;
+      kind: string;
+      message: string;
+      status?: number;
+    }
   // Generic error envelope used by the projects / settings handlers
   // (distinct from `pty_error` which carries session_id).
   | { type: "error"; id?: string; kind: string; message: string };
@@ -199,6 +212,25 @@ export class WsBridgeError extends Error {
   ) {
     super(message);
     this.name = "WsBridgeError";
+  }
+}
+
+/**
+ * T19.13 — error returned by the PlanFlow bridge handlers. Distinct from
+ * [`WsBridgeError`] so callers can branch on `status` (the upstream HTTP
+ * code) without re-parsing the message. `kind` taxonomy mirrors
+ * `planflow_bridge.rs#send_proxy_error`: `unauthorized` | `rate_limited`
+ * | `not_found` | `client` | `server` | `network` | `timeout` | `decode`
+ * | `no_credential` | `credential` | `invalid_args`.
+ */
+export class WsPlanflowError extends Error {
+  constructor(
+    public readonly kind: string,
+    message: string,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = "WsPlanflowError";
   }
 }
 
@@ -419,6 +451,116 @@ export class WsBridgeClient {
     return reply.settings;
   }
 
+  // ---- T19.13: PlanFlow Tasks bridge ------------------------------------
+  //
+  // Each method maps 1:1 to a `planflow_*` ClientMessage variant in
+  // `src-tauri/src/ws/protocol.rs`. The cloud-agent proxies the call
+  // through its embedded HTTP client using the cloud-agent's keychain
+  // PlanFlow token, then ships the upstream payload back as
+  // `planflow_result.data` with PlanFlow's `{success, data}` envelope
+  // already stripped. The renderer-side `PlanFlowClient` re-validates
+  // the payload through the same Zod schemas the local-HTTP path uses,
+  // so a server-side drift surfaces at the schema boundary, not here.
+  //
+  // Returns are typed `unknown` because the wire payload's shape is the
+  // upstream PlanFlow API's, which is captured by the Zod schemas — not
+  // by a discriminated union here.
+
+  async planflowGetMe(): Promise<unknown> {
+    const reply = await this.request({ type: "planflow_get_me" });
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  async planflowListTasks(projectId: string, status?: string): Promise<unknown> {
+    const payload: Record<string, unknown> = {
+      type: "planflow_list_tasks",
+      project_id: projectId,
+    };
+    if (status !== undefined) payload["status"] = status;
+    const reply = await this.request(payload);
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  async planflowListActiveWork(projectId: string): Promise<unknown> {
+    const reply = await this.request({
+      type: "planflow_list_active_work",
+      project_id: projectId,
+    });
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  async planflowListComments(projectId: string, taskId: string): Promise<unknown> {
+    const reply = await this.request({
+      type: "planflow_list_comments",
+      project_id: projectId,
+      task_id: taskId,
+    });
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  async planflowCreateComment(projectId: string, taskId: string, body: string): Promise<unknown> {
+    const reply = await this.request({
+      type: "planflow_create_comment",
+      project_id: projectId,
+      task_id: taskId,
+      body,
+    });
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  async planflowStartWork(projectId: string, taskId: string): Promise<void> {
+    const reply = await this.request({
+      type: "planflow_start_work",
+      project_id: projectId,
+      task_id: taskId,
+    });
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+  }
+
+  async planflowStopWork(projectId: string): Promise<void> {
+    const reply = await this.request({
+      type: "planflow_stop_work",
+      project_id: projectId,
+    });
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+  }
+
+  async planflowUpdateTaskStatus(
+    projectId: string,
+    taskId: string,
+    status: string,
+  ): Promise<unknown> {
+    const reply = await this.request({
+      type: "planflow_update_task_status",
+      project_id: projectId,
+      task_id: taskId,
+      status,
+    });
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
   /**
    * Listen to server-initiated `active_project_changed` events. Reserved
    * in the wire protocol today (the cloud-agent only emits a Tauri event
@@ -565,6 +707,20 @@ export class WsBridgeClient {
         }
         return;
       }
+      case "planflow_error": {
+        // T19.13 — PlanFlow bridge error envelope (carries optional HTTP
+        // `status` so callers can branch on 401/403/404 without re-parsing
+        // prose). Distinct from the generic `error` frame for that reason.
+        const id = parsed.id;
+        if (id !== undefined) {
+          const pending = this.pending.get(id);
+          if (pending) {
+            this.pending.delete(id);
+            pending.reject(new WsPlanflowError(parsed.kind, parsed.message, parsed.status));
+          }
+        }
+        return;
+      }
       case "active_project_changed": {
         // Server-initiated event — no correlation id. Already delivered
         // to every `onMessage` handler above (which is where
@@ -577,7 +733,8 @@ export class WsBridgeClient {
       case "projects_list_result":
       case "project_result":
       case "project_switched":
-      case "settings_result": {
+      case "settings_result":
+      case "planflow_result": {
         const id = parsed.id;
         if (id !== undefined) {
           const pending = this.pending.get(id);

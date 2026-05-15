@@ -1,4 +1,10 @@
-export { WsBridgeClient, WsBridgeClosedError, WsBridgeError, WsBridgeServerError } from "./client";
+export {
+  WsBridgeClient,
+  WsBridgeClosedError,
+  WsBridgeError,
+  WsBridgeServerError,
+  WsPlanflowError,
+} from "./client";
 export type {
   ActiveProjectChangedHandler,
   ConnectionState,
