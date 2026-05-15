@@ -93,6 +93,17 @@ import {
   type ProjectLink,
 } from "../../db/projectLinks";
 import { updateProjectWorkspaceTabs } from "../../db/projects";
+import {
+  cloudAgentStatus,
+  cloudAgentUrl,
+  cloudMode,
+  setCloudAgentStatus,
+  setCloudAgentUrl,
+  setCloudMode,
+} from "../../stores/cloudMode";
+import { WsBridgeClient } from "../../integrations/wsBridge";
+import { CLOUD_AGENT_AUTH_FAILED_CODE, CLOUD_AGENT_WS_PATH } from "../../integrations/cloudAgent";
+import { cloudPairingState, type CloudPairingState } from "../WorkspaceToggle/WorkspaceToggle";
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -106,6 +117,7 @@ type SectionId =
   | "clis"
   | "integrations"
   | "mobile"
+  | "cloud"
   | "privacy"
   | "about";
 
@@ -116,6 +128,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "clis", label: "CLIs" },
   { id: "integrations", label: "Integrations" },
   { id: "mobile", label: "Mobile pairing" },
+  { id: "cloud", label: "Cloud workspace" },
   { id: "privacy", label: "Privacy" },
   { id: "about", label: "About" },
 ];
@@ -204,6 +217,9 @@ export function SettingsPanel(props: SettingsPanelProps): JSX.Element {
                   </Match>
                   <Match when={section() === "mobile"}>
                     <MobileSection />
+                  </Match>
+                  <Match when={section() === "cloud"}>
+                    <CloudSection />
                   </Match>
                   <Match when={section() === "privacy"}>
                     <PrivacySection />
@@ -1950,6 +1966,428 @@ function MobileSection(): JSX.Element {
               </div>
             </>
           )}
+        </Show>
+      </div>
+    </>
+  );
+}
+
+/* ─── Cloud workspace (T19.15) ──────────────────────────────────────── */
+
+interface CloudFeedback {
+  tone: "ok" | "warn" | "error";
+  message: string;
+}
+type CloudBusy = null | "pair" | "test" | "unpair";
+
+const TEST_HANDSHAKE_TIMEOUT_MS = 8000;
+
+function statusCardStyle(color: string): Record<string, string> {
+  return {
+    border: `1px solid ${color}`,
+    "border-radius": "8px",
+    padding: "12px",
+    background: `color-mix(in srgb, ${color} 8%, transparent)`,
+  };
+}
+
+function formatTimestamp(ts: number | null | undefined): string {
+  if (ts == null) return "—";
+  return new Date(ts).toLocaleString();
+}
+
+function normalizeCloudUrl(
+  raw: string,
+): { ok: true; value: string } | { ok: false; reason: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, reason: "Enter the agent's WebSocket URL." };
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { ok: false, reason: "That isn't a valid URL." };
+  }
+  if (parsed.protocol !== "wss:" && parsed.protocol !== "ws:") {
+    return { ok: false, reason: "Use wss:// (or ws:// only for local testing)." };
+  }
+  return { ok: true, value: parsed.toString().replace(/\/+$/, "") };
+}
+
+/** Open a transient WS dial to the agent and resolve once the handshake
+ *  succeeds, fails, or times out. Mirrors the path-suffix logic the live
+ *  manager uses so the test exercises the same endpoint cloud-mode will. */
+function probeCloudAgent(
+  url: string,
+  token: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  return new Promise((resolve) => {
+    const trimmed = url.replace(/\/+$/, "");
+    const dialUrl = trimmed.endsWith(CLOUD_AGENT_WS_PATH)
+      ? trimmed
+      : `${trimmed}${CLOUD_AGENT_WS_PATH}`;
+    let settled = false;
+    const settle = (verdict: { ok: true } | { ok: false; reason: string }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        bridge.close();
+      } catch {
+        // closing a transient is best-effort
+      }
+      resolve(verdict);
+    };
+    const timer = setTimeout(
+      () =>
+        settle({ ok: false, reason: `No response within ${TEST_HANDSHAKE_TIMEOUT_MS / 1000}s.` }),
+      TEST_HANDSHAKE_TIMEOUT_MS,
+    );
+    const bridge = new WsBridgeClient({
+      url: dialUrl,
+      token,
+      autoReconnect: false,
+      onOpen: () => settle({ ok: true }),
+      onClose: (e) => {
+        if (e.code === CLOUD_AGENT_AUTH_FAILED_CODE) {
+          settle({ ok: false, reason: "Agent rejected the pairing token." });
+          return;
+        }
+        settle({ ok: false, reason: e.reason || `Connection closed (code ${e.code}).` });
+      },
+      onError: (err) => settle({ ok: false, reason: err.message || "Connection error." }),
+    });
+    bridge.connect();
+  });
+}
+
+function CloudSection(): JSX.Element {
+  const [urlDraft, setUrlDraft] = createSignal<string>("");
+  const [tokenDraft, setTokenDraft] = createSignal<string>("");
+  const [hasToken, setHasToken] = createSignal<boolean>(false);
+  const [showToken, setShowToken] = createSignal<boolean>(false);
+  const [busy, setBusy] = createSignal<CloudBusy>(null);
+  const [feedback, setFeedback] = createSignal<CloudFeedback | null>(null);
+
+  const pairing = (): CloudPairingState => cloudPairingState(cloudAgentUrl(), cloudAgentStatus());
+
+  // Hydrate from persisted state. URL lives in SQLite (T19.4); token
+  // existence comes from a hasCredential probe so we never read the
+  // secret value into the renderer just to display "saved".
+  onMount(() => {
+    const url = cloudAgentUrl();
+    if (url) setUrlDraft(url);
+    void hasCredential(Integration.CloudAgent, DEFAULT_ACCOUNT)
+      .then(setHasToken)
+      .catch((err: unknown) => {
+        console.warn("[cloud-settings] token probe failed", err);
+      });
+  });
+
+  async function onPair(): Promise<void> {
+    setFeedback(null);
+    const validated = normalizeCloudUrl(urlDraft());
+    if (!validated.ok) {
+      setFeedback({ tone: "error", message: validated.reason });
+      return;
+    }
+    const typedToken = tokenDraft().trim();
+    if (!typedToken && !hasToken()) {
+      setFeedback({
+        tone: "error",
+        message: "Paste the pairing token from the cloud-agent install output.",
+      });
+      return;
+    }
+    setBusy("pair");
+    try {
+      await setCloudAgentUrl(validated.value);
+      if (typedToken) {
+        await setCredential(Integration.CloudAgent, DEFAULT_ACCOUNT, typedToken);
+        setHasToken(true);
+        setTokenDraft("");
+      }
+      const liveToken =
+        typedToken || (await getCredential(Integration.CloudAgent, DEFAULT_ACCOUNT));
+      if (!liveToken) {
+        setFeedback({
+          tone: "error",
+          message: "Pairing token is missing — paste it again.",
+        });
+        return;
+      }
+      const result = await probeCloudAgent(validated.value, liveToken);
+      if (result.ok) {
+        const now = Date.now();
+        const current = cloudAgentStatus();
+        await setCloudAgentStatus({
+          pairedAt: current?.pairedAt ?? now,
+          agentVersion: current?.agentVersion ?? null,
+          lastHandshakeAt: now,
+          needsRepairAt: null,
+        });
+        setFeedback({ tone: "ok", message: "Paired — cloud workspace is ready." });
+      } else {
+        setFeedback({ tone: "error", message: `Pairing handshake failed: ${result.reason}` });
+      }
+    } catch (err) {
+      setFeedback({
+        tone: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onTest(): Promise<void> {
+    setFeedback(null);
+    const url = cloudAgentUrl();
+    if (!url) {
+      setFeedback({ tone: "error", message: "Pair an agent first." });
+      return;
+    }
+    setBusy("test");
+    try {
+      const token = await getCredential(Integration.CloudAgent, DEFAULT_ACCOUNT);
+      if (!token) {
+        setFeedback({
+          tone: "error",
+          message: "Pairing token is missing — paste it below and pair again.",
+        });
+        return;
+      }
+      const result = await probeCloudAgent(url, token);
+      if (result.ok) {
+        const now = Date.now();
+        const current = cloudAgentStatus();
+        await setCloudAgentStatus({
+          pairedAt: current?.pairedAt ?? now,
+          agentVersion: current?.agentVersion ?? null,
+          lastHandshakeAt: now,
+          needsRepairAt: null,
+        });
+        setFeedback({ tone: "ok", message: "Connection OK." });
+      } else {
+        setFeedback({ tone: "error", message: `Connection failed: ${result.reason}` });
+      }
+    } catch (err) {
+      setFeedback({
+        tone: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onUnpair(): Promise<void> {
+    const confirmed = window.confirm(
+      "Unpair this cloud agent? Cloud mode will turn off and the token will be removed from the keychain.",
+    );
+    if (!confirmed) return;
+    setBusy("unpair");
+    try {
+      await setCloudMode(false);
+      await setCloudAgentUrl(null);
+      await setCloudAgentStatus(null);
+      await deleteCredential(Integration.CloudAgent, DEFAULT_ACCOUNT);
+      setHasToken(false);
+      setUrlDraft("");
+      setTokenDraft("");
+      setFeedback({ tone: "ok", message: "Unpaired." });
+    } catch (err) {
+      setFeedback({
+        tone: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <>
+      <h2 class="ws-settings-page__section-title">Cloud workspace</h2>
+
+      <div class="ws-settings-page__group">
+        <div class="ws-settings-page__row col">
+          <div>
+            <div class="ws-settings-page__lbl">Pair with a cloud-agent VPS</div>
+            <div class="ws-settings-page__hint">
+              Cloud mode routes terminals, file ops, and PlanFlow data through a VPS you own running{" "}
+              <span style={{ "font-family": "var(--font-mono)" }}>cloud-agent</span>. The pairing
+              token lives in the OS keychain; only the URL and non-secret status are stored in this
+              project's SQLite.
+            </div>
+          </div>
+        </div>
+
+        <Switch>
+          <Match when={pairing() === "paired"}>
+            <div
+              class="ws-settings-page__row col"
+              style={statusCardStyle("var(--success, #2ea043)")}
+            >
+              <div style={{ color: "var(--success, #2ea043)", "font-weight": 600 }}>
+                Agent paired
+              </div>
+              <div class="ws-settings-page__hint">
+                Paired {formatTimestamp(cloudAgentStatus()?.pairedAt)} · last handshake{" "}
+                {formatTimestamp(cloudAgentStatus()?.lastHandshakeAt)}
+                <Show when={cloudAgentStatus()?.agentVersion}>{(v) => <> · agent {v()}</>}</Show>
+              </div>
+            </div>
+          </Match>
+          <Match when={pairing() === "needs-repair"}>
+            <div class="ws-settings-page__row col" style={statusCardStyle("var(--warning)")}>
+              <div style={{ color: "var(--warning)", "font-weight": 600 }}>Pairing expired</div>
+              <div class="ws-settings-page__hint">
+                The agent rejected the last handshake — usually because the token rotated. Paste a
+                fresh token below and re-pair.
+              </div>
+            </div>
+          </Match>
+          <Match when={pairing() === "unpaired"}>
+            <div class="ws-settings-page__row col" style={statusCardStyle("var(--text-tertiary)")}>
+              <div style={{ "font-weight": 600 }}>Not paired</div>
+              <div class="ws-settings-page__hint">
+                Run the cloud-agent installer on your VPS, then paste the resulting URL + token
+                below.
+              </div>
+            </div>
+          </Match>
+        </Switch>
+
+        <div class="ws-settings-page__row">
+          <div>
+            <div class="ws-settings-page__lbl">Use cloud workspace</div>
+            <div class="ws-settings-page__hint">
+              {pairing() === "unpaired"
+                ? "Pair an agent below before enabling."
+                : "Source workspace data from the agent instead of local PTYs + SQLite."}
+            </div>
+          </div>
+          <Toggle
+            on={cloudMode()}
+            disabled={pairing() === "unpaired"}
+            onChange={(v) => void setCloudMode(v)}
+          />
+        </div>
+      </div>
+
+      <div class="ws-settings-page__group">
+        <div class="ws-settings-page__row col">
+          <div class="ws-settings-page__lbl">Agent URL</div>
+          <input
+            class="ws-settings-page__input"
+            type="url"
+            spellcheck={false}
+            autocapitalize="none"
+            placeholder="wss://agent.example.com"
+            value={urlDraft()}
+            onInput={(e) => setUrlDraft(e.currentTarget.value)}
+            style={{ "font-family": "var(--font-mono)" }}
+          />
+          <div class="ws-settings-page__hint">
+            Full origin of the public Cloudflare Tunnel that fronts your VPS.{" "}
+            <span style={{ "font-family": "var(--font-mono)" }}>{CLOUD_AGENT_WS_PATH}</span> is
+            appended automatically.
+          </div>
+        </div>
+
+        <div class="ws-settings-page__row col">
+          <div class="ws-settings-page__lbl">
+            Pairing token
+            <Show when={hasToken() && tokenDraft().length === 0}>
+              <span class="ws-settings-page__badge" style={{ "margin-left": "8px" }}>
+                saved
+              </span>
+            </Show>
+          </div>
+          <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+            <input
+              class="ws-settings-page__input"
+              type={showToken() ? "text" : "password"}
+              spellcheck={false}
+              autocapitalize="none"
+              autocomplete="off"
+              placeholder={
+                hasToken()
+                  ? "•••••• (keep saved or paste a new one)"
+                  : "Paste from cloud-agent install output"
+              }
+              value={tokenDraft()}
+              onInput={(e) => setTokenDraft(e.currentTarget.value)}
+              style={{ "font-family": "var(--font-mono)", flex: 1 }}
+            />
+            <button
+              type="button"
+              class="ws-settings-page__btn ws-settings-page__btn--ghost"
+              onClick={() => setShowToken((v) => !v)}
+              disabled={tokenDraft().length === 0}
+            >
+              {showToken() ? "Hide" : "Show"}
+            </button>
+          </div>
+          <div class="ws-settings-page__hint">
+            Stored in the OS keychain (T11.2 pattern), never in this project's SQLite. Leave empty
+            to keep the saved token; paste a new one to rotate.
+          </div>
+        </div>
+
+        <div
+          class="ws-settings-page__row"
+          style={{ gap: "8px", "flex-wrap": "wrap", "align-items": "center" }}
+        >
+          <button
+            type="button"
+            class="ws-settings-page__btn"
+            onClick={() => void onPair()}
+            disabled={busy() !== null}
+          >
+            {busy() === "pair"
+              ? "Pairing…"
+              : pairing() === "unpaired"
+                ? "Pair agent"
+                : "Save & re-pair"}
+          </button>
+          <button
+            type="button"
+            class="ws-settings-page__btn ws-settings-page__btn--ghost"
+            onClick={() => void onTest()}
+            disabled={busy() !== null || pairing() === "unpaired"}
+          >
+            {busy() === "test" ? "Testing…" : "Test connection"}
+          </button>
+          <Show when={pairing() !== "unpaired"}>
+            <button
+              type="button"
+              class="ws-settings-page__btn ws-settings-page__btn--ghost"
+              onClick={() => void onUnpair()}
+              disabled={busy() !== null}
+              style={{ "margin-left": "auto" }}
+            >
+              {busy() === "unpair" ? "Unpairing…" : "Unpair"}
+            </button>
+          </Show>
+        </div>
+
+        <Show when={feedback()}>
+          {(fb) => {
+            const color = (): string =>
+              fb().tone === "ok"
+                ? "var(--success, #2ea043)"
+                : fb().tone === "warn"
+                  ? "var(--warning)"
+                  : "var(--error)";
+            return (
+              <div class="ws-settings-page__row col" style={statusCardStyle(color())}>
+                <div class="ws-settings-page__hint" style={{ color: color() }}>
+                  {fb().message}
+                </div>
+              </div>
+            );
+          }}
         </Show>
       </div>
     </>
