@@ -179,5 +179,9 @@ export const Integration = {
   Vercel: "vercel",
   Neon: "neon",
   Railway: "railway",
+  // T19.7 — pairing token for the user-owned cloud-agent VPS. Stored
+  // under the same keychain backend as every other integration so the
+  // secret never lands in SQLite.
+  CloudAgent: "cloud-agent",
 } as const;
 export type IntegrationId = (typeof Integration)[keyof typeof Integration];
