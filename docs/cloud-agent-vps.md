@@ -114,9 +114,45 @@ systemctl status cloud-agent
 journalctl -u cloud-agent -n 50
 ```
 
-## 7. What's next
+## 7. Expose the agent — Cloudflare Tunnel (T19.30)
 
-- **T19.15** — Settings UI to register the Cloudflare Tunnel and pair the desktop with this agent. Until then, the install script prints the manual `cloudflared tunnel create` recipe at the end.
+The agent listens on `127.0.0.1:7420` only (see §3). Reach it from the internet via a named Cloudflare Tunnel — no inbound port opens, the VPS dials Cloudflare's edge outbound.
+
+Pick a hostname on a Cloudflare-managed zone (e.g. `agent.example.com`), then run on the VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<you>/work-station/master/scripts/cloud-agent-tunnel.sh \
+  | sudo HOSTNAME=agent.example.com bash
+```
+
+The script is idempotent. It:
+
+- Verifies `cloudflared` is installed (left over from §4).
+- On first run, calls `cloudflared tunnel login` so you can authorize the zone in your browser. The cert lands in `/root/.cloudflared/cert.pem`; re-runs skip the prompt.
+- Creates a tunnel named `work-station` (`TUNNEL_NAME=` to override) if it doesn't already exist.
+- Routes `${HOSTNAME}` to the tunnel via `cloudflared tunnel route dns`. Tolerates a pre-existing record.
+- Writes `/etc/cloudflared/config.yml` with an ingress rule pointing at `http://127.0.0.1:7420` (`LISTEN_HOST=` / `LISTEN_PORT=` to override).
+- Installs the `cloudflared` systemd unit (`cloudflared service install`) and `systemctl enable --now`s it.
+
+Verify:
+
+```bash
+systemctl status cloudflared
+journalctl -u cloudflared -n 50
+curl -sS https://agent.example.com/ws --http1.1 -i | head -1
+# expect "HTTP/1.1 401 Unauthorized" — the tunnel reaches the agent,
+# and the agent rejects the unauthenticated upgrade.
+```
+
+Then set `public_url` in the agent config so `cloud-agent pair show` prints the right URL:
+
+```bash
+echo 'public_url = "wss://agent.example.com"' | sudo tee -a /etc/cloud-agent/config.toml
+sudo systemctl restart cloud-agent
+sudo -u wsagent /opt/cloud-agent/cloud-agent pair show
+```
+
+Paste the printed URL + token block into **Settings → Cloud → Pair** in the desktop app (T19.15).
 
 ## 8. Tear-down
 

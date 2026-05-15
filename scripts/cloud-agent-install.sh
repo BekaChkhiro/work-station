@@ -223,20 +223,12 @@ cat <<EOF
   Stop:        systemctl stop cloud-agent
 
 Next step — expose the agent to your desktop via Cloudflare Tunnel
-(deferred to T19.15, which wires this up from the Settings UI). Until
-then, a manual one-liner from this VPS:
+(scripts/cloud-agent-tunnel.sh, T19.30). One command from this VPS:
 
-  cloudflared tunnel login
-  cloudflared tunnel create work-station
-  cloudflared tunnel route dns work-station agent.<your-domain>
-  cat > /etc/cloudflared/config.yml <<TUNNEL
-  tunnel: work-station
-  credentials-file: /root/.cloudflared/work-station.json
-  ingress:
-    - hostname: agent.<your-domain>
-      service: http://127.0.0.1:7420
-    - service: http_status:404
-  TUNNEL
-  systemctl enable --now cloudflared
+  curl -fsSL https://raw.githubusercontent.com/<you>/work-station/master/scripts/cloud-agent-tunnel.sh \\
+    | sudo HOSTNAME=agent.<your-domain> bash
+
+The script is idempotent and handles 'cloudflared tunnel login', tunnel
+create, DNS routing, /etc/cloudflared/config.yml, and the systemd unit.
 
 EOF
