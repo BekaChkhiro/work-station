@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   WsBridgeClient,
   WsBridgeClosedError,
+  WsBridgeError,
   WsBridgeServerError,
   type ConnectionState,
 } from "./client";
@@ -501,5 +502,109 @@ describe("WsBridgeClient — wire encoding", () => {
     MockWebSocket.at(0).emitOpen();
     await client.ptyWrite("s1", new Uint8Array());
     expect(MockWebSocket.at(0).sent).toHaveLength(0);
+  });
+});
+
+describe("WsBridgeClient — projects + settings (T19.9)", () => {
+  it("projectsList sends the request and resolves with the project array", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.projectsList();
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+    expect(frame.type).toBe("projects_list");
+
+    const projects = [
+      {
+        id: "p1",
+        name: "alpha",
+        path: "/p",
+        position: 0,
+        createdAt: 0,
+      },
+    ];
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "projects_list_result", id: frame.id, projects }),
+    );
+
+    await expect(pending).resolves.toEqual(projects);
+  });
+
+  it("projectSwitch rejects with WsBridgeError when the server returns `error`", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.projectSwitch("ghost");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+    expect(frame.type).toBe("project_switch");
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({
+        type: "error",
+        id: frame.id,
+        kind: "not_found",
+        message: "project not found: ghost",
+      }),
+    );
+
+    await expect(pending).rejects.toBeInstanceOf(WsBridgeError);
+    await expect(pending).rejects.toMatchObject({ kind: "not_found" });
+  });
+
+  it("settingsGet resolves with the settings view", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.settingsGet();
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({
+        type: "settings_result",
+        id: frame.id,
+        settings: { theme: "dark", lastActiveProject: "p1" },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual({ theme: "dark", lastActiveProject: "p1" });
+  });
+
+  it("onActiveProjectChanged fires on server-initiated events without a correlation id", () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const seen: (string | null)[] = [];
+    const dispose = client.onActiveProjectChanged((id) => seen.push(id));
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "active_project_changed", project_id: "p7" }),
+    );
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "active_project_changed", project_id: null }),
+    );
+    dispose();
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "active_project_changed", project_id: "p8" }),
+    );
+
+    expect(seen).toEqual(["p7", null]);
+  });
+
+  it("projectsList rejects with a protocol error when the server replies with a wrong frame", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+    const pending = client.projectsList();
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+    // The server should never resolve a `projects_list` request with
+    // `pty_ack`, but the client guards against the case anyway so a
+    // protocol drift surfaces with a clear error instead of a hung
+    // promise.
+    MockWebSocket.at(0).emitMessage(JSON.stringify({ type: "pty_ack", id: frame.id }));
+    await expect(pending).rejects.toBeInstanceOf(WsBridgeError);
   });
 });
