@@ -263,6 +263,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
         onReorder={props.onReorderProjects}
         onSettings={() => dispatchMenuAction("open-settings")}
         onToggleCollapse={() => props.onToggleSidebar?.()}
+        onRequestCloudPair={() => dispatchMenuAction("open-settings")}
         newProjectShortcut="⌘N"
       />
     </div>

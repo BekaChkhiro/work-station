@@ -32,6 +32,7 @@ import { For, Show, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
 import { Tooltip } from "../Tooltip";
 import { NotificationsBell } from "../NotificationsBell";
+import { WorkspaceToggle } from "../WorkspaceToggle";
 import { resolvedTheme, setThemeMode } from "../../stores/theme";
 
 export interface SidebarProject {
@@ -71,6 +72,10 @@ export interface SidebarProps {
   onSettings?(): void;
   /** Fires when the collapse/expand control is pressed. */
   onToggleCollapse?(): void;
+  /** T19.8 — fires when the user clicks Cloud on the workspace toggle
+   *  while the cloud-agent is unpaired. The parent typically opens the
+   *  Settings UI so the user can pair an agent (T19.15). */
+  onRequestCloudPair?(): void;
   /** Optional hint shown next to the "New project" button (e.g. "⌘N"). */
   newProjectShortcut?: string;
 }
@@ -231,6 +236,10 @@ export function Sidebar(props: SidebarProps): JSX.Element {
       data-dragging={drag() ? "true" : undefined}
       aria-label="Projects"
     >
+      <div class="ws-sb__workspace">
+        <WorkspaceToggle collapsed={isCollapsed()} onRequestPair={props.onRequestCloudPair} />
+      </div>
+
       <div class="ws-sb__section">
         <span class="ws-sb__section-label">Projects</span>
         <NotificationsBell />
