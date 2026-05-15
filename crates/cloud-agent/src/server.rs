@@ -40,6 +40,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use workstation_core::pty::PtyManager;
 use workstation_core::ws::auth::{require_bearer, AuthToken};
+use workstation_core::ws::system_monitor::{self, SystemMonitorHandle};
 
 use crate::dispatch;
 
@@ -81,7 +82,12 @@ impl Drop for ServerHandle {
 ///
 /// Exposed (crate-internal) for tests that want to drive the server
 /// against a real `TcpListener` without going through [`spawn`].
-pub(crate) fn router(token: AuthToken, pool: SqlitePool, manager: PtyManager) -> Router {
+pub(crate) fn router(
+    token: AuthToken,
+    pool: SqlitePool,
+    manager: PtyManager,
+    monitor: SystemMonitorHandle,
+) -> Router {
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
@@ -98,11 +104,17 @@ pub(crate) fn router(token: AuthToken, pool: SqlitePool, manager: PtyManager) ->
     // is created once at boot inside [`spawn`] (one registry per
     // daemon) and cloned per-connection by the dispatcher; `Clone` is
     // an Arc bump so the per-request extractor stays cheap.
+    //
+    // T19.28 adds the `SystemMonitorHandle` as a third `Extension`. One
+    // sampler runs per daemon (started in [`spawn`]); each WebSocket
+    // upgrade clones the handle and the dispatcher subscribes a fresh
+    // broadcast receiver so every connection sees the same poll tick.
     let ws_routes = Router::new()
         .route("/ws", get(ws_handler))
         .route_layer(middleware::from_fn_with_state(token, require_bearer))
         .layer(Extension(pool))
-        .layer(Extension(manager));
+        .layer(Extension(manager))
+        .layer(Extension(monitor));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -131,7 +143,26 @@ pub async fn spawn(
     // manager is an Arc bump, so the per-connection clone in
     // `ws_handler` is cheap.
     let manager = PtyManager::new();
-    let app = router(token, pool, manager);
+    // T19.28 — start the system-stats sampler. The handle is cloned
+    // per WebSocket upgrade via the `Extension` layer; the underlying
+    // broadcast sender keeps the publisher task alive even when no
+    // receivers are connected (idle daemon between PWA sessions).
+    let monitor = system_monitor::start(manager.clone());
+    spawn_with_components(token, pool, manager, monitor, addr).await
+}
+
+/// Same as [`spawn`] but with caller-supplied `PtyManager` and
+/// `SystemMonitorHandle`. Tests use this to inject a fast-tick monitor
+/// so `system_stats` smoke tests don't wait the production 4-second
+/// cadence.
+pub(crate) async fn spawn_with_components(
+    token: AuthToken,
+    pool: SqlitePool,
+    manager: PtyManager,
+    monitor: SystemMonitorHandle,
+    addr: SocketAddr,
+) -> std::io::Result<ServerHandle> {
+    let app = router(token, pool, manager, monitor);
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -205,9 +236,10 @@ async fn ws_handler(
     Query(_query): Query<WsQuery>,
     Extension(pool): Extension<SqlitePool>,
     Extension(manager): Extension<PtyManager>,
+    Extension(monitor): Extension<SystemMonitorHandle>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| dispatch::run_connection(socket, manager, pool))
+    upgrade.on_upgrade(move |socket| dispatch::run_connection(socket, manager, pool, monitor))
 }
 
 #[cfg(test)]
@@ -397,6 +429,96 @@ mod tests {
         assert_eq!(response.status().as_u16(), 101);
         let _ = socket.close(None).await;
 
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// Boot a server with a fast-tick system_monitor so the smoke test
+    /// doesn't wait the production 4-second cadence. Same shape as
+    /// `spawn_test_server` otherwise — fresh tempdir / pool, ephemeral
+    /// port, short post-bind sleep so axum is accepting before the
+    /// caller dials.
+    async fn spawn_test_server_with_fast_monitor() -> (ServerHandle, SocketAddr) {
+        let token = AuthToken::new("secret");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = Box::leak(Box::new(dir));
+        let pool = crate::db::open(dir.path()).await.expect("open db");
+        let manager = PtyManager::new();
+        let monitor =
+            system_monitor::start_with_interval(manager.clone(), Duration::from_millis(50));
+        let handle = spawn_with_components(
+            token,
+            pool,
+            manager,
+            monitor,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )
+        .await
+        .expect("bind ephemeral");
+        let addr = handle.local_addr;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (handle, addr)
+    }
+
+    /// T19.28 acceptance: a connected client receives `system_stats`
+    /// frames from the cloud-agent's broadcaster without sending any
+    /// request — the dispatch loop subscribes on upgrade and forwards
+    /// every snapshot through the shared outbound mpsc.
+    #[tokio::test]
+    async fn ws_connection_receives_system_stats() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (handle, addr) = spawn_test_server_with_fast_monitor().await;
+
+        let url = format!("ws://{addr}/ws");
+        let mut req = url.into_client_request().expect("client req");
+        req.headers_mut()
+            .insert("Authorization", "Bearer secret".parse().unwrap());
+        let (mut socket, response) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("connect");
+        assert_eq!(response.status().as_u16(), 101);
+
+        // Wait up to 3s for a system_stats frame. The monitor primes
+        // for ~200ms (MINIMUM_CPU_UPDATE_INTERVAL) then ticks every
+        // 50ms, so the first frame should land well inside the budget.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut payload_for_assert = String::new();
+        let mut saw_stats = false;
+        while tokio::time::Instant::now() < deadline && !saw_stats {
+            let next = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
+            if let Ok(Some(Ok(Message::Text(payload)))) = next {
+                if payload.contains(r#""type":"system_stats""#) {
+                    payload_for_assert = payload;
+                    saw_stats = true;
+                }
+            }
+        }
+        assert!(saw_stats, "never received system_stats frame");
+        assert!(
+            payload_for_assert.contains(r#""cpu_percent""#)
+                && payload_for_assert.contains(r#""ram_used_bytes""#)
+                && payload_for_assert.contains(r#""ram_total_bytes""#)
+                && payload_for_assert.contains(r#""pty_session_count""#),
+            "system_stats frame missing fields: {payload_for_assert}",
+        );
+
+        // Verify the publisher keeps ticking — a second frame within
+        // ~2 ticks proves the broadcaster wasn't a one-shot.
+        let mut saw_second = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline && !saw_second {
+            let next = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
+            if let Ok(Some(Ok(Message::Text(payload)))) = next {
+                if payload.contains(r#""type":"system_stats""#) {
+                    saw_second = true;
+                }
+            }
+        }
+        assert!(saw_second, "second system_stats frame never arrived");
+
+        let _ = socket.close(None).await;
         handle.shutdown().await.expect("shutdown");
     }
 }
