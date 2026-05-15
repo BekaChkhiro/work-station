@@ -38,6 +38,7 @@ use sqlx::sqlite::SqlitePool;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use workstation_core::pty::PtyManager;
 use workstation_core::ws::auth::{require_bearer, AuthToken};
 
 use crate::dispatch;
@@ -80,7 +81,7 @@ impl Drop for ServerHandle {
 ///
 /// Exposed (crate-internal) for tests that want to drive the server
 /// against a real `TcpListener` without going through [`spawn`].
-pub(crate) fn router(token: AuthToken, pool: SqlitePool) -> Router {
+pub(crate) fn router(token: AuthToken, pool: SqlitePool, manager: PtyManager) -> Router {
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
@@ -92,10 +93,16 @@ pub(crate) fn router(token: AuthToken, pool: SqlitePool) -> Router {
     // `Router::with_state` so the existing `with_state(token)` for the
     // auth middleware stays uncomplicated. `SqlitePool` is internally
     // Arc-shared so the per-request `Extension` extractor clones cheap.
+    //
+    // T19.26 adds the `PtyManager` as a second `Extension`. The manager
+    // is created once at boot inside [`spawn`] (one registry per
+    // daemon) and cloned per-connection by the dispatcher; `Clone` is
+    // an Arc bump so the per-request extractor stays cheap.
     let ws_routes = Router::new()
         .route("/ws", get(ws_handler))
         .route_layer(middleware::from_fn_with_state(token, require_bearer))
-        .layer(Extension(pool));
+        .layer(Extension(pool))
+        .layer(Extension(manager));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -119,7 +126,12 @@ pub async fn spawn(
     pool: SqlitePool,
     addr: SocketAddr,
 ) -> std::io::Result<ServerHandle> {
-    let app = router(token, pool);
+    // T19.26 — one `PtyManager` per daemon, shared across every
+    // WebSocket connection via the `Extension` layer. Cloning the
+    // manager is an Arc bump, so the per-connection clone in
+    // `ws_handler` is cheap.
+    let manager = PtyManager::new();
+    let app = router(token, pool, manager);
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -192,9 +204,10 @@ struct WsQuery {
 async fn ws_handler(
     Query(_query): Query<WsQuery>,
     Extension(pool): Extension<SqlitePool>,
+    Extension(manager): Extension<PtyManager>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| dispatch::run_connection(socket, pool))
+    upgrade.on_upgrade(move |socket| dispatch::run_connection(socket, manager, pool))
 }
 
 #[cfg(test)]
@@ -341,18 +354,16 @@ mod tests {
             .expect("connect");
         assert_eq!(response.status().as_u16(), 101);
 
-        // `pty_spawn` is still routed to the `unimplemented` branch
-        // after T19.25 (PTY handlers land in T19.26). The projects /
-        // settings types that were unimplemented in T19.24 are now
-        // wired, so the probe has to use a type that hasn't been
-        // touched yet to exercise the right code path.
+        // T19.26 wired the PTY handlers, so the probe has to use a
+        // type that's still on the `unimplemented` branch. `planflow_*`
+        // handlers don't land until T19.29 — `planflow_get_me` is the
+        // smallest payload that stays routed to the fallback arm.
         socket
             .send(Message::Text(
-                r#"{"type":"pty_spawn","id":"smoke-2","command":"bash","cols":80,"rows":24}"#
-                    .to_string(),
+                r#"{"type":"planflow_get_me","id":"smoke-2"}"#.to_string(),
             ))
             .await
-            .expect("send pty_spawn");
+            .expect("send planflow_get_me");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let mut payload_for_assert = String::new();
