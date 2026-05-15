@@ -19,3 +19,11 @@ state_dir = "/var/lib/cloud-agent"
 # Tracing filter. Same syntax as RUST_LOG. The --log-filter CLI flag
 # overrides this for a single run without editing the file.
 log_filter = "info"
+
+# Bearer token presented by the desktop / PWA on the /ws upgrade.
+# When this field is omitted, cloud-agent mints an ephemeral 256-bit
+# token at startup and prints it once on stderr; production
+# deployments should pin a value here so it survives restarts.
+# Generate a fresh token with:
+#   head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
+# auth_token = "REPLACE_ME"
