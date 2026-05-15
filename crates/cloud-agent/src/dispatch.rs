@@ -19,7 +19,11 @@
 //! `fs_list` / `fs_read` / `fs_write` / `fs_delete` against the
 //! cloud-agent's project-root allow-list — every path is canonicalised
 //! against the project's `path` from SQLite, so a client can never
-//! escape into the rest of the VPS filesystem.
+//! escape into the rest of the VPS filesystem. T19.28 attaches the
+//! shared `system_monitor` broadcaster: every connected client receives
+//! `system_stats` frames (cpu / ram / pty session count) on the same
+//! cadence the desktop bridge already emits, so the PWA Monitor view
+//! is backend-agnostic.
 //!
 //! The error taxonomy mirrors the desktop bridge so the PWA / desktop
 //! client doesn't need a second branch table:
@@ -55,6 +59,7 @@ use workstation_core::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
 use workstation_core::ws::protocol::{
     ClientMessage, ServerMessage, SettingsView, KNOWN_CLIENT_TYPES,
 };
+use workstation_core::ws::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
 use crate::db::{app_settings, projects};
 use crate::fs::{self as cfs, FsError};
@@ -128,7 +133,12 @@ impl Drop for Connection {
 /// own handles; both are internally `Arc`-shared and cheap to clone.
 /// Dropping the per-connection copies on teardown doesn't affect other
 /// concurrent connections.
-pub async fn run_connection(socket: WebSocket, manager: PtyManager, pool: SqlitePool) {
+pub async fn run_connection(
+    socket: WebSocket,
+    manager: PtyManager,
+    pool: SqlitePool,
+    monitor: SystemMonitorHandle,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
 
@@ -140,6 +150,13 @@ pub async fn run_connection(socket: WebSocket, manager: PtyManager, pool: Sqlite
         }
         let _ = ws_tx.close().await;
     });
+
+    // T19.28 — subscribe to the shared system-stats broadcaster and run
+    // a forwarder that ships each snapshot through the same outbound
+    // mpsc as PTY frames. Mirrors the desktop bridge's per-connection
+    // hook so the PWA sees `system_stats` frames over the cloud-agent's
+    // socket without any client-side branching.
+    let stats_forwarder = tokio::spawn(forward_stats(monitor.subscribe(), out_tx.clone()));
 
     let mut conn = Connection::new(manager, out_tx);
 
@@ -166,7 +183,36 @@ pub async fn run_connection(socket: WebSocket, manager: PtyManager, pool: Sqlite
     }
 
     drop(conn); // aborts per-session forwarders
+                // Stop the system-stats forwarder before its mpsc Sender
+                // gets dropped — otherwise its next `send` would race
+                // with sink_task tearing the channel down.
+    stats_forwarder.abort();
     let _ = sink_task.await;
+}
+
+/// Forward every broadcast snapshot to the per-connection outbound
+/// mpsc as a `system_stats` JSON frame. Exits when the broadcast
+/// closes (monitor task panicked — should never happen in practice)
+/// or the mpsc receiver is dropped (peer gone).
+///
+/// On `Lagged` we deliberately drop the missed snapshots and keep
+/// going — stats are time-series, replaying old samples would just
+/// stall the UI with stale data. The next live tick fills the gap.
+async fn forward_stats(mut rx: broadcast::Receiver<StatsSnapshot>, out_tx: mpsc::Sender<String>) {
+    loop {
+        match rx.recv().await {
+            Ok(snapshot) => {
+                let frame = snapshot.into_message();
+                if let Ok(payload) = serde_json::to_string(&frame) {
+                    if out_tx.send(payload).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
 }
 
 /// Two-phase parse so we can echo `id` on every failure path and

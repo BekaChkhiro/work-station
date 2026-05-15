@@ -41,6 +41,11 @@ base64 = "0.22"
 sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio"] }
 axum = { version = "=0.7.9", features = ["ws"] }
 web-push = "=0.10.4"
+# `ws::system_monitor` — periodic CPU / RAM / PTY-count sampler shared
+# between the desktop bridge and the headless cloud-agent (T19.28).
+# `default-features = false, features = ["system"]` mirrors src-tauri's
+# pin so the two crates link the same flavour of sysinfo.
+sysinfo = { version = "=0.39.1", default-features = false, features = ["system"] }
 p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "pem", "pkcs8", "std"] }
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
 # Same rationale as src-tauri/Cargo.toml: `web-push` transitively pulls
