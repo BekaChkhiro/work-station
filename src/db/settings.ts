@@ -74,6 +74,32 @@ const EditorTabsByProjectSchema = z.record(
     active: z.string().nullable(),
   }),
 );
+// T19.4 — cloud mode (Phase 19). The desktop talks to a user-owned VPS
+// running `cloud-agent` (T19.2) over WebSocket through a Cloudflare
+// Tunnel. The toggle is a single switch: off → local PTYs + local SQLite
+// (default), on → all workspace data is sourced from the remote agent.
+//
+// Token storage stays in the OS keychain (T11.2 pattern) so the
+// pairing secret never lands in the SQLite browser — only the URL and
+// non-secret status metadata live here.
+const CloudModeSchema = z.boolean();
+// Absolute wss:// URL the desktop dials. Validated as a non-empty
+// string here; the Settings UI (T19.15) does shape-level URL parsing
+// before write so we don't reject pre-pairing test values.
+const CloudAgentUrlSchema = z.string().min(1).nullable();
+// Mirrors the integration_status shape: a successful pairing stamps
+// `pairedAt` + the agent's advertised version, `lastHandshakeAt`
+// updates on every WS reconnect, and `needsRepairAt` flips on when
+// the agent returns 401/handshake-rejected so the Settings card can
+// surface a Re-pair affordance (T19.15). null until first pair.
+const CloudAgentStatusSchema = z
+  .object({
+    pairedAt: z.number().int(),
+    agentVersion: z.string().nullable().optional(),
+    lastHandshakeAt: z.number().int().nullable().optional(),
+    needsRepairAt: z.number().int().nullable().optional(),
+  })
+  .nullable();
 
 interface SettingDef<T> {
   schema: z.ZodType<T>;
@@ -103,6 +129,11 @@ export const SETTINGS = {
     EditorTabsByProjectSchema,
     {} as z.infer<typeof EditorTabsByProjectSchema>,
   ),
+  // T19.4 — Phase 19 cloud mode. Defaults keep the app in local mode so a
+  // fresh install behaves exactly like pre-T19.4 builds.
+  cloud_mode: def(CloudModeSchema, false),
+  cloud_agent_url: def(CloudAgentUrlSchema, null as z.infer<typeof CloudAgentUrlSchema>),
+  cloud_agent_status: def(CloudAgentStatusSchema, null as z.infer<typeof CloudAgentStatusSchema>),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;
