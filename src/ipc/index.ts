@@ -20,6 +20,8 @@ export type {
   PtySubscription,
   PtyWriteArgs,
 } from "./pty";
+export { subscribeSystemStats } from "./systemStats";
+export type { SystemStatsHandler, SystemStatsSubscription } from "./systemStats";
 export {
   CloudTransportUnavailableError,
   CloudTransportUnsupportedError,
