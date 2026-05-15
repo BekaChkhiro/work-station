@@ -48,7 +48,45 @@ export type ServerMessage =
       total_bytes: number;
       next_offset: number;
     }
-  | { type: "pty_exit"; session_id: string };
+  | { type: "pty_exit"; session_id: string }
+  // T19.9 — projects + settings bridge response frames. Wire shape mirrors
+  // the Rust `ServerMessage` (`src-tauri/src/ws/protocol.rs`) and the
+  // mobile client's type union.
+  | { type: "projects_list_result"; id?: string; projects: WsBridgeProject[] }
+  | { type: "project_result"; id?: string; project: WsBridgeProject }
+  | { type: "project_switched"; id?: string; project_id: string }
+  | { type: "settings_result"; id?: string; settings: WsBridgeSettings }
+  | { type: "active_project_changed"; project_id?: string | null }
+  // Generic error envelope used by the projects / settings handlers
+  // (distinct from `pty_error` which carries session_id).
+  | { type: "error"; id?: string; kind: string; message: string };
+
+/**
+ * T19.9 — wire shape of a Project as returned by the cloud-agent's
+ * `projects_list_result` / `project_result` frames. Matches the Rust
+ * `Project` struct's camelCase serde rename. Kept loose (`unknown`-ish
+ * envelope re-validated by Zod in `src/db/projects.ts`) so a backend
+ * drift surfaces at the schema boundary rather than here.
+ */
+export interface WsBridgeProject {
+  id: string;
+  name: string;
+  path: string;
+  color?: string | null;
+  icon?: string | null;
+  defaultCli?: string | null;
+  env?: Record<string, string>;
+  startupCommands?: string[];
+  workspaceTabs?: string[];
+  activeWorkspaceTab?: string;
+  position: number;
+  createdAt: number;
+}
+
+export interface WsBridgeSettings {
+  theme: string;
+  lastActiveProject: string | null;
+}
 
 export interface PtySpawnPayload {
   command: string;
@@ -122,6 +160,26 @@ export class WsBridgeServerError extends Error {
     this.name = "WsBridgeServerError";
   }
 }
+
+/**
+ * T19.9 — error returned by the projects / settings bridge handlers.
+ * `kind` is one of: `not_found` (unknown project id), `invalid_args`,
+ * `name_already_exists`, `invalid_path`, `internal`, `unsupported`
+ * (unknown message type). Mirrors the kind taxonomy used by
+ * `ProjectError` on the desktop side and the mobile client's
+ * `WsBridgeError`.
+ */
+export class WsBridgeError extends Error {
+  constructor(
+    public readonly kind: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WsBridgeError";
+  }
+}
+
+export type ActiveProjectChangedHandler = (projectId: string | null) => void;
 
 const DEFAULT_RECONNECT: Required<ReconnectOptions> = {
   initialDelayMs: 500,
@@ -300,6 +358,58 @@ export class WsBridgeClient {
     await this.request({ type: "pty_unsubscribe", session_id: sessionId });
   }
 
+  // ---- T19.9: projects + settings bridge ----------------------------------
+  //
+  // Mirrors the typed surface the mobile PWA uses (T18.4). Routed by the
+  // IPC transport layer (`src/ipc/transport.ts`) so cloud mode lands on
+  // the cloud-agent's WS handlers without each call site knowing.
+
+  async projectsList(): Promise<WsBridgeProject[]> {
+    const reply = await this.request({ type: "projects_list" });
+    if (reply.type !== "projects_list_result") {
+      throw new WsBridgeError("protocol", `expected projects_list_result, got ${reply.type}`);
+    }
+    return reply.projects;
+  }
+
+  async projectGet(projectId: string): Promise<WsBridgeProject> {
+    const reply = await this.request({ type: "project_get", project_id: projectId });
+    if (reply.type !== "project_result") {
+      throw new WsBridgeError("protocol", `expected project_result, got ${reply.type}`);
+    }
+    return reply.project;
+  }
+
+  async projectSwitch(projectId: string): Promise<void> {
+    const reply = await this.request({ type: "project_switch", project_id: projectId });
+    if (reply.type !== "project_switched") {
+      throw new WsBridgeError("protocol", `expected project_switched, got ${reply.type}`);
+    }
+  }
+
+  async settingsGet(): Promise<WsBridgeSettings> {
+    const reply = await this.request({ type: "settings_get" });
+    if (reply.type !== "settings_result") {
+      throw new WsBridgeError("protocol", `expected settings_result, got ${reply.type}`);
+    }
+    return reply.settings;
+  }
+
+  /**
+   * Listen to server-initiated `active_project_changed` events. Reserved
+   * in the wire protocol today (the cloud-agent only emits a Tauri event
+   * on its side); registering is safe and a future cross-WS broadcast
+   * will start firing this without a wrapper change.
+   */
+  onActiveProjectChanged(handler: ActiveProjectChangedHandler): () => void {
+    const wrapped: MessageHandler = (msg) => {
+      if (msg.type === "active_project_changed") {
+        handler(msg.project_id ?? null);
+      }
+    };
+    return this.onMessage(wrapped);
+  }
+
   // ---- internals ----------------------------------------------------------
 
   private buildUrl(): string {
@@ -397,9 +507,34 @@ export class WsBridgeClient {
         }
         return;
       }
+      case "error": {
+        // T19.9 — generic, non-PTY error envelope used by the projects /
+        // settings handlers and by the unknown-type fallback. Reject the
+        // pending promise with the typed bridge error so callers can
+        // branch on `.kind` without per-feature plumbing.
+        const id = parsed.id;
+        if (id !== undefined) {
+          const pending = this.pending.get(id);
+          if (pending) {
+            this.pending.delete(id);
+            pending.reject(new WsBridgeError(parsed.kind, parsed.message));
+          }
+        }
+        return;
+      }
+      case "active_project_changed": {
+        // Server-initiated event — no correlation id. Already delivered
+        // to every `onMessage` handler above (which is where
+        // `onActiveProjectChanged` listens).
+        return;
+      }
       case "pty_spawned":
       case "pty_ack":
-      case "pty_scrollback_chunk": {
+      case "pty_scrollback_chunk":
+      case "projects_list_result":
+      case "project_result":
+      case "project_switched":
+      case "settings_result": {
         const id = parsed.id;
         if (id !== undefined) {
           const pending = this.pending.get(id);
