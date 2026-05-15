@@ -37,7 +37,7 @@ import {
 /// Suffix appended to `cloud_agent_url` when dialing. The cloud-agent's
 /// axum router will serve the bridge under the same path the embedded
 /// server uses (T18.1) so the protocol layer stays identical.
-const CLOUD_AGENT_WS_PATH = "/ws";
+export const CLOUD_AGENT_WS_PATH = "/ws";
 
 /// Custom WebSocket close code the cloud-agent uses to signal "this
 /// pairing token is no longer valid". Mirrors the conventional 4xxx
