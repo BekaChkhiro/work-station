@@ -1952,14 +1952,327 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 ---
 
-## 10. Stretch / Phase 18 — Post-v0.1.0
+### Phase 18 — Mobile PWA Companion
+
+**Goal:** Read/light-write SolidStart PWA that pairs with the desktop's bridge server (T18.1–T18.6) — terminals, projects, system stats, PlanFlow tasks, push notifications.
+**Status:** Tracked in PlanFlow (T18.1 – T18.19). Detailed acceptance lives on each PlanFlow task; this entry is a placeholder so the phase numbering matches reality. Sync the full task table in a future plan revision once the phase closes.
+
+---
+
+### Phase 19 — Cloud Mode (cloud-agent)
+
+**Goal:** Run a slimmed-down Work Station daemon on a personal VPS so the desktop (and the Phase 18 PWA) can attach to a remote workspace — PTYs, projects, filesystem, PlanFlow, system stats — over an authenticated WebSocket fronted by Cloudflare Tunnel. Promotes the old "Cloud sync" and "SSH host support" stretch items into a real, scoped phase.
+**Estimate:** 3 weeks (120h).
+
+The agent is a separate Rust binary (`crates/cloud-agent`) that links the same `workstation-core` crate the desktop uses. The desktop gains a Local/Cloud toggle (T19.5/T19.8) and routes IPC through `WsBridgeClient` (T19.7) when in cloud mode.
+
+#### T19.0: Provision Hetzner development VPS
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: —
+- **Description**:
+  - Hetzner Ubuntu 24.04 host; bootstrap via `scripts/cloud-agent-bootstrap.sh` (sshd hardening, ufw, fail2ban, `wsagent` service user, install dirs, cloudflared).
+- **Acceptance**: Re-running the bootstrap script is a no-op; `ssh wsagent@<vps>` works from the operator's laptop.
+
+#### T19.1: Extract shared `workstation-core` crate
+
+- [x] **Status**: DONE
+- **Complexity**: L
+- **Dependencies**: T18.3, T18.4, T3.6, T2.3
+- **Description**:
+  - Lift PTY manager, projects, settings, push, pairing token, credentials, logging primitives out of `src-tauri/` into `crates/workstation-core` so both the desktop and the cloud-agent link the same implementation.
+- **Acceptance**: `cargo build` and `cargo test` green for the workspace; no regressions in desktop bridges.
+
+#### T19.2: cloud-agent binary scaffold
+
+- [x] **Status**: DONE
+- **Complexity**: L
+- **Dependencies**: T19.1, T18.1, T18.2
+- **Description**:
+  - Binary crate at `crates/cloud-agent` linking `workstation-core`.
+  - `clap-derive` CLI: `--config <PATH>`, `--log-filter <FILTER>`, `--check-config`. Resolves `$CLOUD_AGENT_CONFIG`, then `/etc/cloud-agent/config.toml`.
+  - TOML config (`listen`, `state_dir`, `log_filter`, optional `auth_token` / `public_url` / `planflow_api_token`) with `#[serde(deny_unknown_fields)]` and typed errors.
+  - `tracing` stderr subscriber + `EnvFilter` + panic hook (journald-friendly; no file appender).
+  - `main`: parse → load config (defaults if file missing) → init logging → `--check-config` short-circuits → ensure `state_dir` → tokio rt → wait on SIGTERM / SIGINT (Ctrl-C on Windows).
+- **Acceptance** _(re-validated 2026-05-16)_: `cargo build -p cloud-agent --release` succeeds; `--version` / `--help` / `--check-config` behave; full `cargo test -p cloud-agent` is green (122 tests as of T19.30, up from the original 9 scaffolding tests — later phases layered handlers on top of the same `main`/CLI shape, so the T19.2 acceptance still holds end-to-end).
+
+#### T19.3: One-line install script for cloud-agent
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.0, T19.2
+- **Description**:
+  - `scripts/cloud-agent-install.sh` — idempotent installer.
+  - Binary source precedence: `$BINARY` → `$BINARY_URL` → `/tmp/cloud-agent`. Smoke-tests `<binary> --version` before touching `/opt/cloud-agent`.
+  - Installs binary atomically via `install(1)`; first-install writes `/etc/cloud-agent/config.toml` (preserved on upgrades).
+  - Validates config with `--check-config` running **as `wsagent`** so path/permission issues surface before `systemctl start`.
+  - Writes a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `MemoryDenyWriteExecute`, `StateDirectory=cloud-agent`, `ReadWritePaths=` only on the state dir).
+  - `docs/cloud-agent-vps.md` §6 documents the build-on-laptop → scp → `curl | bash` flow.
+- **Acceptance** _(re-validated 2026-05-16)_: `shellcheck scripts/cloud-agent-install.sh` clean; the manual Cloudflare Tunnel recipe originally embedded at the foot of the script has been promoted to `scripts/cloud-agent-tunnel.sh` (T19.30) and the install script now points operators at it — a tightening of the original acceptance, not a regression.
+
+#### T19.4: Cloud mode settings schema
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: T3.4, T11.2
+- **Description**:
+  - `app_settings` rows for `cloud.url`, `cloud.last_handshake_at`, etc. Token stored in OS keychain via T11.2's credential store, never in plaintext settings.
+- **Acceptance**: Round-trips through the settings layer; token never lands in SQLite.
+
+#### T19.5: Workspace store — `cloudMode` flag
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.4
+- **Description**:
+  - Solid store exposes `cloudMode: 'local' | 'cloud'`; toggling persists to `app_settings` and triggers re-attach of the IPC routing layer (T19.6).
+- **Acceptance**: Flip persists across launches; subscribers update reactively without a reload.
+
+#### T19.6: IPC transport routing layer
+
+- [x] **Status**: DONE
+- **Complexity**: L
+- **Dependencies**: T19.5, T19.7
+- **Description**:
+  - Typed router in `src/ipc/` that switches every wrapper between Tauri `invoke` (local) and `WsBridgeClient` (cloud). One seam; component code is unaware.
+- **Acceptance**: Same UI works in both modes; only the transport differs.
+
+#### T19.7: WebSocket RPC client (desktop)
+
+- [x] **Status**: DONE
+- **Complexity**: L
+- **Dependencies**: T19.2, T19.4
+- **Description**:
+  - Replaces the T19.2 `wait_for_shutdown` stub with a real client: bearer auth, auto-reconnect with backoff, typed request/response envelopes, `CLOUD_AGENT_AUTH_FAILED_CODE` handling that nudges the user into Settings → Cloud.
+- **Acceptance**: Auth failure surfaces in the UI; flaky link reconnects without dropping in-flight calls.
+
+#### T19.8: Sidebar Local/Cloud toggle
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.5, T1.4, T6.1
+- **Description**:
+  - Pill control in the sidebar that flips `cloudMode`; status dot shows agent reachability.
+- **Acceptance**: Matches the prototype; keyboard accessible.
+
+#### T19.9: Projects data layer — cloud routing
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.6, T18.4
+- **Description**:
+  - Projects CRUD wrappers call `project_*` over WS when in cloud mode; the agent owns a separate SQLite at `<state_dir>/cloud-agent.db`.
+- **Acceptance**: Cloud projects render in the sidebar; CRUD round-trips.
+
+#### T19.10: PTY sessions — cloud routing
+
+- [x] **Status**: DONE
+- **Complexity**: L
+- **Dependencies**: T19.6, T18.3
+- **Description**:
+  - `pty_spawn` / `pty_write` / `pty_resize` / `pty_kill` and the binary output frames flow through the WS bridge instead of Tauri IPC.
+- **Acceptance**: Cloud PTY pane opens; keystrokes echo; resize and scrollback replay work.
+
+#### T19.11: Filesystem operations — cloud routing
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.6
+- **Description**:
+  - `fs_list` / `fs_read` / `fs_write` against the agent's filesystem, behind a path-jail. Native folder picker remains local; remote paths arrive as typed strings.
+- **Acceptance**: Path-jail rejects `..`; reads + writes succeed inside the allowed root.
+
+#### T19.12: Monaco editor — remote files
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.11, T13.3, T13.4
+- **Description**:
+  - Editor binds to the FS bridge in cloud mode (same wrappers as local, different transport). External-change detection still works.
+- **Acceptance**: Edit + save round-trips remote files; conflict prompt fires when the file changes under us.
+
+#### T19.13: PlanFlow Tasks — cloud routing
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.6, T18.6, T12.3
+- **Description**:
+  - PlanFlow tab uses the agent as a proxy when in cloud mode; agent uses its own API token (config or `PLANFLOW_API_TOKEN`).
+- **Acceptance**: Task list + start/progress/done flows work end-to-end through the agent.
+
+#### T19.14: System monitor — cloud routing
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: T19.6, T18.5
+- **Description**:
+  - `system_stats` broadcast from the agent (CPU, mem, load, uptime); desktop chart re-points to the cloud feed when toggled.
+- **Acceptance**: Chart updates ≥ 1 Hz from the agent without manual reconnect.
+
+#### T19.15: Cloud setup UI in Settings
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.7, T8.7, T11.2
+- **Description**:
+  - Settings → Cloud pane: paste URL + pairing token block, verify, save (URL → settings, token → keychain). Shows last handshake timestamp.
+- **Acceptance**: Bad token surfaces a typed error inline; on success the pill flips to Connected.
+
+#### T19.16: Connection status banner + reconnect
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.7, T11.9
+- **Description**:
+  - Top-of-window banner when the agent drops mid-session; auto-reconnect with backoff and a manual "Reconnect" affordance.
+- **Acceptance**: Disconnect → banner within 3s; manual reconnect succeeds without restarting the app.
+
+#### T19.17: Per-mode session and layout split
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.5, T5.8, T5.9
+- **Description**:
+  - Layout + open sessions are namespaced by mode so flipping Local ↔ Cloud does not clobber the other side's panes.
+- **Acceptance**: Flip away and back — every pane is exactly where it was.
+
+#### T19.18: Cloud mode E2E smoke test
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.9, T19.10, T19.11, T19.13, T19.16
+- **Description**:
+  - Living checklist at `qa/cloud-mode-e2e.md` — pair flow, project switch, PTY echo, FS edit, PlanFlow round-trip, monitor feed, disconnect/reconnect, auth failure.
+- **Acceptance**: Every scenario passes on the operator's machine; failures land as `PROJECT_PLAN.md` follow-up tasks.
+
+#### T19.19: Cloud mode docs + screencast
+
+- [ ] **Status**: IN_PROGRESS
+- **Complexity**: S
+- **Dependencies**: T19.0, T19.3, T19.15, T19.18
+- **Description**:
+  - Operator-facing walkthrough — provision, install, pair, fly. Recording lives alongside `docs/cloud-agent-vps.md`.
+- **Acceptance**: Following the doc end-to-end from a fresh VPS lands the operator on a working cloud session in under 15 minutes.
+
+#### T19.20: Extract WS protocol + auth into workstation-core
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.1, T18.1, T18.2
+- **Description**:
+  - Shared `ws::protocol` + `ws::auth` modules so the desktop bridge (T18.1/T18.2) and the cloud-agent (T19.21+) speak the same envelopes.
+- **Acceptance**: Both bridges link the same crate; no duplicated message structs.
+
+#### T19.21: cloud-agent — axum WebSocket listener
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.20, T19.2
+- **Description**:
+  - Bind `Config.listen`, expose `/ws` (upgrade) + `/healthz` (unauthenticated probe).
+- **Acceptance**: Connects, upgrades, replies to ping; `/healthz` returns 200.
+
+#### T19.22: cloud-agent — pairing token store
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: T19.20
+- **Description**:
+  - On-disk pairing token at `<state_dir>/pairing_token` with `cloud-agent pair show|rotate` subcommand. Mode 0600, owned by `wsagent`.
+- **Acceptance**: `pair show` prints the URL+token block; `pair rotate` replaces it atomically and prompts a restart.
+
+#### T19.23: cloud-agent — bearer auth middleware
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: T19.21, T19.22
+- **Description**:
+  - Accept the bearer either via `Authorization: Bearer …` header or `?token=…` query param (the latter for browser WS clients that can't set headers).
+  - Constant-time compare against the resolved auth token (config-pinned wins; otherwise the pairing file).
+- **Acceptance**: Missing / wrong / right-token cases all covered by tests; no token leaks in logs.
+
+#### T19.24: cloud-agent — dispatch loop
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.23
+- **Description**:
+  - Per-connection task that splits the WS into a read half + outbound mpsc pump (`futures-util::SinkExt`/`StreamExt`); routes typed envelopes to handler modules; unknown types reply with a typed `unsupported` error.
+- **Acceptance**: Multiple concurrent requests on one connection don't interleave frames; slow handler can't stall the writer.
+
+#### T19.25: cloud-agent — DB-backed settings + projects
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.24, T19.1, T3.6
+- **Description**:
+  - Cloud-agent owns `<state_dir>/cloud-agent.db` mirroring the desktop's `projects` + `app_settings` schema. `settings_get` and the projects CRUD handlers read/write that DB.
+- **Acceptance**: Same row written by either side decodes from the other; schema migrations run on first boot.
+
+#### T19.26: cloud-agent — PTY bridge handlers
+
+- [x] **Status**: DONE
+- **Complexity**: L
+- **Dependencies**: T19.24, T2.3, T18.3
+- **Description**:
+  - `pty_spawn` / `pty_write` / `pty_resize` / `pty_kill` over WS; binary output frames base64-encoded into `pty_output`; per-session broadcast tap powers reconnect-scrollback replay.
+- **Acceptance**: Echo + interactive shell behave identically to the desktop's local PTY; clean teardown on disconnect.
+
+#### T19.27: cloud-agent — `fs_*` handlers with allow-list
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.24
+- **Description**:
+  - `fs_list` / `fs_read` / `fs_write` operate inside a configurable allowed-roots list; rejects symlink escapes; max-size guard on reads/writes.
+- **Acceptance**: `..` traversal and symlink-out attacks fail with typed errors; in-bounds round-trips succeed.
+
+#### T19.28: cloud-agent — `system_stats` broadcaster
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: T19.24
+- **Description**:
+  - On connect, the agent pushes a `system_stats` frame on a fixed cadence (CPU, mem, load, uptime).
+- **Acceptance**: Frames arrive ≥ 1 Hz; values match `htop` within sampling noise.
+
+#### T19.29: cloud-agent — PlanFlow proxy handlers
+
+- [x] **Status**: DONE
+- **Complexity**: M
+- **Dependencies**: T19.24, T12.1
+- **Description**:
+  - `planflow_*` requests proxied to `api.planflow.tools`. Token from config (`planflow_api_token`) or `PLANFLOW_API_TOKEN` env (env wins). Upstream 401/429/5xx map to typed `unauthorized` / `rate_limited` / `server` errors; absent token → `no_credential`.
+- **Acceptance**: `wiremock`-backed tests cover the matrix; rotation takes effect on the next call without a restart.
+
+#### T19.30: Cloudflare Tunnel automation
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: T19.3, T19.21
+- **Description**:
+  - `scripts/cloud-agent-tunnel.sh` — operator passes `HOSTNAME=…`, the script handles `cloudflared tunnel login`, tunnel create, DNS route, `/etc/cloudflared/config.yml`, and the `cloudflared.service` unit. Idempotent.
+- **Acceptance**: Fresh VPS reaches "agent is live at `wss://<hostname>`" in one command; re-running picks up DNS or rename changes without state loss.
+
+#### T19.31: Re-validate T19.2 / T19.3 acceptance & sync PROJECT_PLAN.md
+
+- [x] **Status**: DONE
+- **Complexity**: S
+- **Dependencies**: T19.26, T19.27, T19.28, T19.29, T19.30
+- **Description**:
+  - Confirm the original T19.2 / T19.3 acceptance criteria still hold after T19.26–T19.30 layered onto the same scaffold; record the re-validation inline above.
+  - Sync this `PROJECT_PLAN.md` so Phase 19 is documented in the source of truth, not only in PlanFlow.
+- **Acceptance**: This section exists; T19.2 and T19.3 carry a dated "re-validated" note; the stretch list no longer claims cloud sync / SSH host / mobile companion as out-of-scope.
+
+---
+
+## 10. Stretch — Post-v0.1.0
 
 Explicitly out of v0.1 scope. Reconsider after dogfood data + user feedback.
 
 - **Linux desktop release** — AppImage + .deb (T10.11 promoted).
 - **Tmux-style daemon** — PTYs survive app quit; separate long-running process.
-- **Cloud sync** — project list sync across machines (encrypted).
-- **SSH host support** — remote PTY sessions.
 - **AI command suggestions panel** — hard pass (Warp's wedge).
 - **Workspace export/import** — `.workstation` file format.
 - **Plugin system** — custom CLI integrations.
@@ -1967,7 +2280,8 @@ Explicitly out of v0.1 scope. Reconsider after dogfood data + user feedback.
 - **Cross-session search** (T4.13 promoted).
 - **Multi-window** — pop-out terminals into separate windows.
 - **ARM64 Windows build**.
-- **Mobile companion / read-only viewer** — hard no for now.
+
+> _Previously listed here and now promoted into real phases:_ Cloud sync + SSH host support → Phase 19 (Cloud Mode); Mobile companion → Phase 18 (Mobile PWA).
 
 ---
 
