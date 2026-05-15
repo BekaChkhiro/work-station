@@ -43,6 +43,7 @@ use workstation_core::ws::auth::{require_bearer, AuthToken};
 use workstation_core::ws::system_monitor::{self, SystemMonitorHandle};
 
 use crate::dispatch;
+use crate::planflow_proxy::PlanflowState;
 
 /// Handle to a running cloud-agent server. Dropping it triggers a
 /// graceful shutdown and joins the background task.
@@ -87,6 +88,7 @@ pub(crate) fn router(
     pool: SqlitePool,
     manager: PtyManager,
     monitor: SystemMonitorHandle,
+    planflow: PlanflowState,
 ) -> Router {
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
@@ -109,12 +111,19 @@ pub(crate) fn router(
     // sampler runs per daemon (started in [`spawn`]); each WebSocket
     // upgrade clones the handle and the dispatcher subscribes a fresh
     // broadcast receiver so every connection sees the same poll tick.
+    // T19.29 layers a fourth `Extension` for the PlanFlow proxy state.
+    // One [`PlanflowState`] is created at daemon boot inside [`spawn`]
+    // (so the cached `cached_org_id` survives across reconnects) and
+    // cloned per connection via the extractor — the underlying
+    // `reqwest::Client` and the loader / cache handles are Arc-shared,
+    // so the per-request clone is cheap.
     let ws_routes = Router::new()
         .route("/ws", get(ws_handler))
         .route_layer(middleware::from_fn_with_state(token, require_bearer))
         .layer(Extension(pool))
         .layer(Extension(manager))
-        .layer(Extension(monitor));
+        .layer(Extension(monitor))
+        .layer(Extension(planflow));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -136,6 +145,7 @@ pub(crate) fn router(
 pub async fn spawn(
     token: AuthToken,
     pool: SqlitePool,
+    planflow: PlanflowState,
     addr: SocketAddr,
 ) -> std::io::Result<ServerHandle> {
     // T19.26 — one `PtyManager` per daemon, shared across every
@@ -148,7 +158,7 @@ pub async fn spawn(
     // broadcast sender keeps the publisher task alive even when no
     // receivers are connected (idle daemon between PWA sessions).
     let monitor = system_monitor::start(manager.clone());
-    spawn_with_components(token, pool, manager, monitor, addr).await
+    spawn_with_components(token, pool, manager, monitor, planflow, addr).await
 }
 
 /// Same as [`spawn`] but with caller-supplied `PtyManager` and
@@ -160,9 +170,10 @@ pub(crate) async fn spawn_with_components(
     pool: SqlitePool,
     manager: PtyManager,
     monitor: SystemMonitorHandle,
+    planflow: PlanflowState,
     addr: SocketAddr,
 ) -> std::io::Result<ServerHandle> {
-    let app = router(token, pool, manager, monitor);
+    let app = router(token, pool, manager, monitor, planflow);
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -237,9 +248,12 @@ async fn ws_handler(
     Extension(pool): Extension<SqlitePool>,
     Extension(manager): Extension<PtyManager>,
     Extension(monitor): Extension<SystemMonitorHandle>,
+    Extension(planflow): Extension<PlanflowState>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| dispatch::run_connection(socket, manager, pool, monitor))
+    upgrade.on_upgrade(move |socket| {
+        dispatch::run_connection(socket, manager, pool, monitor, planflow)
+    })
 }
 
 #[cfg(test)]
@@ -259,9 +273,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir = Box::leak(Box::new(dir));
         let pool = crate::db::open(dir.path()).await.expect("open db");
+        // T19.29 — these tests exercise the auth / healthz / dispatch
+        // routing paths; none of them speak PlanFlow. Hand the server a
+        // PlanflowState with no token so any stray `planflow_*` frame
+        // would short-circuit on `no_credential` instead of hitting the
+        // network. The real proxy behaviour is covered by the
+        // `planflow_proxy::tests` suite against a wiremock server.
+        let planflow = PlanflowState::for_test(
+            "http://127.0.0.1:1",
+            std::sync::Arc::new(|| Ok(None)),
+        );
         let handle = spawn(
             token,
             pool,
+            planflow,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )
         .await
@@ -386,16 +411,17 @@ mod tests {
             .expect("connect");
         assert_eq!(response.status().as_u16(), 101);
 
-        // T19.26 wired the PTY handlers, so the probe has to use a
-        // type that's still on the `unimplemented` branch. `planflow_*`
-        // handlers don't land until T19.29 — `planflow_get_me` is the
-        // smallest payload that stays routed to the fallback arm.
+        // T19.29 wired the `planflow_*` proxy variants — the only
+        // remaining known-but-unimplemented family is `planflow_chat_*`.
+        // Those route to a live desktop PTY and have no cloud-side
+        // analog. `planflow_chat_clear` is the smallest payload that
+        // stays on the fallback arm.
         socket
             .send(Message::Text(
-                r#"{"type":"planflow_get_me","id":"smoke-2"}"#.to_string(),
+                r#"{"type":"planflow_chat_clear","id":"smoke-2","project_id":"p"}"#.to_string(),
             ))
             .await
-            .expect("send planflow_get_me");
+            .expect("send planflow_chat_clear");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let mut payload_for_assert = String::new();
@@ -445,11 +471,16 @@ mod tests {
         let manager = PtyManager::new();
         let monitor =
             system_monitor::start_with_interval(manager.clone(), Duration::from_millis(50));
+        let planflow = PlanflowState::for_test(
+            "http://127.0.0.1:1",
+            std::sync::Arc::new(|| Ok(None)),
+        );
         let handle = spawn_with_components(
             token,
             pool,
             manager,
             monitor,
+            planflow,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )
         .await

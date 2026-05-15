@@ -23,7 +23,16 @@
 //! shared `system_monitor` broadcaster: every connected client receives
 //! `system_stats` frames (cpu / ram / pty session count) on the same
 //! cadence the desktop bridge already emits, so the PWA Monitor view
-//! is backend-agnostic.
+//! is backend-agnostic. T19.29 lights up the `planflow_*` proxy
+//! variants — `planflow_get_me` / `list_projects` / `list_tasks` /
+//! `list_active_work` / `list_comments` / `create_comment` /
+//! `start_work` / `stop_work` / `update_task_status` — by forwarding
+//! each call to PlanFlow's REST API through [`crate::planflow_proxy`].
+//! The wire contract (`planflow_result` / `planflow_error` with a
+//! stable `kind`) matches the desktop bridge so the PWA's client
+//! branches solely on response type, never on which backend is
+//! serving the request. `planflow_chat_*` stays desktop-only — those
+//! route into a live PTY on the desktop side and have no analog here.
 //!
 //! The error taxonomy mirrors the desktop bridge so the PWA / desktop
 //! client doesn't need a second branch table:
@@ -31,7 +40,7 @@
 //!   * `invalid_json`  — payload didn't parse, or `type` was missing.
 //!   * `unsupported`   — `type` is a string we don't recognize at all.
 //!   * `unimplemented` — `type` is known but the cloud-agent hasn't
-//!     wired its handler yet (FS / PlanFlow land in follow-ups).
+//!     wired its handler yet (currently `planflow_chat_*` only).
 //!   * `invalid_frame` — client sent a binary frame on a text-only wire.
 //!   * `not_found`     — project id in the request doesn't exist.
 //!   * `internal`      — SQLite or serialization failure.
@@ -43,6 +52,10 @@
 //!     `workstation_core::pty`.
 //!   * `out_of_scope` / `not_a_directory` / `too_large` — FS-specific
 //!     failures from the path-jail or size limits in [`crate::fs`].
+//!   * `unauthorized` / `rate_limited` / `client` / `server` /
+//!     `network` / `timeout` / `decode` / `no_credential` /
+//!     `credential` — PlanFlow proxy failures from
+//!     [`crate::planflow_proxy`].
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -63,6 +76,7 @@ use workstation_core::ws::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
 use crate::db::{app_settings, projects};
 use crate::fs::{self as cfs, FsError};
+use crate::planflow_proxy::{self, PlanflowState};
 
 /// Capacity for the per-connection outbound mpsc.
 ///
@@ -138,6 +152,7 @@ pub async fn run_connection(
     manager: PtyManager,
     pool: SqlitePool,
     monitor: SystemMonitorHandle,
+    planflow: PlanflowState,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
@@ -166,7 +181,7 @@ pub async fn run_connection(
         };
         match msg {
             Message::Text(payload) => {
-                handle_text(&mut conn, &pool, &payload).await;
+                handle_text(&mut conn, &pool, &planflow, &payload).await;
             }
             Message::Binary(_) => {
                 send_error(
@@ -219,7 +234,12 @@ async fn forward_stats(mut rx: broadcast::Receiver<StatsSnapshot>, out_tx: mpsc:
 /// distinguish "unknown message type" (`unsupported`) from "malformed
 /// payload for a known type" (`invalid_json`). Mirrors the desktop
 /// bridge's `super::ws::pty_bridge::handle_text` flow.
-async fn handle_text(conn: &mut Connection, pool: &SqlitePool, payload: &str) {
+async fn handle_text(
+    conn: &mut Connection,
+    pool: &SqlitePool,
+    planflow: &PlanflowState,
+    payload: &str,
+) {
     let value: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(error) => {
@@ -269,7 +289,10 @@ async fn handle_text(conn: &mut Connection, pool: &SqlitePool, payload: &str) {
     let typed = match type_str.as_str() {
         "settings_get" | "projects_list" | "project_get" | "project_switch" | "pty_spawn"
         | "pty_write" | "pty_resize" | "pty_kill" | "pty_scrollback" | "pty_subscribe"
-        | "pty_unsubscribe" | "fs_list" | "fs_read" | "fs_write" | "fs_delete" => {
+        | "pty_unsubscribe" | "fs_list" | "fs_read" | "fs_write" | "fs_delete"
+        | "planflow_get_me" | "planflow_list_projects" | "planflow_list_tasks"
+        | "planflow_list_active_work" | "planflow_list_comments" | "planflow_create_comment"
+        | "planflow_start_work" | "planflow_stop_work" | "planflow_update_task_status" => {
             match serde_json::from_value::<ClientMessage>(value) {
                 Ok(msg) => msg,
                 Err(error) => {
@@ -296,7 +319,7 @@ async fn handle_text(conn: &mut Connection, pool: &SqlitePool, payload: &str) {
         }
     };
 
-    dispatch_typed(conn, pool, typed).await;
+    dispatch_typed(conn, pool, planflow, typed).await;
 }
 
 /// Route a parsed [`ClientMessage`] to its handler. Split out of
@@ -310,7 +333,12 @@ async fn handle_text(conn: &mut Connection, pool: &SqlitePool, payload: &str) {
 /// expected shape — splitting further would add ceremony without
 /// shrinking any individual arm.
 #[allow(clippy::too_many_lines)]
-async fn dispatch_typed(conn: &mut Connection, pool: &SqlitePool, typed: ClientMessage) {
+async fn dispatch_typed(
+    conn: &mut Connection,
+    pool: &SqlitePool,
+    planflow: &PlanflowState,
+    typed: ClientMessage,
+) {
     match typed {
         ClientMessage::SettingsGet { id } => {
             handle_settings_get(&conn.out_tx, pool, id).await;
@@ -422,6 +450,80 @@ async fn dispatch_typed(conn: &mut Connection, pool: &SqlitePool, typed: ClientM
             relative_path,
         } => {
             handle_fs_delete(&conn.out_tx, pool, id, project_id, relative_path).await;
+        }
+        // T19.29 — PlanFlow proxy. Each handler forwards to PlanFlow's
+        // REST API and ships back a `planflow_result` / `planflow_error`
+        // frame with the same kind taxonomy the desktop bridge uses, so
+        // the PWA client doesn't need a per-backend branch.
+        ClientMessage::PlanflowGetMe { id } => {
+            planflow_proxy::handle_get_me(planflow, &conn.out_tx, id).await;
+        }
+        ClientMessage::PlanflowListProjects {
+            id,
+            organization_id,
+        } => {
+            planflow_proxy::handle_list_projects(planflow, &conn.out_tx, id, organization_id).await;
+        }
+        ClientMessage::PlanflowListTasks {
+            id,
+            project_id,
+            status,
+        } => {
+            planflow_proxy::handle_list_tasks(planflow, &conn.out_tx, id, project_id, status).await;
+        }
+        ClientMessage::PlanflowListActiveWork { id, project_id } => {
+            planflow_proxy::handle_list_active_work(planflow, &conn.out_tx, id, project_id).await;
+        }
+        ClientMessage::PlanflowListComments {
+            id,
+            project_id,
+            task_id,
+        } => {
+            planflow_proxy::handle_list_comments(planflow, &conn.out_tx, id, project_id, task_id)
+                .await;
+        }
+        ClientMessage::PlanflowCreateComment {
+            id,
+            project_id,
+            task_id,
+            body,
+        } => {
+            planflow_proxy::handle_create_comment(
+                planflow,
+                &conn.out_tx,
+                id,
+                project_id,
+                task_id,
+                body,
+            )
+            .await;
+        }
+        ClientMessage::PlanflowStartWork {
+            id,
+            project_id,
+            task_id,
+        } => {
+            planflow_proxy::handle_start_work(planflow, &conn.out_tx, id, project_id, task_id)
+                .await;
+        }
+        ClientMessage::PlanflowStopWork { id, project_id } => {
+            planflow_proxy::handle_stop_work(planflow, &conn.out_tx, id, project_id).await;
+        }
+        ClientMessage::PlanflowUpdateTaskStatus {
+            id,
+            project_id,
+            task_id,
+            status,
+        } => {
+            planflow_proxy::handle_update_task_status(
+                planflow,
+                &conn.out_tx,
+                id,
+                project_id,
+                task_id,
+                status,
+            )
+            .await;
         }
         // Variants not in the typed-allowlist filter inside
         // [`handle_text`] are routed to `unimplemented` before reaching
@@ -1103,12 +1205,23 @@ mod tests {
         Connection::new(PtyManager::new(), out_tx)
     }
 
+    /// Build a [`PlanflowState`] suitable for dispatch tests that
+    /// shouldn't reach the network. Points the proxy at a closed
+    /// loopback port and returns no token — any `planflow_*` message
+    /// short-circuits with `no_credential` instead of hanging on a
+    /// real DNS lookup. Tests that actually exercise the proxy live in
+    /// `planflow_proxy::tests` against a `wiremock` server.
+    fn offline_planflow_state() -> PlanflowState {
+        PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|| Ok(None)))
+    }
+
     /// Drain everything the dispatcher emitted into a Vec<Value> for
     /// easy assertions. Closes the channel first so the loop terminates.
     async fn drive(pool: &SqlitePool, payload: &str) -> Vec<Value> {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
         let mut conn = fresh_conn(out_tx);
-        handle_text(&mut conn, pool, payload).await;
+        let planflow = offline_planflow_state();
+        handle_text(&mut conn, pool, &planflow, payload).await;
         drop(conn);
         let mut frames = Vec::new();
         while let Some(raw) = out_rx.recv().await {
@@ -1297,12 +1410,17 @@ mod tests {
 
     #[tokio::test]
     async fn known_but_unimplemented_type_replies_with_unimplemented() {
-        // PlanFlow handlers are still unimplemented after T19.26; pick a
-        // representative `planflow_*` variant for the probe so it stays
-        // green until those land. `pty_spawn` no longer qualifies — it
-        // routes to the real handler now.
+        // After T19.29 the only known-but-unimplemented variants are
+        // the `planflow_chat_*` family — those route into a desktop PTY
+        // and have no cloud-side analog. Pick one as the probe so this
+        // test stays green when the rest of the unimplemented list
+        // continues to shrink.
         let pool = fresh_pool().await;
-        let frames = drive(&pool, r#"{"type":"planflow_get_me","id":"req-3"}"#).await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"planflow_chat_send","id":"req-3","project_id":"p","content":"hi"}"#,
+        )
+        .await;
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "unimplemented");
@@ -1395,9 +1513,11 @@ mod tests {
 
         // Drive through handle_text so the dispatcher's routing is
         // exercised end-to-end (typed parse + spawn arm).
+        let planflow = offline_planflow_state();
         handle_text(
             &mut conn,
             &pool,
+            &planflow,
             r#"{"type":"pty_spawn","id":"spawn-1","command":"/bin/sh","args":["-c","echo HELLO_FROM_CLOUD; sleep 30"],"cols":80,"rows":24}"#,
         )
         .await;
@@ -1460,9 +1580,11 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
         let mut conn = fresh_conn(out_tx);
 
+        let planflow = offline_planflow_state();
         handle_text(
             &mut conn,
             &pool,
+            &planflow,
             r#"{"type":"pty_spawn","id":"x","command":"   ","cols":80,"rows":24}"#,
         )
         .await;
@@ -1479,9 +1601,11 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
         let mut conn = fresh_conn(out_tx);
 
+        let planflow = offline_planflow_state();
         handle_text(
             &mut conn,
             &pool,
+            &planflow,
             r#"{"type":"pty_spawn","id":"x","command":"/bin/sh","cols":0,"rows":24}"#,
         )
         .await;
@@ -1535,9 +1659,11 @@ mod tests {
         // unsubscribe is fire-and-forget — even for an unknown session
         // we ack so the PWA doesn't have to special-case races between
         // its own session teardown and the agent's session removal.
+        let planflow = offline_planflow_state();
         handle_text(
             &mut conn,
             &pool,
+            &planflow,
             r#"{"type":"pty_unsubscribe","id":"u-1","session_id":"00000000-0000-0000-0000-000000000000"}"#,
         )
         .await;
