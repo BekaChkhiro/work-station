@@ -4,11 +4,11 @@
 //! the surface intentionally narrow:
 //!
 //!   * `GET /healthz` — unauthenticated liveness probe.
-//!   * `GET /ws`      — bearer-authenticated WebSocket upgrade. The
-//!     upgrade handler is a placeholder that accepts the connection and
-//!     closes it cleanly with a typed `error{kind:"unimplemented"}`
-//!     frame; later tasks (PTY bridge, project state) replace it with
-//!     the full dispatcher.
+//!   * `GET /ws`      — bearer-authenticated WebSocket upgrade, handed
+//!     off to [`crate::dispatch::run_connection`] (T19.24). Phase-1
+//!     supports `settings_get` against a stubbed in-memory view; every
+//!     other known `ClientMessage` type replies with a typed
+//!     `error{kind:"unimplemented"}` frame.
 //!
 //! Auth re-uses [`workstation_core::ws::auth`] so the cloud-agent and
 //! the desktop bridge speak the same handshake.
@@ -21,7 +21,7 @@
 
 use std::net::SocketAddr;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, Request};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -33,6 +33,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use workstation_core::ws::auth::{require_bearer, AuthToken};
+
+use crate::dispatch;
 
 /// Handle to a running cloud-agent server. Dropping it triggers a
 /// graceful shutdown and joins the background task.
@@ -166,26 +168,11 @@ struct WsQuery {
     token: Option<String>,
 }
 
-/// `GET /ws` — placeholder upgrade handler.
-///
-/// Auth has already passed at the middleware. The PTY / project bridges
-/// land in follow-up tasks; for now we accept the upgrade, emit a
-/// typed `error{kind:"unimplemented"}` frame so clients see a
-/// deterministic shape, and close cleanly.
+/// `GET /ws` — WebSocket upgrade. Auth has already passed at the
+/// middleware; we hand the live socket off to the dispatch loop which
+/// owns per-connection state until the peer closes (T19.24).
 async fn ws_handler(Query(_query): Query<WsQuery>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(ws_placeholder)
-}
-
-async fn ws_placeholder(mut socket: WebSocket) {
-    let frame = serde_json::json!({
-        "type": "error",
-        "kind": "unimplemented",
-        "message": "cloud-agent ws bridge is scaffold-only (T19.21); PTY and project dispatchers land in follow-up tasks",
-    });
-    // Best-effort: a write failure here just means the client hung up
-    // first. The placeholder doesn't need retry / backoff.
-    let _ = socket.send(Message::Text(frame.to_string())).await;
-    let _ = socket.close().await;
+    upgrade.on_upgrade(dispatch::run_connection)
 }
 
 #[cfg(test)]
@@ -245,10 +232,16 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
+    /// End-to-end smoke test for the T19.24 dispatch loop: a valid
+    /// upgrade keeps the socket open, and a real `settings_get` request
+    /// resolves with the stubbed `SettingsResult` frame. Together with
+    /// the dispatcher unit tests in `dispatch.rs` this proves the full
+    /// path: axum upgrade → auth middleware → dispatch loop → reply.
     #[tokio::test]
-    async fn ws_upgrade_accepts_valid_token_and_sends_unimplemented() {
-        use futures_util::StreamExt;
+    async fn ws_settings_get_returns_stubbed_view() {
+        use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message;
 
         let (handle, addr) = spawn_test_server().await;
 
@@ -261,23 +254,77 @@ mod tests {
             .expect("connect");
         assert_eq!(response.status().as_u16(), 101);
 
-        // First (and only) frame should be the unimplemented error,
-        // followed by a close. Bound the wait so a misrouted handler
-        // surfaces as a test failure rather than a hang.
+        socket
+            .send(Message::Text(
+                r#"{"type":"settings_get","id":"smoke-1"}"#.to_string(),
+            ))
+            .await
+            .expect("send settings_get");
+
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let mut payload_for_assert = String::new();
         while tokio::time::Instant::now() < deadline && payload_for_assert.is_empty() {
             let next = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
-            if let Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(payload)))) = next {
+            if let Ok(Some(Ok(Message::Text(payload)))) = next {
+                payload_for_assert = payload;
+            }
+        }
+        assert!(
+            payload_for_assert.contains(r#""type":"settings_result""#)
+                && payload_for_assert.contains(r#""id":"smoke-1""#)
+                && payload_for_assert.contains(r#""theme":"dark""#)
+                && payload_for_assert.contains(r#""lastActiveProject":null"#),
+            "expected settings_result frame, got {payload_for_assert:?}",
+        );
+
+        let _ = socket.close(None).await;
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// Known-but-unimplemented type goes through the dispatch loop and
+    /// produces the typed `error{kind:"unimplemented"}` frame end-to-end.
+    /// Catches a regression where the upgrade handler accidentally
+    /// short-circuits before the dispatcher runs.
+    #[tokio::test]
+    async fn ws_unimplemented_known_type_returns_typed_error() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (handle, addr) = spawn_test_server().await;
+
+        let url = format!("ws://{addr}/ws");
+        let mut req = url.into_client_request().expect("client req");
+        req.headers_mut()
+            .insert("Authorization", "Bearer secret".parse().unwrap());
+        let (mut socket, response) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("connect");
+        assert_eq!(response.status().as_u16(), 101);
+
+        socket
+            .send(Message::Text(
+                r#"{"type":"projects_list","id":"smoke-2"}"#.to_string(),
+            ))
+            .await
+            .expect("send projects_list");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut payload_for_assert = String::new();
+        while tokio::time::Instant::now() < deadline && payload_for_assert.is_empty() {
+            let next = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
+            if let Ok(Some(Ok(Message::Text(payload)))) = next {
                 payload_for_assert = payload;
             }
         }
         assert!(
             payload_for_assert.contains(r#""type":"error""#)
-                && payload_for_assert.contains(r#""kind":"unimplemented""#),
-            "missing unimplemented frame: {payload_for_assert:?}",
+                && payload_for_assert.contains(r#""kind":"unimplemented""#)
+                && payload_for_assert.contains(r#""id":"smoke-2""#),
+            "expected unimplemented frame, got {payload_for_assert:?}",
         );
 
+        let _ = socket.close(None).await;
         handle.shutdown().await.expect("shutdown");
     }
 

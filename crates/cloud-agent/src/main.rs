@@ -19,6 +19,7 @@ use workstation_core::ws::auth::AuthToken;
 
 mod cli;
 mod config;
+mod dispatch;
 mod logging;
 mod pair;
 mod server;

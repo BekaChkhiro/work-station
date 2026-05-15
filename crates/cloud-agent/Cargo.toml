@@ -46,6 +46,12 @@ tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
 # workstation-core so the workspace links a single copy.
 axum = { version = "=0.7.9", features = ["ws"] }
 
+# T19.24 — `SinkExt`/`StreamExt` for the per-connection dispatch loop
+# that splits the WebSocket into a read half + outbound mpsc pump.
+# Mirrors src-tauri's pty_bridge.rs at the same version so the workspace
+# resolves a single copy.
+futures-util = "=0.3.31"
+
 thiserror = "=2.0.18"
 
 [dev-dependencies]
@@ -55,7 +61,6 @@ tempfile = "=3.13.0"
 # `tokio-tungstenite` for the real WebSocket upgrade smoke test.
 reqwest = { version = "=0.13.3", default-features = false, features = ["rustls"] }
 tokio-tungstenite = "=0.24.0"
-futures-util = "=0.3.31"
 
 [lints.clippy]
 # Mirror the rest of the workspace (T1.3 / T19.1) so the daemon picks
