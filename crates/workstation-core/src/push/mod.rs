@@ -6,13 +6,13 @@
 //! [`notify`] without threading state through every call site.
 //!
 //! Surface:
-//!   * `init(pool)`                — boot the service; idempotent
-//!   * `service()`                 — borrow the live service handle
-//!   * `notify(payload)`           — fire-and-forget broadcast to every
-//!                                    stored subscription
+//!   * `init(pool)` — boot the service; idempotent
+//!   * `service()` — borrow the live service handle
+//!   * `notify(payload)` — fire-and-forget broadcast to every stored
+//!     subscription
 //!   * HTTP endpoints under `/push/...` mounted by `ws::server::router`
 //!
-//! Subscriptions are stored in SQLite (migration 0011). Sends that
+//! Subscriptions are stored in `SQLite` (migration 0011). Sends that
 //! observe HTTP 404/410 from the push service prune the corresponding
 //! row — those status codes mean the user revoked the subscription on
 //! the device.
@@ -128,7 +128,7 @@ pub(super) fn push_service_contact(service: &PushService) -> &str {
 ///
 /// Sends run on a background tokio task — callers don't await delivery.
 /// Failed sends are logged; 404/410 responses prune the subscription
-/// from SQLite so the next broadcast doesn't waste a network round trip
+/// from `SQLite` so the next broadcast doesn't waste a network round trip
 /// on a dead endpoint.
 ///
 /// No-op if `init` hasn't been called (e.g. boot failed before the push

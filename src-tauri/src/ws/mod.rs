@@ -30,11 +30,14 @@ use tauri::AppHandle;
 use crate::pty::PtyManager;
 use crate::push::PushService;
 
-mod auth;
+// T19.20: `protocol` and `auth` moved to `workstation_core::ws`. Re-export
+// them as submodules of `crate::ws` so the sibling bridges keep using
+// `super::protocol` / `super::auth` paths without churn.
+pub use workstation_core::ws::{auth, protocol};
+
 mod chat_bridge;
 mod planflow_bridge;
 mod projects_bridge;
-mod protocol;
 mod pty_bridge;
 mod server;
 mod system_monitor;

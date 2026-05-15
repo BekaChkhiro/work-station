@@ -1,6 +1,6 @@
 //! Web Push delivery (T18.19).
 //!
-//! Builds and dispatches a WebPushMessage to every stored subscription
+//! Builds and dispatches a `WebPushMessage` to every stored subscription
 //! via the `web-push` crate. The `web-push` 0.10+ surface exposes:
 //!
 //!   * `SubscriptionInfo` — the `(endpoint, p256dh, auth)` triple from
