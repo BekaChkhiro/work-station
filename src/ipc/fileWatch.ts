@@ -11,10 +11,19 @@
 // On the frontend the watch ID is the only handle we need; the editor
 // holds onto it for the lifetime of an open file and tears it down on
 // close / file-switch / unmount.
+//
+// T19.11: start/stop route through `routeIpcLocalOnly` since the
+// cloud-agent has no filesystem-watch RPC. `onExternalChange` keeps
+// listening on the local Tauri event bus unconditionally — the channel
+// is harmless when no watch was ever started (no events arrive), and
+// short-circuiting it would force callers to re-subscribe on a
+// cloud→local transition. The wrapper handles both cases the same way.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { z } from "zod";
+
+import { routeIpcLocalOnly } from "./transport";
 
 const ExternalChangeSchema = z.object({
   watchId: z.number().int().nonnegative(),
@@ -26,18 +35,22 @@ const ExternalChangeSchema = z.object({
 export type ExternalChangeEvent = z.infer<typeof ExternalChangeSchema>;
 
 export async function startFileWatch(projectRoot: string, relativePath: string): Promise<number> {
-  const raw = await invoke<unknown>("start_file_watch", {
-    projectRoot,
-    relativePath,
+  return routeIpcLocalOnly("start_file_watch", async () => {
+    const raw = await invoke<unknown>("start_file_watch", {
+      projectRoot,
+      relativePath,
+    });
+    if (typeof raw !== "number" || !Number.isFinite(raw)) {
+      throw new Error(`start_file_watch returned non-numeric watch id: ${String(raw)}`);
+    }
+    return raw;
   });
-  if (typeof raw !== "number" || !Number.isFinite(raw)) {
-    throw new Error(`start_file_watch returned non-numeric watch id: ${String(raw)}`);
-  }
-  return raw;
 }
 
 export async function stopFileWatch(watchId: number): Promise<void> {
-  await invoke<unknown>("stop_file_watch", { watchId });
+  return routeIpcLocalOnly("stop_file_watch", async () => {
+    await invoke<unknown>("stop_file_watch", { watchId });
+  });
 }
 
 /**
