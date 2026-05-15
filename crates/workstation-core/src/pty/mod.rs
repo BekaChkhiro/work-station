@@ -11,9 +11,7 @@ mod session;
 // T19.1 — `pub` (not `pub(crate)`) so the desktop binary can keep using
 // these types via the re-export from `src-tauri/src/lib.rs`.
 pub use errors::{Recovery, UserShape};
-pub use manager::{
-    BackpressureSnapshot, PtyError, PtyManager, ScrollbackChunk, SpawnConfig,
-};
+pub use manager::{BackpressureSnapshot, PtyError, PtyManager, ScrollbackChunk, SpawnConfig};
 pub use reader::spawn_reader;
 // `Scrollback` is exposed for src-tauri's integration tests that
 // stub the ring buffer (e.g. `pty_get_scrollback` edge cases). It
@@ -22,4 +20,3 @@ pub use reader::spawn_reader;
 pub use scrollback::Scrollback;
 #[allow(unused_imports)] // direct consumers grow as later phases land.
 pub use session::PtySession;
-

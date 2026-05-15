@@ -85,9 +85,9 @@ mod tests {
         sqlx::query(include_str!(
             "../../../../src-tauri/migrations/0011_push_subscriptions.sql"
         ))
-            .execute(&pool)
-            .await
-            .expect("apply migration");
+        .execute(&pool)
+        .await
+        .expect("apply migration");
         pool
     }
 

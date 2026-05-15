@@ -125,7 +125,15 @@ pub async fn handle_projects_list(
     id: Option<String>,
 ) {
     match projects::list(pool).await {
-        Ok(projects) => send(out_tx, &ServerMessage::ProjectsListResult { id, projects }).await,
+        Ok(projects) => {
+            // T19.20: the protocol crate is Tauri-free, so the typed
+            // `Vec<Project>` payload is serialized to JSON here at the
+            // bridge boundary. `Project: Serialize` so `to_value` cannot
+            // fail; the panic is documentation, not a real branch.
+            let projects =
+                serde_json::to_value(projects).expect("Project list always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectsListResult { id, projects }).await;
+        }
         Err(error) => send(out_tx, &project_error_to_frame(id, error)).await,
     }
 }
@@ -139,7 +147,12 @@ pub async fn handle_project_get(
     project_id: String,
 ) {
     match projects::get(pool, &project_id).await {
-        Ok(project) => send(out_tx, &ServerMessage::ProjectResult { id, project }).await,
+        Ok(project) => {
+            // T19.20: see `handle_projects_list` for why this serializes
+            // the typed `Project` at the bridge boundary.
+            let project = serde_json::to_value(project).expect("Project always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectResult { id, project }).await;
+        }
         Err(error) => send(out_tx, &project_error_to_frame(id, error)).await,
     }
 }

@@ -13,14 +13,18 @@
 //! Each request from the client may include an optional `id` correlation
 //! string; the matching ack/error/result frame echoes it back so the
 //! PWA can resolve in-flight promises without keeping a side index.
+//!
+//! T19.20: moved out of `src-tauri` so `cloud-agent` can speak the same
+//! wire format. Project payloads (`projects_list_result` / `project_result`)
+//! carry `serde_json::Value` here — the desktop bridge serializes its
+//! typed `db::projects::Project` before constructing the variant, which
+//! keeps this crate Tauri-free without changing the JSON contract.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-
-use crate::db::projects::Project;
 
 /// Default scrollback request size when the client omits `limit`.
 /// 64 KiB matches the upper bound used by the desktop xterm bridge.
@@ -307,16 +311,22 @@ pub enum ServerMessage {
         message: String,
     },
     /// T18.4: response to `projects_list`.
+    ///
+    /// `projects` is the typed `Project` list serialized to JSON by the
+    /// desktop bridge before frame construction (T19.20). Holding the
+    /// payload as [`Value`] keeps this crate independent of the
+    /// `db::projects::Project` type that lives in `src-tauri`.
     ProjectsListResult {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        projects: Vec<Project>,
+        projects: Value,
     },
-    /// T18.4: response to `project_get`.
+    /// T18.4: response to `project_get`. See note on
+    /// [`ServerMessage::ProjectsListResult`] for the `Value` shape.
     ProjectResult {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        project: Project,
+        project: Value,
     },
     /// T18.4: response to `project_switch` after the row was persisted
     /// and the Tauri event fired.
@@ -424,8 +434,9 @@ pub struct ChatMessageView {
 
 /// PWA-facing view of the small subset of `app_settings` we surface
 /// over the bridge. CamelCase on the wire matches the rest of the
-/// project's JSON contracts (see [`Project`] and the TS settings
-/// wrapper) so the mobile client doesn't need a per-field renamer.
+/// project's JSON contracts (see `db::projects::Project` and the TS
+/// settings wrapper) so the mobile client doesn't need a per-field
+/// renamer.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
@@ -439,11 +450,11 @@ pub struct SettingsView {
 
 impl ServerMessage {
     /// Convenience: build a `PtyError` without a `session_id` slot.
-    pub(crate) fn error(
-        id: Option<String>,
-        kind: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    ///
+    /// `pub` (not `pub(crate)`) since T19.20 moved this crate out of
+    /// `src-tauri`; the desktop bridge consumes it from the other side
+    /// of the crate boundary.
+    pub fn error(id: Option<String>, kind: impl Into<String>, message: impl Into<String>) -> Self {
         Self::PtyError {
             id,
             session_id: None,
@@ -452,7 +463,7 @@ impl ServerMessage {
         }
     }
 
-    pub(crate) fn session_error(
+    pub fn session_error(
         id: Option<String>,
         session_id: Uuid,
         kind: impl Into<String>,
@@ -467,12 +478,12 @@ impl ServerMessage {
     }
 
     /// Convenience: PlanFlow bridge success reply (T18.6).
-    pub(crate) fn planflow_result(id: Option<String>, data: Value) -> Self {
+    pub fn planflow_result(id: Option<String>, data: Value) -> Self {
         Self::PlanflowResult { id, data }
     }
 
     /// Convenience: PlanFlow bridge error reply (T18.6).
-    pub(crate) fn planflow_error(
+    pub fn planflow_error(
         id: Option<String>,
         kind: impl Into<String>,
         message: impl Into<String>,
@@ -736,5 +747,31 @@ mod tests {
             "got {json}"
         );
         assert!(json.contains(r#""pty_session_count":3"#), "got {json}");
+    }
+
+    #[test]
+    fn projects_list_result_carries_value_payload() {
+        // T19.20: the project payload moved from a typed Vec<Project>
+        // to a serde_json::Value so this crate stays Tauri-free.
+        // Serialization should treat the Value as a transparent
+        // pass-through — the desktop bridge serializes its typed
+        // Project list before construction.
+        let projects = serde_json::json!([
+            { "id": "p1", "name": "alpha", "workspaceTabs": ["terminal"] },
+        ]);
+        let msg = ServerMessage::ProjectsListResult {
+            id: Some("req-1".into()),
+            projects,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(
+            json.contains(r#""type":"projects_list_result""#),
+            "got {json}"
+        );
+        assert!(json.contains(r#""id":"req-1""#), "got {json}");
+        assert!(
+            json.contains(r#""workspaceTabs":["terminal"]"#),
+            "got {json}"
+        );
     }
 }

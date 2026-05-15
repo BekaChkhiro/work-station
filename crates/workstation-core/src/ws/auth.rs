@@ -17,6 +17,12 @@
 //! (manual byte-length-checked compare; we don't want to pull a crypto
 //! crate just for one compare) so a wrong-length token doesn't leak
 //! timing.
+//!
+//! T19.20: moved into `workstation-core` so `cloud-agent` can re-use
+//! the same token type + load-or-create logic without depending on
+//! Tauri. The `app_settings` schema lives in the desktop migrations;
+//! cloud-agent callers either point a fresh pool at the same DDL or
+//! mint tokens directly via [`AuthToken::new`] / [`generate_token`].
 
 use std::sync::Arc;
 
@@ -174,6 +180,15 @@ fn parse_bearer(header_value: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// DDL for the `app_settings` table used by [`load_or_create_token`].
+    /// Inlined here (instead of `include_str!`-ing the desktop migration)
+    /// so this crate's tests don't reach into `src-tauri/migrations/`
+    /// — keeping `workstation-core` self-contained.
+    const APP_SETTINGS_DDL: &str = "CREATE TABLE app_settings (
+        key   TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+    );";
+
     #[test]
     fn token_matches_only_with_identical_bytes() {
         let token = AuthToken::new("abc-123");
@@ -252,7 +267,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("pool");
-        sqlx::query(include_str!("../../migrations/0003_app_settings.sql"))
+        sqlx::query(APP_SETTINGS_DDL)
             .execute(&pool)
             .await
             .expect("apply migration");

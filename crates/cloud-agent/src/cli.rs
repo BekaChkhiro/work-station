@@ -72,7 +72,10 @@ mod tests {
     #[test]
     fn flag_wins_over_env_and_default() {
         let cli = Cli::parse_from(["cloud-agent", "--config", "/tmp/explicit.toml"]);
-        assert_eq!(cli.resolve_config_path(), PathBuf::from("/tmp/explicit.toml"));
+        assert_eq!(
+            cli.resolve_config_path(),
+            PathBuf::from("/tmp/explicit.toml")
+        );
     }
 
     #[test]
@@ -85,7 +88,10 @@ mod tests {
         // confined to this scope.
         let prev = std::env::var(CONFIG_PATH_ENV).ok();
         std::env::remove_var(CONFIG_PATH_ENV);
-        assert_eq!(cli.resolve_config_path(), PathBuf::from(DEFAULT_CONFIG_PATH));
+        assert_eq!(
+            cli.resolve_config_path(),
+            PathBuf::from(DEFAULT_CONFIG_PATH)
+        );
         if let Some(v) = prev {
             std::env::set_var(CONFIG_PATH_ENV, v);
         }

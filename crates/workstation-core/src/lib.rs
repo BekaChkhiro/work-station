@@ -7,16 +7,22 @@
 //! belongs in `src-tauri` instead.
 //!
 //! Extracted in T19.1:
-//!   * [`cli`]         — PATH scan + version probe for known CLI agents.
+//!   * [`cli`] — PATH scan + version probe for known CLI agents.
 //!   * [`credentials`] — OS-native credential store (keyring wrapper).
-//!   * [`logging`]     — tracing subscriber + panic hook routed to the
-//!                       platform log directory.
-//!   * [`pairing`]     — shared pairing state (WS addr + token + tunnel
-//!                       status) read by `get_pairing_info`.
-//!   * [`pty`]         — PTY orchestration (spawn / read / scrollback /
-//!                       backpressure stats).
-//!   * [`push`]        — Web Push subsystem (VAPID, store, axum routes).
-//!   * [`shell_path`]  — login-shell PATH hydration for macOS GUI launches.
+//!   * [`logging`] — tracing subscriber + panic hook routed to the
+//!     platform log directory.
+//!   * [`pairing`] — shared pairing state (WS addr + token + tunnel
+//!     status) read by `get_pairing_info`.
+//!   * [`pty`] — PTY orchestration (spawn / read / scrollback /
+//!     backpressure stats).
+//!   * [`push`] — Web Push subsystem (VAPID, store, axum routes).
+//!   * [`shell_path`] — login-shell PATH hydration for macOS GUI launches.
+//!
+//! Extracted in T19.20:
+//!   * [`ws`] — WebSocket bridge wire format (`protocol`) and
+//!     bearer-token auth helpers (`auth`). Tauri-side bridges still own
+//!     the dispatch + per-request handlers; only the runtime-free
+//!     pieces moved.
 
 pub mod cli;
 pub mod credentials;
@@ -25,3 +31,4 @@ pub mod pairing;
 pub mod pty;
 pub mod push;
 pub mod shell_path;
+pub mod ws;
