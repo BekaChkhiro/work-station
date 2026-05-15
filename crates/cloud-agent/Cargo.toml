@@ -58,6 +58,16 @@ futures-util = "=0.3.31"
 # same row written by either side decodes from the other.
 sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
+# T19.26 — PTY bridge handlers. Same versions as workstation-core /
+# src-tauri so the workspace resolves a single copy.
+#   * base64: encode `pty_output` chunks + decode `pty_write` payloads.
+#   * bytes:  zero-copy `Bytes` frames coming off the per-session
+#             broadcast tap.
+#   * uuid:   session ids on the wire.
+base64 = "=0.22.1"
+bytes = "=1.11.1"
+uuid = { version = "=1.23.1", features = ["v4", "serde"] }
+
 thiserror = "=2.0.18"
 
 [dev-dependencies]

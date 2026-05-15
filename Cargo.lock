@@ -888,6 +888,8 @@ name = "cloud-agent"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "bytes",
  "clap",
  "futures-util",
  "reqwest 0.13.3",
@@ -901,6 +903,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "workstation-core",
 ]
 
