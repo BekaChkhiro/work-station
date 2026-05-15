@@ -24,6 +24,7 @@ mod dispatch;
 mod fs;
 mod logging;
 mod pair;
+mod planflow_proxy;
 mod server;
 
 use cli::{Cli, Command, PairAction};
@@ -117,7 +118,13 @@ async fn run(config: Config) -> ExitCode {
         }
     };
 
-    let handle = match server::spawn(token, pool, config.listen).await {
+    // T19.29 — build the PlanFlow proxy state once at boot so the
+    // `cached_org_id` survives across PWA reconnects. Cloned per
+    // WebSocket connection via the axum `Extension` layer (cheap; the
+    // reqwest client + caches are all Arc-shared internally).
+    let planflow = planflow_proxy::PlanflowState::new(config.planflow_api_token.clone());
+
+    let handle = match server::spawn(token, pool, planflow, config.listen).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!(

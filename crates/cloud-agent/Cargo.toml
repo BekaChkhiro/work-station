@@ -70,13 +70,22 @@ uuid = { version = "=1.23.1", features = ["v4", "serde"] }
 
 thiserror = "=2.0.18"
 
+# T19.29 — outbound HTTP for the PlanFlow proxy handlers. Pinned to the
+# same version src-tauri uses so the workspace resolves a single copy.
+# `json` pulls in serde_json glue (already on this crate's regular dep
+# list); `rustls` keeps the slim daemon binary off OpenSSL.
+reqwest = { version = "=0.13.3", default-features = false, features = ["rustls", "json"] }
+
 [dev-dependencies]
 tempfile = "=3.13.0"
-# T19.21 — drive the scaffolded server end-to-end from integration tests:
-# `reqwest` for the plain HTTP probes (healthz, 401 paths) and
-# `tokio-tungstenite` for the real WebSocket upgrade smoke test.
-reqwest = { version = "=0.13.3", default-features = false, features = ["rustls"] }
+# T19.21 — drive the scaffolded server end-to-end from integration tests
+# via `tokio-tungstenite` for the real WebSocket upgrade smoke test.
+# (`reqwest` lives in the regular deps since T19.29 — covers the plain
+# HTTP probes here and the PlanFlow proxy in production.)
 tokio-tungstenite = "=0.24.0"
+# T19.29 — mock upstream PlanFlow responses for the proxy handler tests.
+# Pinned to the same version src-tauri's planflow_bridge tests use.
+wiremock = "=0.6.5"
 
 [lints.clippy]
 # Mirror the rest of the workspace (T1.3 / T19.1) so the daemon picks

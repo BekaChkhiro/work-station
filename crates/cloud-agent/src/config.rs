@@ -64,6 +64,18 @@ pub struct Config {
     /// remembers to substitute their own URL.
     #[serde(default)]
     pub public_url: Option<String>,
+
+    /// T19.29 — `PlanFlow` API token used to proxy `planflow_*`
+    /// `WebSocket` requests to `api.planflow.tools`. The desktop bridge
+    /// fetches this from the OS keychain, but a headless VPS daemon
+    /// has no keychain — so the cloud-agent reads it from either this
+    /// config field or the `PLANFLOW_API_TOKEN` environment variable
+    /// (env wins, so an operator can rotate the token without a config
+    /// edit). Loaded lazily per request, so a rotation takes effect on
+    /// the next call. Absent → `planflow_error{kind:"no_credential"}`
+    /// per request.
+    #[serde(default)]
+    pub planflow_api_token: Option<String>,
 }
 
 impl Default for Config {
@@ -74,6 +86,7 @@ impl Default for Config {
             log_filter: default_log_filter(),
             auth_token: None,
             public_url: None,
+            planflow_api_token: None,
         }
     }
 }
@@ -162,6 +175,7 @@ mod tests {
             log_filter = "cloud_agent=debug,info"
             auth_token = "pinned-token-abc"
             public_url = "wss://agent.example.com"
+            planflow_api_token = "pf-xyz"
         "#;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(toml.as_bytes()).unwrap();
@@ -171,6 +185,7 @@ mod tests {
         assert_eq!(cfg.log_filter, "cloud_agent=debug,info");
         assert_eq!(cfg.auth_token.as_deref(), Some("pinned-token-abc"));
         assert_eq!(cfg.public_url.as_deref(), Some("wss://agent.example.com"));
+        assert_eq!(cfg.planflow_api_token.as_deref(), Some("pf-xyz"));
     }
 
     #[test]

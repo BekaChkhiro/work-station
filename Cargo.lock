@@ -904,6 +904,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
  "workstation-core",
 ]
 
