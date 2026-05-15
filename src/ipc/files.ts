@@ -7,9 +7,19 @@
 // the UI can render Monaco vs. a "not a text file" placeholder without
 // guessing; the write side round-trips the encoding tag so a file that
 // had a UTF-8 BOM on disk gets one written back.
+//
+// T19.11: routes through `routeIpcLocalOnly`. The cloud-agent doesn't
+// expose `read_text_file` / `write_text_file` yet — and a project's
+// path in cloud mode lives on the remote machine, so falling through
+// to the local FS would read/write the wrong bytes silently. Cloud
+// mode throws `CloudTransportUnsupportedError`; the editor surfaces a
+// "not available on remote workspace yet" state rather than wedging
+// open buffers.
 
 import { invoke } from "@tauri-apps/api/core";
 import { z } from "zod";
+
+import { routeIpcLocalOnly } from "./transport";
 
 const TextEncodingSchema = z.union([z.literal("utf-8"), z.literal("utf-8-bom")]);
 
@@ -35,11 +45,13 @@ export async function readTextFile(
   projectRoot: string,
   relativePath: string,
 ): Promise<ReadFileResult> {
-  const raw = await invoke<unknown>("read_text_file", {
-    projectRoot,
-    relativePath,
+  return routeIpcLocalOnly("read_text_file", async () => {
+    const raw = await invoke<unknown>("read_text_file", {
+      projectRoot,
+      relativePath,
+    });
+    return ReadResultSchema.parse(raw);
   });
-  return ReadResultSchema.parse(raw);
 }
 
 export async function writeTextFile(
@@ -48,10 +60,12 @@ export async function writeTextFile(
   content: string,
   encoding: TextEncoding = "utf-8",
 ): Promise<void> {
-  await invoke<unknown>("write_text_file", {
-    projectRoot,
-    relativePath,
-    content,
-    encoding,
+  return routeIpcLocalOnly("write_text_file", async () => {
+    await invoke<unknown>("write_text_file", {
+      projectRoot,
+      relativePath,
+      content,
+      encoding,
+    });
   });
 }

@@ -1,10 +1,14 @@
 // T13.5 — Frontend wrappers around the file-watch IPC + event channel.
+// T19.11 — Cloud routing: `start_file_watch` / `stop_file_watch` raise
+//          `CloudTransportUnsupportedError` in cloud mode; the
+//          `onExternalChange` listener is transport-agnostic since the
+//          local Tauri event bus is the only producer either way.
 //
 // Same approach as files.test.ts: mock the Tauri primitives and assert
 // the wire shape (command name + argument keys, event name). The Rust
 // handler itself is covered by `cargo test` on `src-tauri/src/commands/watch.rs`.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -16,6 +20,14 @@ vi.mock("@tauri-apps/api/event", () => ({
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  CloudTransportUnsupportedError,
+  _resetCloudAgentManagerFactoryForTests,
+  _setCloudAgentManagerForTests,
+} from "./transport";
+import type { CloudAgentManager } from "../integrations/cloudAgent";
+import type { WsBridgeClient } from "../integrations/wsBridge";
+import { _resetCloudModeForTests, setCloudMode } from "../stores/cloudMode";
+import {
   onExternalChange,
   startFileWatch,
   stopFileWatch,
@@ -25,9 +37,38 @@ import {
 const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
 const listenMock = listen as unknown as ReturnType<typeof vi.fn>;
 
+function makeStubManager(client: WsBridgeClient): CloudAgentManager {
+  let state: ReturnType<CloudAgentManager["state"]> = "open";
+  return {
+    state: () => state,
+    client: () => client,
+    endpoint: () => null,
+    connect: async () => {
+      // Pre-seeded "open" — dial is a no-op.
+    },
+    disconnect: () => {
+      state = "closed";
+    },
+    dispose: () => {
+      // no-op
+    },
+  };
+}
+
+beforeEach(() => {
+  invokeMock.mockReset();
+  listenMock.mockReset();
+  _setCloudAgentManagerForTests(null);
+  _resetCloudAgentManagerFactoryForTests();
+  _resetCloudModeForTests();
+});
+
 afterEach(() => {
   invokeMock.mockReset();
   listenMock.mockReset();
+  _setCloudAgentManagerForTests(null);
+  _resetCloudAgentManagerFactoryForTests();
+  _resetCloudModeForTests();
 });
 
 describe("startFileWatch", () => {
@@ -47,6 +88,16 @@ describe("startFileWatch", () => {
     invokeMock.mockResolvedValueOnce("not-a-number");
     await expect(startFileWatch("/root", "x.ts")).rejects.toThrow(/non-numeric/);
   });
+
+  it("throws CloudTransportUnsupportedError in cloud mode without invoking the local backend", async () => {
+    _setCloudAgentManagerForTests(makeStubManager({} as unknown as WsBridgeClient));
+    await setCloudMode(true);
+
+    await expect(startFileWatch("/root", "x.ts")).rejects.toBeInstanceOf(
+      CloudTransportUnsupportedError,
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("stopFileWatch", () => {
@@ -54,6 +105,14 @@ describe("stopFileWatch", () => {
     invokeMock.mockResolvedValueOnce(undefined);
     await stopFileWatch(7);
     expect(invokeMock).toHaveBeenCalledWith("stop_file_watch", { watchId: 7 });
+  });
+
+  it("throws CloudTransportUnsupportedError in cloud mode without invoking the local backend", async () => {
+    _setCloudAgentManagerForTests(makeStubManager({} as unknown as WsBridgeClient));
+    await setCloudMode(true);
+
+    await expect(stopFileWatch(7)).rejects.toBeInstanceOf(CloudTransportUnsupportedError);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 
