@@ -1,0 +1,38 @@
+[package]
+name = "workstation-core"
+version = "0.1.0"
+description = "Tauri-free runtime logic shared across Work Station surfaces."
+authors = ["Work Station maintainers"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+tracing = { workspace = true }
+# `cli::version` spawns version-banner probes concurrently with
+# bounded timeouts; `cli::registry` caches the result behind a
+# `tokio::OnceCell`. `process` + `time` cover both call sites
+# without dragging `rt-multi-thread` into the lib.
+tokio = { version = "=1.52.1", features = ["process", "time", "sync", "rt", "macros"] }
+
+[dev-dependencies]
+# `cli::registry` unit tests build a synthetic PATH from a tempdir
+# so detection logic exercises the real filesystem walk without
+# depending on whatever's installed on the test host.
+tempfile = "=3.13.0"
+# `cli::version` / `cli::registry` async tests rely on the
+# multi-threaded runtime via `#[tokio::test]`.
+tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "process", "time", "sync"] }
+
+[lints.clippy]
+# Mirror src-tauri's lint policy (T1.3) so moved modules don't lose
+# coverage when they cross the crate boundary.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+needless_pass_by_value = "allow"
+return_self_not_must_use = "allow"

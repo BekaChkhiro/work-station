@@ -2,7 +2,12 @@
 use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 
-mod cli;
+// T19.1 — `cli` and `shell_path` now live in the `workstation-core`
+// crate. Re-export them under the old paths so command handlers and
+// other modules keep using `crate::cli::…` / `crate::shell_path::…`
+// without churning every call site.
+pub use workstation_core::{cli, shell_path};
+
 mod commands;
 // T11.2: OS-native credential store. Used by the integrations layer
 // (T11.3 Settings panel, T12+ per-service flows) — the public surface
@@ -25,7 +30,6 @@ mod menu;
 mod pairing;
 mod pty;
 mod push;
-mod shell_path;
 // Cloudflare quick-tunnel manager. Spawned after the WS bridge binds so
 // the mobile PWA (HTTPS origin) can reach the loopback-only listener
 // without LAN reachability / mixed-content headaches.
