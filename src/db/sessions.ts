@@ -97,11 +97,26 @@ interface ProjectSessionRow {
 }
 
 /**
+ * T19.17 — workspace mode that scopes a project's session row.
+ *
+ * Local and Cloud each get their own row in `sessions` so the layout the
+ * user built in one mode never leaks into the other. Migration 0012 added
+ * the `mode` column with default `'local'`, so any pre-T19.17 row keeps
+ * pointing at the local workspace.
+ */
+export type SessionMode = "local" | "cloud";
+
+/**
  * T2.12 — get or create the persistent session row for `projectId`.
  *
- * Returns the most recent session's id and its persisted layout. If no
- * session row exists yet (first launch for this project), inserts a new row
- * with an empty layout and returns that id + `EMPTY_LAYOUT`.
+ * T19.17 — scoped by `mode`. Each `(project_id, mode)` pair owns at most
+ * one active row, so flipping the workspace toggle returns a different
+ * layout (and lets each mode persist independent splits / focus state).
+ *
+ * Returns the most recent session's id for `mode` and its persisted
+ * layout. If no session row exists yet for that mode (first launch for
+ * this project, or first time the user enters the other mode), inserts a
+ * new row with an empty layout and returns that id + `EMPTY_LAYOUT`.
  *
  * Callers pass `cli` / `cwd` only so the newly-created row carries context
  * that is useful for debugging; the actual layout restore uses the project's
@@ -111,18 +126,19 @@ export async function getOrCreateProjectSession(
   projectId: string,
   cli: string | null,
   cwd: string | null,
+  mode: SessionMode = "local",
 ): Promise<{ id: string; layout: Layout }> {
   const handle = await db();
   const rows = await handle.select<ProjectSessionRow[]>(
-    "SELECT id, layout_json FROM sessions WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-    [projectId],
+    "SELECT id, layout_json FROM sessions WHERE project_id = ? AND mode = ? ORDER BY created_at DESC LIMIT 1",
+    [projectId, mode],
   );
   const row = rows[0];
   if (row) return { id: row.id, layout: parseLayoutJson(row.layout_json) };
   const id = crypto.randomUUID();
   await handle.execute(
-    "INSERT INTO sessions (id, project_id, title, cli, cwd, layout_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    [id, projectId, "main", cli, cwd, "{}", Math.floor(Date.now() / 1000)],
+    "INSERT INTO sessions (id, project_id, title, cli, cwd, layout_json, created_at, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [id, projectId, "main", cli, cwd, "{}", Math.floor(Date.now() / 1000), mode],
   );
   return { id, layout: EMPTY_LAYOUT };
 }

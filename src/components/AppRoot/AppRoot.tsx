@@ -87,7 +87,8 @@ import {
   type SplitDirection,
 } from "../../types/layout";
 import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "../../db/sessions";
-import type { LayoutPersister } from "../../db/sessions";
+import type { LayoutPersister, SessionMode } from "../../db/sessions";
+import { cloudMode } from "../../stores/cloudMode";
 import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
 import { eventMatchesBinding, getBinding, loadPersistedBindings } from "../../hotkeys";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
@@ -188,8 +189,17 @@ export function AppRoot(): JSX.Element {
 
   // T2.12 — per-project DB session id (the sessions table row that owns
   // layout_json) and its debounced layout persister.
+  // T19.17 — these maps are scoped to the *currently active* workspace
+  // mode. When `cloudMode()` flips we tear them down and rebuild from
+  // the mode-scoped session row so layouts and PTYs never cross modes.
   const dbSessionByProject: Record<string, string> = {};
   const persisterByProject: Record<string, LayoutPersister> = {};
+
+  // T19.17 — currently mounted workspace mode. `null` until boot finishes
+  // wiring sessions for the first time so the reactive flip-handler below
+  // doesn't run during the initial restore pass.
+  const [mountedMode, setMountedMode] = createSignal<SessionMode | null>(null);
+  const currentMode = (): SessionMode => (cloudMode() ? "cloud" : "local");
 
   // T7.7 — sessionId → CLI id captured at spawn time. The badge derived
   // from this map is the canonical "what was launched in this pane",
@@ -473,6 +483,11 @@ export function AppRoot(): JSX.Element {
           setActionError(err instanceof Error ? err.message : String(err));
         }
         const persisted = await listProjects();
+        // T19.17 — pin the mode for the boot pass. cloudMode() is hydrated
+        // synchronously from settings defaults, then asynchronously from
+        // SQLite; we capture once so every project loads under the same
+        // mode and the reactive flip-handler can no-op while we restore.
+        const bootMode = currentMode();
         for (const p of persisted) {
           registerProject(p);
 
@@ -491,12 +506,14 @@ export function AppRoot(): JSX.Element {
             console.warn("[T12.2] project_links reconcile failed:", err);
           }
 
-          // T2.12: load or create a persistent session row, then wire its
-          // debounced persister so future layout changes are saved to SQLite.
+          // T2.12 / T19.17: load or create the mode-scoped session row,
+          // then wire its debounced persister so future layout changes
+          // are saved into the right (Local vs Cloud) row.
           const { id: dbSessionId, layout: savedLayout } = await getOrCreateProjectSession(
             p.id,
             p.defaultCli,
             p.path,
+            bootMode,
           );
           dbSessionByProject[p.id] = dbSessionId;
           persisterByProject[p.id] = createLayoutPersister(dbSessionId, {
@@ -515,6 +532,10 @@ export function AppRoot(): JSX.Element {
             autoLaunchedProjects.add(p.id);
           }
         }
+        // T19.17 — record the mode the persister/session maps now point at.
+        // The reactive flip-handler below diffs against this to detect
+        // user-initiated cloud_mode toggles after boot.
+        setMountedMode(bootMode);
         // T5.9 — restore the project that was active on the previous run.
         // setActiveProject is a no-op if the saved id was deleted in a
         // previous session, so the addProject default (first registered)
@@ -606,11 +627,14 @@ export function AppRoot(): JSX.Element {
       startupCommands: value.startupCommands,
     });
     registerProject(created);
-    // T2.12: create the session row and persister for the freshly added project.
+    // T2.12 / T19.17: create the session row + persister for the freshly
+    // added project, scoped to whichever mode is active right now. The
+    // other mode's row is created lazily on the first cloud_mode flip.
     const { id: dbSessionId } = await getOrCreateProjectSession(
       created.id,
       created.defaultCli,
       created.path,
+      currentMode(),
     );
     dbSessionByProject[created.id] = dbSessionId;
     persisterByProject[created.id] = createLayoutPersister(dbSessionId, {
@@ -1061,6 +1085,81 @@ export function AppRoot(): JSX.Element {
       if (persister) persister.schedule(layout ?? EMPTY_LAYOUT);
     }
   });
+
+  // T19.17 — when the user flips the Local/Cloud workspace toggle after
+  // boot, swap every project to the row that belongs to the new mode.
+  // We can't just swap layouts because each PTY is alive in exactly one
+  // backend (local Tauri vs cloud-agent WS), so we kill the current
+  // mode's PTYs, drop the displayed layout, and re-restore from the
+  // mode-scoped session row. The other mode's row is left untouched on
+  // disk — flipping back returns the user to where they left it.
+  createEffect(() => {
+    if (boot().kind !== "ready") return;
+    const next = currentMode();
+    const prev = mountedMode();
+    if (prev === null || prev === next) return;
+    void swapWorkspaceMode(next);
+  });
+
+  const swapWorkspaceMode = async (next: SessionMode): Promise<void> => {
+    // Snapshot the project list once — `projects()` is reactive and the
+    // mutations below (setLayout) would otherwise reorder the iteration.
+    const snapshot = projects().map((p) => p);
+    for (const project of snapshot) {
+      // Kill PTYs spawned in the previous mode. The layout tree is the
+      // authoritative live-session list (T5.6 split panes); the shadow
+      // map covers the brief window between spawn and layout-attach.
+      const live = new Set<string>();
+      const ws = getWorkspace(project.id);
+      if (ws?.layout) {
+        for (const pane of collectPanes(ws.layout)) live.add(pane.sessionId);
+      }
+      for (const id of sessionsByProject[project.id] ?? []) live.add(id);
+      for (const sessionId of live) {
+        try {
+          await ptyKill(sessionId);
+        } catch {
+          // Best-effort — already gone or backend will reap on disconnect.
+        }
+        forgetSessionCli(sessionId);
+      }
+      sessionsByProject[project.id] = [];
+
+      // Cancel the persister wired to the previous mode's session id —
+      // no pending write must land in the wrong row after we swap.
+      // Both maps are overwritten below with the new mode's row, so we
+      // don't need to delete the keys first.
+      persisterByProject[project.id]?.cancel();
+
+      // Drop the displayed layout so the auto-launch effect (T7.4) and
+      // the restore below have a clean slate. Auto-launch is gated on
+      // `autoLaunchedProjects`; clearing the entry lets a project with
+      // no saved layout in the new mode bring the CLI launcher back.
+      setLayout(project.id, null);
+      autoLaunchedProjects.delete(project.id);
+
+      // Load (or create) the mode-scoped row and rewire the persister.
+      const projectPath = projectPaths[project.id] ?? null;
+      const projectCli = projectClis[project.id] ?? null;
+      const { id: nextSessionId, layout: savedLayout } = await getOrCreateProjectSession(
+        project.id,
+        projectCli,
+        projectPath,
+        next,
+      );
+      dbSessionByProject[project.id] = nextSessionId;
+      persisterByProject[project.id] = createLayoutPersister(nextSessionId, {
+        onError: (err) => console.error("[T19.17] layout persist failed:", err),
+      });
+
+      if (!isEmptyLayout(savedLayout)) {
+        const cli = resolveDefaultCli(project.id);
+        await restoreProjectLayout(project.id, savedLayout, cli);
+        autoLaunchedProjects.add(project.id);
+      }
+    }
+    setMountedMode(next);
+  };
 
   // T5.9 — persist the active project id on every change so the next launch
   // opens to the same project. Boot-gated so the restore step above isn't
