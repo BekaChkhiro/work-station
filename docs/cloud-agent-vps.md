@@ -74,12 +74,50 @@ ssh wsagent@<ip> 'id && systemctl is-active fail2ban && cloudflared --version'
 
 Expected: `uid=1001(wsagent) ...`, `active`, `cloudflared version 2024.x`.
 
-## 6. What's next
+## 6. Install the cloud-agent
 
-- **T19.2** — build the `cloud-agent` binary in `crates/cloud-agent/` (consumes `workstation-core` from T19.1).
-- **T19.3** — `cloud-agent-install.sh` drops the binary into `/opt/cloud-agent/` and installs a systemd unit running as `wsagent`.
-- **T19.15** — Settings UI to register the Cloudflare Tunnel and pair the desktop with this agent.
+Build the binary on your laptop (the VPS doesn't have a Rust toolchain by default — keeping it off the box saves RAM and disk):
 
-## 7. Tear-down
+```bash
+# On your laptop, from the repo root:
+cargo build --release -p cloud-agent
+scp target/release/cloud-agent root@<ip>:/tmp/cloud-agent
+```
+
+Then run the install script on the VPS:
+
+```bash
+ssh root@<ip> 'curl -fsSL https://raw.githubusercontent.com/<you>/work-station/master/scripts/cloud-agent-install.sh | bash'
+```
+
+The script is idempotent. It:
+
+- Verifies the binary (`--version`) before touching `/opt/cloud-agent`.
+- Installs the binary to `/opt/cloud-agent/cloud-agent` (root-owned, 0755).
+- Drops a default `/etc/cloud-agent/config.toml` on first install — preserved on re-runs so your edits survive upgrades.
+- Validates the config with `--check-config` running **as `wsagent`** so file-permission issues surface before `systemctl start`.
+- Writes a hardened systemd unit to `/etc/systemd/system/cloud-agent.service` (NoNewPrivileges, ProtectSystem=strict, StateDirectory=cloud-agent, etc.).
+- Reloads systemd and `restart`s the unit so an upgrade picks up the new binary.
+
+Binary source precedence (env vars):
+
+| Variable     | Use                                          |
+| ------------ | -------------------------------------------- |
+| `BINARY`     | Absolute path to a locally-staged binary     |
+| `BINARY_URL` | HTTPS URL the script downloads from          |
+| _(default)_  | `/tmp/cloud-agent` — matches the `scp` above |
+
+Verify:
+
+```bash
+systemctl status cloud-agent
+journalctl -u cloud-agent -n 50
+```
+
+## 7. What's next
+
+- **T19.15** — Settings UI to register the Cloudflare Tunnel and pair the desktop with this agent. Until then, the install script prints the manual `cloudflared tunnel create` recipe at the end.
+
+## 8. Tear-down
 
 When you're done with this dev box: Hetzner console → server → Delete. Billing is hourly — leaving a CX22 running 24/7 ≈ €4.50/mo; killing it after each session saves money but costs a fresh bootstrap each time. Snapshot before deleting if you want to skip §4 next time (Hetzner snapshots are €0.012/GB-mo).
