@@ -4,19 +4,26 @@
 //! the state directory exists, brings up the axum HTTP + WebSocket
 //! listener (T19.21), and parks on a shutdown signal. PTY and project
 //! dispatchers slot into the WebSocket handler in follow-up tasks.
+//!
+//! T19.22 added the `pair` subcommand which manages the persisted
+//! pairing token at `<state_dir>/pairing_token`. The daemon path now
+//! prefers that file over an ephemeral token when no `auth_token` is
+//! pinned in the config, so the agent's bearer survives restarts.
 
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
-use workstation_core::ws::auth::{generate_token, AuthToken};
+use workstation_core::ws::auth::AuthToken;
 
 mod cli;
 mod config;
 mod logging;
+mod pair;
 mod server;
 
-use cli::Cli;
+use cli::{Cli, Command, PairAction};
 use config::{Config, ConfigError};
 
 fn main() -> ExitCode {
@@ -32,6 +39,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    if let Some(command) = args.command {
+        // Subcommands print to stdout and exit — no tracing subscriber
+        // needed, the operator is reading the terminal output directly.
+        return run_subcommand(command, &config);
+    }
 
     let filter = args.log_filter.as_deref().unwrap_or(&config.log_filter);
     logging::init(filter);
@@ -73,7 +86,17 @@ fn main() -> ExitCode {
 }
 
 async fn run(config: Config) -> ExitCode {
-    let token = resolve_auth_token(&config);
+    let token = match resolve_auth_token(&config) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(
+                state_dir = %config.state_dir.display(),
+                error = %e,
+                "failed to load or create pairing token",
+            );
+            return ExitCode::from(1);
+        }
+    };
 
     let handle = match server::spawn(token, config.listen).await {
         Ok(h) => h,
@@ -112,26 +135,123 @@ async fn run(config: Config) -> ExitCode {
     }
 }
 
-/// Resolve the bearer token the WebSocket listener will accept.
-///
-/// Priority: explicit `auth_token` in the TOML config wins. If absent,
-/// mint an ephemeral 256-bit token via [`workstation_core::ws::auth::generate_token`]
-/// and log it at warn level exactly once so an operator running the
-/// agent from a terminal (or peering at `journalctl`) can copy it into
-/// the config file or into a pairing flow.
-fn resolve_auth_token(config: &Config) -> AuthToken {
-    if let Some(pinned) = config.auth_token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        tracing::info!("ws auth token: loaded from config");
-        return AuthToken::new(pinned);
+/// Dispatch a subcommand. Subcommands run synchronously, print their
+/// result to stdout, and exit — they intentionally bypass the tokio
+/// runtime and the tracing subscriber so the operator sees clean
+/// output suitable for copy/paste.
+fn run_subcommand(command: Command, config: &Config) -> ExitCode {
+    match command {
+        Command::Pair { action } => run_pair(action, config),
+    }
+}
+
+fn run_pair(action: PairAction, config: &Config) -> ExitCode {
+    if let Err(e) = ensure_state_dir(&config.state_dir) {
+        eprintln!(
+            "[cloud-agent] failed to prepare state dir {}: {}",
+            config.state_dir.display(),
+            e
+        );
+        return ExitCode::from(1);
     }
 
-    let fresh = generate_token();
-    tracing::warn!(
-        target: "cloud_agent::auth",
-        token = %fresh,
-        "ws auth token: no `auth_token` set in config — generated ephemeral token (will not survive restart; pin in config.toml for production)",
+    let token = match action {
+        PairAction::Show => match pair::load_or_create_pairing_token(&config.state_dir) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "[cloud-agent] failed to read pairing token at {}: {}",
+                    pair::pairing_token_path(&config.state_dir).display(),
+                    e
+                );
+                return ExitCode::from(1);
+            }
+        },
+        PairAction::Rotate => match pair::rotate_pairing_token(&config.state_dir) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "[cloud-agent] failed to write pairing token at {}: {}",
+                    pair::pairing_token_path(&config.state_dir).display(),
+                    e
+                );
+                return ExitCode::from(1);
+            }
+        },
+    };
+
+    if let Err(e) = print_pair_block(&mut io::stdout(), config, &token, &action) {
+        eprintln!("[cloud-agent] failed to print pair block: {e}");
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Render the "URL + token" block the operator pastes into the
+/// desktop's Settings → Cloud → Pair form. When `public_url` is unset
+/// in the config we print a placeholder so the operator remembers to
+/// substitute their own Cloudflare Tunnel hostname.
+///
+/// Output shape is intentionally line-oriented + free of decoration so
+/// `cloud-agent pair show | grep ^Token:` is a sane scripting move.
+fn print_pair_block<W: Write>(
+    w: &mut W,
+    config: &Config,
+    token: &str,
+    action: &PairAction,
+) -> io::Result<()> {
+    let action_word = match action {
+        PairAction::Show => "current",
+        PairAction::Rotate => "rotated",
+    };
+    let url = config
+        .public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("<set `public_url` in config.toml, or use your Cloudflare Tunnel URL>");
+
+    writeln!(w, "# cloud-agent pairing token ({action_word})")?;
+    writeln!(w, "URL:   {url}")?;
+    writeln!(w, "Token: {token}")?;
+    if matches!(action, PairAction::Rotate) {
+        writeln!(w)?;
+        writeln!(w, "# Restart the agent to start serving the new token:")?;
+        writeln!(w, "#   sudo systemctl restart cloud-agent")?;
+    }
+    Ok(())
+}
+
+/// Resolve the bearer token the WebSocket listener will accept.
+///
+/// Priority:
+///   1. `auth_token` pinned in the TOML config — operator chose to
+///      manage the secret via root-owned configuration.
+///   2. `<state_dir>/pairing_token` — created on first boot and
+///      preserved across restarts so the bearer is stable without
+///      requiring a config edit.
+///
+/// Errors only when the pairing-token file can't be read or written
+/// (e.g. wrong ownership on `state_dir`). The daemon refuses to boot
+/// in that case rather than silently falling back to an ephemeral
+/// value the operator can't reproduce.
+fn resolve_auth_token(config: &Config) -> io::Result<AuthToken> {
+    if let Some(pinned) = config
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        tracing::info!("ws auth token: loaded from config");
+        return Ok(AuthToken::new(pinned));
+    }
+
+    let token = pair::load_or_create_pairing_token(&config.state_dir)?;
+    tracing::info!(
+        path = %pair::pairing_token_path(&config.state_dir).display(),
+        "ws auth token: loaded from pairing-token file",
     );
-    AuthToken::new(fresh)
+    Ok(AuthToken::new(token))
 }
 
 #[cfg(unix)]
@@ -174,10 +294,18 @@ fn ensure_state_dir(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_state_dir, load_or_default, resolve_auth_token};
+    use super::{ensure_state_dir, load_or_default, print_pair_block, resolve_auth_token};
+    use crate::cli::PairAction;
     use crate::config::{Config, DEFAULT_LISTEN_ADDR, DEFAULT_LOG_FILTER};
     use std::io::Write;
     use std::path::PathBuf;
+
+    fn cfg_with_state_dir(dir: PathBuf) -> Config {
+        Config {
+            state_dir: dir,
+            ..Config::default()
+        }
+    }
 
     #[test]
     fn load_or_default_returns_defaults_when_file_missing() {
@@ -186,43 +314,70 @@ mod tests {
         assert_eq!(cfg.listen.to_string(), DEFAULT_LISTEN_ADDR);
         assert_eq!(cfg.log_filter, DEFAULT_LOG_FILTER);
         assert!(cfg.auth_token.is_none());
+        assert!(cfg.public_url.is_none());
     }
 
     #[test]
     fn resolve_auth_token_uses_pinned_value() {
+        let tmp = tempfile::tempdir().unwrap();
         let cfg = Config {
             auth_token: Some("pinned-value".to_string()),
+            state_dir: tmp.path().to_path_buf(),
             ..Config::default()
         };
-        assert!(resolve_auth_token(&cfg).matches("pinned-value"));
+        let token = resolve_auth_token(&cfg).unwrap();
+        assert!(token.matches("pinned-value"));
+        // Pinned-in-config path must NOT touch the pairing-token file.
+        assert!(!crate::pair::pairing_token_path(tmp.path()).exists());
     }
 
     #[test]
-    fn resolve_auth_token_generates_ephemeral_when_blank() {
+    fn resolve_auth_token_falls_through_blank_pin_to_file() {
         // Empty or whitespace-only strings must NOT be treated as a
         // valid pinned token — otherwise an operator who comments out
         // the value but leaves `auth_token = ""` would accept the empty
         // string as the bearer.
+        let tmp = tempfile::tempdir().unwrap();
         let cfg = Config {
             auth_token: Some("   ".to_string()),
+            state_dir: tmp.path().to_path_buf(),
             ..Config::default()
         };
-        let token = resolve_auth_token(&cfg);
+        let token = resolve_auth_token(&cfg).unwrap();
         assert!(!token.matches(""));
         assert!(!token.matches("   "));
+        // A pairing-token file should have been created instead.
+        assert!(crate::pair::pairing_token_path(tmp.path()).exists());
     }
 
     #[test]
-    fn resolve_auth_token_generates_ephemeral_when_missing() {
-        let cfg = Config::default();
-        let token = resolve_auth_token(&cfg);
-        // We can't read the inner string from outside the
-        // `workstation_core::ws::auth` module, so probe via `matches`
-        // — both the empty string and an obviously-bogus candidate
-        // must fail, which proves the generator returned a real 43-char
-        // base64-url token rather than a sentinel default.
-        assert!(!token.matches(""));
-        assert!(!token.matches("not-the-generated-token"));
+    fn resolve_auth_token_uses_pairing_file_when_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_state_dir(tmp.path().to_path_buf());
+        // First call mints + persists.
+        let first = resolve_auth_token(&cfg).unwrap();
+        // Second call must read back the same value — proves the
+        // daemon's bearer is stable across restarts.
+        let second = resolve_auth_token(&cfg).unwrap();
+        // We can't read the inner string from outside auth, so probe
+        // via `matches` against a sentinel and against each other.
+        assert!(!first.matches(""));
+        // Use the pair module directly to confirm both runs saw the
+        // same on-disk value.
+        let on_disk = crate::pair::read_pairing_token(tmp.path())
+            .unwrap()
+            .unwrap();
+        assert!(first.matches(&on_disk));
+        assert!(second.matches(&on_disk));
+    }
+
+    #[test]
+    fn ensure_state_dir_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("a/b/c");
+        ensure_state_dir(&nested).unwrap();
+        ensure_state_dir(&nested).unwrap();
+        assert!(nested.is_dir());
     }
 
     #[test]
@@ -237,11 +392,64 @@ mod tests {
     }
 
     #[test]
-    fn ensure_state_dir_is_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let nested = tmp.path().join("a/b/c");
-        ensure_state_dir(&nested).unwrap();
-        ensure_state_dir(&nested).unwrap();
-        assert!(nested.is_dir());
+    fn print_pair_block_includes_url_and_token_for_show() {
+        let cfg = Config {
+            public_url: Some("wss://agent.example.com".to_string()),
+            ..Config::default()
+        };
+        let mut buf = Vec::new();
+        print_pair_block(&mut buf, &cfg, "abc-token", &PairAction::Show).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("current"), "expected (current) header: {out}");
+        assert!(
+            out.contains("wss://agent.example.com"),
+            "missing url: {out}"
+        );
+        assert!(out.contains("Token: abc-token"), "missing token: {out}");
+        assert!(!out.contains("rotated"));
+        assert!(!out.contains("systemctl restart"));
+    }
+
+    #[test]
+    fn print_pair_block_includes_restart_hint_for_rotate() {
+        let cfg = Config {
+            public_url: Some("wss://agent.example.com".to_string()),
+            ..Config::default()
+        };
+        let mut buf = Vec::new();
+        print_pair_block(&mut buf, &cfg, "fresh-token", &PairAction::Rotate).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("rotated"), "missing (rotated) header: {out}");
+        assert!(
+            out.contains("systemctl restart cloud-agent"),
+            "missing restart hint: {out}"
+        );
+    }
+
+    #[test]
+    fn print_pair_block_falls_back_to_placeholder_url() {
+        let cfg = cfg_with_state_dir(PathBuf::from("/tmp/_unused"));
+        let mut buf = Vec::new();
+        print_pair_block(&mut buf, &cfg, "t", &PairAction::Show).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("<set `public_url`"),
+            "missing placeholder: {out}"
+        );
+    }
+
+    #[test]
+    fn print_pair_block_treats_blank_public_url_as_missing() {
+        let cfg = Config {
+            public_url: Some("   ".to_string()),
+            ..Config::default()
+        };
+        let mut buf = Vec::new();
+        print_pair_block(&mut buf, &cfg, "t", &PairAction::Show).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("<set `public_url`"),
+            "blank public_url must fall through to placeholder: {out}"
+        );
     }
 }

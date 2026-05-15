@@ -111,6 +111,14 @@ state_dir = "/var/lib/cloud-agent"
 # Tracing filter. Same syntax as RUST_LOG. The --log-filter CLI flag
 # overrides this for a single run without editing the file.
 log_filter = "info"
+
+# Bearer token. Leave commented to let cloud-agent manage one at
+# <state_dir>/pairing_token via 'cloud-agent pair show|rotate' (T19.22).
+# auth_token = "REPLACE_ME"
+
+# Public URL the desktop / PWA uses to reach this agent — typically the
+# Cloudflare Tunnel hostname. Consumed only by 'cloud-agent pair show'.
+# public_url = "wss://agent.example.com"
 EOF
 else
   log "Existing config at ${CONFIG_PATH} — preserved as-is"
