@@ -36,7 +36,7 @@ use tokio::net::TcpListener;
 use crate::pty::PtyManager;
 use crate::push::{self, PushService};
 
-use super::auth::{check_auth, AuthResult, AuthToken};
+use super::auth::{require_bearer, AuthToken};
 use super::planflow_bridge::PlanflowState;
 use super::projects_bridge::AppEvents;
 use super::pty_bridge;
@@ -116,7 +116,7 @@ pub(crate) fn router_with_monitor(
     planflow: Option<PlanflowState>,
 ) -> Router {
     let state = Arc::new(AppState {
-        token,
+        token: token.clone(),
         manager,
         pool,
         events,
@@ -126,11 +126,14 @@ pub(crate) fn router_with_monitor(
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
+    // T19.23: the middleware itself lives in `workstation-core::ws::auth`
+    // so the desktop bridge and the cloud-agent share one implementation
+    // of the header + query parsing / 401 response shape.
     let ws_routes =
         Router::new()
             .route("/ws", get(ws_handler))
             .route_layer(middleware::from_fn_with_state(
-                state.clone(),
+                token.clone(),
                 require_bearer,
             ));
 
@@ -143,10 +146,8 @@ pub(crate) fn router_with_monitor(
     // (PushService), so we attach them as a nested router with
     // `route_layer(require_bearer)` instead of merging into the WS state.
     if let Some(service) = push_service {
-        let push_routes = push::http::routes(service).route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
-        ));
+        let push_routes = push::http::routes(service)
+            .route_layer(middleware::from_fn_with_state(token, require_bearer));
         router = router.merge(push_routes);
     }
 
@@ -186,39 +187,6 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
         HeaderValue::from_static("Authorization, Content-Type"),
     );
     headers.insert("access-control-max-age", HeaderValue::from_static("600"));
-}
-
-/// Bearer-token middleware. Runs before extractors so a missing /
-/// invalid token surfaces as a clean 401 with `WWW-Authenticate:
-/// Bearer` instead of axum's generic 400 from the `WebSocketUpgrade`
-/// extractor.
-async fn require_bearer(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    let header_value = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .map(str::to_owned);
-    // Cheap manual query-string parse — we only care about `token=…`
-    // and don't want to pull a routing extractor in here.
-    let query_token = req.uri().query().and_then(|q| {
-        q.split('&').find_map(|pair| {
-            let mut it = pair.splitn(2, '=');
-            match (it.next(), it.next()) {
-                (Some("token"), Some(val)) => Some(val.to_owned()),
-                _ => None,
-            }
-        })
-    });
-
-    match check_auth(
-        &state.token,
-        header_value.as_deref(),
-        query_token.as_deref(),
-    ) {
-        AuthResult::Ok => next.run(req).await,
-        AuthResult::Missing => unauthorized("missing bearer token"),
-        AuthResult::Mismatch => unauthorized("invalid bearer token"),
-    }
 }
 
 /// Spawn the server in the background and return its bound address.
@@ -289,14 +257,6 @@ async fn ws_handler(
     upgrade.on_upgrade(move |socket| {
         pty_bridge::run_connection(socket, manager, pool, events, monitor, planflow)
     })
-}
-
-fn unauthorized(message: &'static str) -> Response {
-    let mut response = (StatusCode::UNAUTHORIZED, message).into_response();
-    response
-        .headers_mut()
-        .insert("WWW-Authenticate", "Bearer".parse().unwrap());
-    response
 }
 
 #[cfg(test)]

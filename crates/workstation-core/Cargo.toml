@@ -73,6 +73,11 @@ tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "process
 # `pty` tests stub broadcast channels; same dep listing for parity
 # with src-tauri's old block.
 base64 = "=0.22.1"
+# `ws::auth` middleware tests drive a Router through `oneshot` so the
+# shared `require_bearer` layer is exercised without standing up a
+# TcpListener. Tower 0.5 matches the version axum 0.7 pulls in
+# transitively (see Cargo.lock).
+tower = { version = "=0.5.3", features = ["util"] }
 
 [lints.clippy]
 # Mirror src-tauri's lint policy (T1.3) so moved modules don't lose

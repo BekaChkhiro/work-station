@@ -20,10 +20,9 @@
 //! daemon signals shutdown on SIGTERM / SIGINT and the server drains.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, Request, State};
+use axum::extract::{Query, Request};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -33,13 +32,7 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use workstation_core::ws::auth::{check_auth, AuthResult, AuthToken};
-
-/// Shared state injected into every axum handler.
-#[derive(Clone)]
-struct AppState {
-    token: AuthToken,
-}
+use workstation_core::ws::auth::{require_bearer, AuthToken};
 
 /// Handle to a running cloud-agent server. Dropping it triggers a
 /// graceful shutdown and joins the background task.
@@ -80,23 +73,19 @@ impl Drop for ServerHandle {
 /// Exposed (crate-internal) for tests that want to drive the server
 /// against a real `TcpListener` without going through [`spawn`].
 pub(crate) fn router(token: AuthToken) -> Router {
-    let state = Arc::new(AppState { token });
-
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
-    let ws_routes =
-        Router::new()
-            .route("/ws", get(ws_handler))
-            .route_layer(middleware::from_fn_with_state(
-                state.clone(),
-                require_bearer,
-            ));
+    // T19.23: the middleware itself lives in `workstation-core::ws::auth`
+    // so the desktop bridge and the cloud-agent share one implementation
+    // of the header + query parsing / 401 response shape.
+    let ws_routes = Router::new()
+        .route("/ws", get(ws_handler))
+        .route_layer(middleware::from_fn_with_state(token, require_bearer));
 
     Router::new()
         .route("/healthz", get(healthz))
         .merge(ws_routes)
-        .with_state(state)
         // PWA dev / mobile origins differ from the agent host; advertise
         // a permissive CORS policy so the browser's pre-flight
         // doesn't block the bearer-token fetch. Safe here because every
@@ -164,38 +153,6 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
     headers.insert("access-control-max-age", HeaderValue::from_static("600"));
 }
 
-/// Bearer-token middleware. Runs before extractors so a missing or
-/// invalid token surfaces as a clean 401 with `WWW-Authenticate: Bearer`
-/// instead of axum's generic 400 from the `WebSocketUpgrade` extractor.
-async fn require_bearer(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    let header_value = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .map(str::to_owned);
-    // Cheap manual query-string parse — we only care about `token=…`
-    // and don't want to pull a routing extractor in here.
-    let query_token = req.uri().query().and_then(|q| {
-        q.split('&').find_map(|pair| {
-            let mut it = pair.splitn(2, '=');
-            match (it.next(), it.next()) {
-                (Some("token"), Some(val)) => Some(val.to_owned()),
-                _ => None,
-            }
-        })
-    });
-
-    match check_auth(
-        &state.token,
-        header_value.as_deref(),
-        query_token.as_deref(),
-    ) {
-        AuthResult::Ok => next.run(req).await,
-        AuthResult::Missing => unauthorized("missing bearer token"),
-        AuthResult::Mismatch => unauthorized("invalid bearer token"),
-    }
-}
-
 /// `GET /healthz` — unauthenticated liveness probe.
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
@@ -215,11 +172,7 @@ struct WsQuery {
 /// land in follow-up tasks; for now we accept the upgrade, emit a
 /// typed `error{kind:"unimplemented"}` frame so clients see a
 /// deterministic shape, and close cleanly.
-async fn ws_handler(
-    State(_state): State<Arc<AppState>>,
-    Query(_query): Query<WsQuery>,
-    upgrade: WebSocketUpgrade,
-) -> Response {
+async fn ws_handler(Query(_query): Query<WsQuery>, upgrade: WebSocketUpgrade) -> Response {
     upgrade.on_upgrade(ws_placeholder)
 }
 
@@ -233,14 +186,6 @@ async fn ws_placeholder(mut socket: WebSocket) {
     // first. The placeholder doesn't need retry / backoff.
     let _ = socket.send(Message::Text(frame.to_string())).await;
     let _ = socket.close().await;
-}
-
-fn unauthorized(message: &'static str) -> Response {
-    let mut response = (StatusCode::UNAUTHORIZED, message).into_response();
-    response
-        .headers_mut()
-        .insert("WWW-Authenticate", "Bearer".parse().unwrap());
-    response
 }
 
 #[cfg(test)]
