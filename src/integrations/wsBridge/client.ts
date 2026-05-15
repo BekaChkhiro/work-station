@@ -57,9 +57,32 @@ export type ServerMessage =
   | { type: "project_switched"; id?: string; project_id: string }
   | { type: "settings_result"; id?: string; settings: WsBridgeSettings }
   | { type: "active_project_changed"; project_id?: string | null }
+  // T19.14 — live host stats. The cloud-agent broadcasts these every
+  // ~4 s to every authenticated socket (no subscribe handshake); a
+  // future desktop Monitor view ignores them in local mode and renders
+  // them in cloud mode where they describe the VPS, not the laptop.
+  | {
+      type: "system_stats";
+      cpu_percent: number;
+      ram_used_bytes: number;
+      ram_total_bytes: number;
+      pty_session_count: number;
+    }
   // Generic error envelope used by the projects / settings handlers
   // (distinct from `pty_error` which carries session_id).
   | { type: "error"; id?: string; kind: string; message: string };
+
+/**
+ * T19.14 — snapshot delivered to a [`WsBridgeClient.onSystemStats`]
+ * subscriber. Mirrors the wire-level `system_stats` frame's payload
+ * fields one-for-one (camelCased for the JS surface).
+ */
+export interface SystemStatsSnapshot {
+  cpuPercent: number;
+  ramUsedBytes: number;
+  ramTotalBytes: number;
+  ptySessionCount: number;
+}
 
 /**
  * T19.9 — wire shape of a Project as returned by the cloud-agent's
@@ -197,6 +220,7 @@ interface PendingRequest {
 export type OutputHandler = (data: Uint8Array, sessionId: string) => void;
 export type ExitHandler = (sessionId: string) => void;
 export type MessageHandler = (msg: ServerMessage) => void;
+export type SystemStatsHandler = (snapshot: SystemStatsSnapshot) => void;
 
 export class WsBridgeClient {
   private readonly options: WsBridgeClientOptions;
@@ -406,6 +430,25 @@ export class WsBridgeClient {
       if (msg.type === "active_project_changed") {
         handler(msg.project_id ?? null);
       }
+    };
+    return this.onMessage(wrapped);
+  }
+
+  /**
+   * T19.14 — subscribe to `system_stats` broadcast frames. The
+   * cloud-agent pushes one snapshot per tick to every authenticated
+   * socket; no subscribe handshake is required, so callers just attach
+   * a listener. Returns a disposer.
+   */
+  onSystemStats(handler: SystemStatsHandler): () => void {
+    const wrapped: MessageHandler = (msg) => {
+      if (msg.type !== "system_stats") return;
+      handler({
+        cpuPercent: msg.cpu_percent,
+        ramUsedBytes: msg.ram_used_bytes,
+        ramTotalBytes: msg.ram_total_bytes,
+        ptySessionCount: msg.pty_session_count,
+      });
     };
     return this.onMessage(wrapped);
   }

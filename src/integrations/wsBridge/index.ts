@@ -9,6 +9,8 @@ export type {
   PtySpawnPayload,
   ReconnectOptions,
   ServerMessage,
+  SystemStatsHandler,
+  SystemStatsSnapshot,
   WsBridgeClientOptions,
   WsBridgeProject,
   WsBridgeSettings,
