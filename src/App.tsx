@@ -15,6 +15,7 @@ import EditProjectFlowLiveHarness from "./components/EditProjectFlow/EditProject
 import ProjectsEmptyStateLiveHarness from "./components/ProjectsEmptyState/ProjectsEmptyState.live.dev";
 import AsyncStatesLiveHarness from "./components/AsyncStates/AsyncStates.live.dev";
 import { AppRoot } from "./components/AppRoot";
+import { CloudConnectionBanner } from "./components/CloudConnectionBanner";
 import TokenShowcase from "./components/TokenShowcase";
 import { CrossSessionSearch } from "./components/CrossSessionSearch";
 import { HotkeyCheatsheet } from "./components/HotkeyCheatsheet";
@@ -28,7 +29,9 @@ import {
   installAutoReplay,
   installOfflineListeners,
 } from "./integrations";
-import { addMenuActionListener, bridgeNativeMenuActions } from "./menu";
+import { installCloudAgentAutoConnect, installCloudAutoReplay } from "./integrations/cloudAgent";
+import { getCloudAgentManager } from "./ipc/transport";
+import { addMenuActionListener, bridgeNativeMenuActions, dispatchMenuAction } from "./menu";
 import { isEditableTarget } from "./utils/platform";
 import "./styles/globals.css";
 
@@ -105,6 +108,17 @@ export default function App() {
       },
     });
 
+    // T19.16 — wire the cloud-agent manager into the cloud-mode signal so
+    // the dial/teardown lifecycle follows the toggle, and install the
+    // offline-queue auto-replay so writes queued during a drop drain on
+    // reconnect. Both helpers are idempotent and share the singleton
+    // manager from `getCloudAgentManager()` (transport.ts), so the routing
+    // layer, the connection banner, and the queue all observe the same
+    // state.
+    const cloudManager = getCloudAgentManager();
+    const disposeCloudAutoConnect = installCloudAgentAutoConnect(cloudManager);
+    const disposeCloudReplay = installCloudAutoReplay(cloudManager);
+
     let unlistenNative: (() => void) | undefined;
     if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
       void bridgeNativeMenuActions().then((dispose) => {
@@ -164,11 +178,23 @@ export default function App() {
       unlistenNative?.();
       disposeAutoReplay();
       disposeOfflineListeners();
+      disposeCloudReplay();
+      disposeCloudAutoConnect();
     });
   });
 
+  const cloudManagerForBanner = getCloudAgentManager();
+
   return (
     <AppErrorBoundary>
+      {/* T19.16 — global cloud-agent connection banner. Renders above any
+       *  panel content so it's visible regardless of which AppShell / dev
+       *  harness is mounted below. Hidden when cloud mode is off or the
+       *  agent is open. */}
+      <CloudConnectionBanner
+        state={cloudManagerForBanner.state}
+        onAction={() => dispatchMenuAction("open-settings")}
+      />
       <PanelErrorBoundary scope="panel">
         <Switch fallback={<AppRoot />}>
           <Match when={debugMode() === "tokens"}>

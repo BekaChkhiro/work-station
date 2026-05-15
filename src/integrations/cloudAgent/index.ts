@@ -10,3 +10,12 @@ export type {
   CloudAgentManagerOptions,
   CloudAgentStatusPatch,
 } from "./client";
+export {
+  cloudQueueEntries,
+  enqueueCloudOperation,
+  installCloudAutoReplay,
+  replayCloudQueue,
+  _clearCloudQueueForTests,
+  _resetCloudAutoReplayForTests,
+} from "./queue";
+export type { CloudQueueEntry } from "./queue";

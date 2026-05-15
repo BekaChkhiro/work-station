@@ -2694,6 +2694,78 @@ button {
   outline-offset: 2px;
 }
 
+/* T19.16 — Cloud connection banner. Mounted above the AppShell; tone
+ * varies by manager state. Visual register matches the T11.8 reauth
+ * banner so "something needs attention but the app still works" reads
+ * the same across integration HTTP and cloud-agent WS failures. */
+.ws-cloud-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: var(--fs-12);
+  color: var(--text-primary);
+  flex-shrink: 0;
+  border-bottom: 1px solid transparent;
+}
+.ws-cloud-banner[data-tone="info"] {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
+  border-bottom-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.ws-cloud-banner[data-tone="warning"] {
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg-surface));
+  border-bottom-color: color-mix(in srgb, var(--warning) 30%, transparent);
+}
+.ws-cloud-banner__icon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+.ws-cloud-banner[data-tone="info"] .ws-cloud-banner__icon {
+  color: var(--accent);
+}
+.ws-cloud-banner[data-tone="warning"] .ws-cloud-banner__icon {
+  color: var(--warning);
+}
+.ws-cloud-banner__text {
+  flex: 1;
+  line-height: 1.4;
+}
+.ws-cloud-banner__title {
+  font-weight: 600;
+}
+.ws-cloud-banner[data-tone="info"] .ws-cloud-banner__title {
+  color: var(--accent);
+}
+.ws-cloud-banner[data-tone="warning"] .ws-cloud-banner__title {
+  color: var(--warning);
+}
+.ws-cloud-banner__detail {
+  color: var(--text-secondary);
+}
+.ws-cloud-banner__action {
+  background: var(--accent);
+  border: none;
+  padding: 4px 10px;
+  border-radius: var(--r-sm);
+  color: var(--text-on-accent, #fff);
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 500;
+  cursor: default;
+  flex-shrink: 0;
+}
+.ws-cloud-banner__action:hover {
+  background: color-mix(in srgb, var(--accent) 88%, white);
+}
+.ws-cloud-banner__action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.ws-cloud-banner__action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* T8.4 — Tooltip primitive. Rendered via Portal in viewport coordinates,
  * so this rule set has no positioning context dependency. The 600ms
  * hover delay lives in JS; the keyframes here only handle the fade-in
