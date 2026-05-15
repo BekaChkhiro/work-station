@@ -8,6 +8,8 @@ import {
 } from "../httpClient";
 import type { IntegrationId } from "../credentials";
 import { markNeedsReauth, runWithReauthGuard } from "../reauth";
+import { routeIpc } from "../../ipc/transport";
+import type { WsBridgeClient } from "../wsBridge";
 import { mapHttpError, PlanFlowParseError } from "./errors";
 import {
   activeWorkResponseSchema,
@@ -56,6 +58,17 @@ export interface PlanFlowClientOptions {
    *  after the next successful Verify. Verify clients should leave this
    *  unset so a bad-token check doesn't trip the global state. */
   reauthIntegration?: IntegrationId;
+  /** T19.13 — when true, methods that have a cloud-agent counterpart
+   *  (`listTasks`, `updateTaskStatus`, `startWorking`, `stopWorking`,
+   *  `listActiveWork`, `listComments`, `createComment`, `getMe`) route
+   *  through the IPC transport so cloud mode hits the cloud-agent's
+   *  `planflow_*` WS handlers instead of HTTP. Other methods (notifications,
+   *  knowledge, list-changes, list-projects, get-branch-name, …) stay on
+   *  HTTP regardless — they have no cloud-agent counterpart. The renderer
+   *  factory (`createRendererPlanFlowClient`) sets this to `true`; the
+   *  verifier and Settings panel keep it `false` so a credential-test or
+   *  account-config call always hits the desktop's own PlanFlow token. */
+  routeViaCloudAgent?: boolean;
 }
 
 export interface ListTasksOptions {
@@ -123,9 +136,11 @@ export interface BranchNameResponse {
 export class PlanFlowClient {
   readonly #http: IntegrationHttpClient;
   readonly #reauthIntegration: IntegrationId | null;
+  readonly #routeViaCloudAgent: boolean;
 
   constructor(options: PlanFlowClientOptions) {
     this.#reauthIntegration = options.reauthIntegration ?? null;
+    this.#routeViaCloudAgent = options.routeViaCloudAgent ?? false;
     const reauthIntegration = this.#reauthIntegration;
     this.#http = createIntegrationHttpClient({
       service: "planflow",
@@ -146,8 +161,16 @@ export class PlanFlowClient {
   }
 
   async getMe(): Promise<Me["user"]> {
-    const payload = await this.#get("/auth/me", meSchema);
-    return payload.user;
+    return this.#route(
+      async () => {
+        const payload = await this.#get("/auth/me", meSchema);
+        return payload.user;
+      },
+      async (client) => {
+        const raw = await client.planflowGetMe();
+        return meSchema.parse(raw).user;
+      },
+    );
   }
 
   async listOrganizations(): Promise<Organization[]> {
@@ -179,16 +202,32 @@ export class PlanFlowClient {
   }
 
   async listTasks(projectId: string, options: ListTasksOptions = {}): Promise<Task[]> {
-    const query: Record<string, string> = {};
-    if (options.status != null) {
-      query["status"] = Array.isArray(options.status) ? options.status.join(",") : options.status;
-    }
-    const payload = await this.#get(
-      `/projects/${encodeURIComponent(projectId)}/tasks`,
-      taskListSchema,
-      { query, cacheTtlMs: options.cacheTtlMs },
+    return this.#route(
+      async () => {
+        const query: Record<string, string> = {};
+        if (options.status != null) {
+          query["status"] = Array.isArray(options.status)
+            ? options.status.join(",")
+            : options.status;
+        }
+        const payload = await this.#get(
+          `/projects/${encodeURIComponent(projectId)}/tasks`,
+          taskListSchema,
+          { query, cacheTtlMs: options.cacheTtlMs },
+        );
+        return payload.tasks;
+      },
+      async (client) => {
+        const status =
+          options.status == null
+            ? undefined
+            : Array.isArray(options.status)
+              ? options.status.join(",")
+              : options.status;
+        const raw = await client.planflowListTasks(projectId, status);
+        return taskListSchema.parse(raw).tasks;
+      },
     );
-    return payload.tasks;
   }
 
   /** PlanFlow has no single-task GET — the caller looks the task up in the
@@ -211,22 +250,33 @@ export class PlanFlowClient {
     taskIdOrUuid: string,
     status: TaskStatus,
   ): Promise<Task | null> {
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      taskIdOrUuid,
+    return this.#route(
+      async () => {
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          taskIdOrUuid,
+        );
+        let taskUuid = taskIdOrUuid;
+        if (!isUuid) {
+          const tasks = await this.listTasks(projectId);
+          const match = tasks.find((t) => t.taskId === taskIdOrUuid);
+          if (!match) return null;
+          taskUuid = match.id;
+        }
+        const response = await this.#request(
+          `/projects/${encodeURIComponent(projectId)}/tasks/bulk-status`,
+          taskListSchema,
+          { method: "POST", json: { taskIds: [taskUuid], status } },
+        );
+        return response.tasks[0] ?? null;
+      },
+      // The cloud-agent's `handle_update_task_status` does the same
+      // human-id → UUID resolution server-side, so we forward the caller's
+      // input verbatim.
+      async (client) => {
+        const raw = await client.planflowUpdateTaskStatus(projectId, taskIdOrUuid, status);
+        return taskListSchema.parse(raw).tasks[0] ?? null;
+      },
     );
-    let taskUuid = taskIdOrUuid;
-    if (!isUuid) {
-      const tasks = await this.listTasks(projectId);
-      const match = tasks.find((t) => t.taskId === taskIdOrUuid);
-      if (!match) return null;
-      taskUuid = match.id;
-    }
-    const response = await this.#request(
-      `/projects/${encodeURIComponent(projectId)}/tasks/bulk-status`,
-      taskListSchema,
-      { method: "POST", json: { taskIds: [taskUuid], status } },
-    );
-    return response.tasks[0] ?? null;
   }
 
   /** Start working on a task — claims the lock + sets working_on for
@@ -235,10 +285,17 @@ export class PlanFlowClient {
    *  the caller must follow up with `updateTaskStatus(..., "IN_PROGRESS")`
    *  if that's the intent. */
   async startWorking(projectId: string, taskId: string): Promise<void> {
-    await this.#request(
-      `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/work`,
-      z.unknown(),
-      { method: "POST", json: { action: "start" }, responseType: "void" },
+    return this.#route(
+      async () => {
+        await this.#request(
+          `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/work`,
+          z.unknown(),
+          { method: "POST", json: { action: "start" }, responseType: "void" },
+        );
+      },
+      async (client) => {
+        await client.planflowStartWork(projectId, taskId);
+      },
     );
   }
 
@@ -246,11 +303,22 @@ export class PlanFlowClient {
    *  contract; the server resolves the current working_on from the user's
    *  session. */
   async stopWorking(projectId: string): Promise<void> {
-    await this.#request(`/projects/${encodeURIComponent(projectId)}/tasks/_/work`, z.unknown(), {
-      method: "POST",
-      json: { action: "stop" },
-      responseType: "void",
-    });
+    return this.#route(
+      async () => {
+        await this.#request(
+          `/projects/${encodeURIComponent(projectId)}/tasks/_/work`,
+          z.unknown(),
+          {
+            method: "POST",
+            json: { action: "stop" },
+            responseType: "void",
+          },
+        );
+      },
+      async (client) => {
+        await client.planflowStopWork(projectId);
+      },
+    );
   }
 
   /** Client-side branch-name generation. PlanFlow's `/branch-name` route
@@ -310,27 +378,45 @@ export class PlanFlowClient {
   }
 
   async listActiveWork(projectId: string): Promise<ActiveWorkUser[]> {
-    const payload = await this.#get(
-      `/projects/${encodeURIComponent(projectId)}/active-work`,
-      activeWorkResponseSchema,
-    );
-    return payload.activeWork.map((entry: ActiveWorkEntry) => ({
-      user: {
-        id: entry.userId,
-        email: entry.userEmail,
-        name: entry.userName,
+    const adapt = (entries: ActiveWorkEntry[]): ActiveWorkUser[] =>
+      entries.map((entry) => ({
+        user: {
+          id: entry.userId,
+          email: entry.userEmail,
+          name: entry.userName,
+        },
+        taskId: entry.taskId,
+        startedAt: entry.startedAt,
+      }));
+    return this.#route(
+      async () => {
+        const payload = await this.#get(
+          `/projects/${encodeURIComponent(projectId)}/active-work`,
+          activeWorkResponseSchema,
+        );
+        return adapt(payload.activeWork);
       },
-      taskId: entry.taskId,
-      startedAt: entry.startedAt,
-    }));
+      async (client) => {
+        const raw = await client.planflowListActiveWork(projectId);
+        return adapt(activeWorkResponseSchema.parse(raw).activeWork);
+      },
+    );
   }
 
   async listComments(projectId: string, taskId: string): Promise<Comment[]> {
-    const payload = await this.#get(
-      `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/comments`,
-      commentListSchema,
+    return this.#route(
+      async () => {
+        const payload = await this.#get(
+          `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/comments`,
+          commentListSchema,
+        );
+        return payload.comments;
+      },
+      async (client) => {
+        const raw = await client.planflowListComments(projectId, taskId);
+        return commentListSchema.parse(raw).comments;
+      },
     );
-    return payload.comments;
   }
 
   async createComment(
@@ -338,15 +424,25 @@ export class PlanFlowClient {
     taskId: string,
     payload: CreateCommentPayload,
   ): Promise<Comment> {
-    // PlanFlow's create-comment route expects `content` as the field name;
-    // older callers in this app pass `body`. We accept the legacy shape
-    // and translate at the wire boundary so consumers don't have to.
-    const response = await this.#request(
-      `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/comments`,
-      commentDetailSchema,
-      { method: "POST", json: { content: payload.body } },
+    return this.#route(
+      // PlanFlow's create-comment route expects `content` as the field name;
+      // older callers in this app pass `body`. We accept the legacy shape
+      // and translate at the wire boundary so consumers don't have to.
+      async () => {
+        const response = await this.#request(
+          `/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/comments`,
+          commentDetailSchema,
+          { method: "POST", json: { content: payload.body } },
+        );
+        return response.comment;
+      },
+      // The cloud-agent's `handle_create_comment` performs the same
+      // body→content translation; we forward the body verbatim.
+      async (client) => {
+        const raw = await client.planflowCreateComment(projectId, taskId, payload.body);
+        return commentDetailSchema.parse(raw).comment;
+      },
     );
-    return response.comment;
   }
 
   async listNotifications(
@@ -391,6 +487,18 @@ export class PlanFlowClient {
       knowledgeEntrySchema,
       { method: "POST", json },
     );
+  }
+
+  /** T19.13 — route a method between local HTTP and the cloud-agent's
+   *  WS bridge based on `cloudMode`. When `routeViaCloudAgent` is off
+   *  (verifier / Settings panel), always run the local branch — there's
+   *  no cloud transport to dial in that context. */
+  async #route<T>(
+    local: () => Promise<T>,
+    cloud: (client: WsBridgeClient) => Promise<T>,
+  ): Promise<T> {
+    if (!this.#routeViaCloudAgent) return local();
+    return routeIpc(local, cloud);
   }
 
   async #get<T>(

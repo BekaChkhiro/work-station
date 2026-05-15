@@ -14,6 +14,7 @@ import {
   WsBridgeClosedError,
   WsBridgeError,
   WsBridgeServerError,
+  WsPlanflowError,
   type ConnectionState,
 } from "./client";
 import { encodeBase64 } from "./base64";
@@ -606,5 +607,87 @@ describe("WsBridgeClient — projects + settings (T19.9)", () => {
     // promise.
     MockWebSocket.at(0).emitMessage(JSON.stringify({ type: "pty_ack", id: frame.id }));
     await expect(pending).rejects.toBeInstanceOf(WsBridgeError);
+  });
+});
+
+describe("WsBridgeClient — PlanFlow Tasks bridge (T19.13)", () => {
+  it("planflowListTasks sends `planflow_list_tasks` and returns the unwrapped data payload", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.planflowListTasks("p1");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId & { project_id?: string }>(0);
+    expect(frame.type).toBe("planflow_list_tasks");
+    expect(frame.project_id).toBe("p1");
+    expect(frame).not.toHaveProperty("status");
+
+    const data = { tasks: [{ id: "u-1", taskId: "T1.1", name: "hi", status: "TODO" }] };
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "planflow_result", id: frame.id, data }),
+    );
+    await expect(pending).resolves.toEqual(data);
+  });
+
+  it("planflowListTasks forwards the optional status filter", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    void client.planflowListTasks("p1", "TODO");
+    const frame = MockWebSocket.at(0).parseSent<
+      FrameWithId & { project_id?: string; status?: string }
+    >(0);
+    expect(frame.status).toBe("TODO");
+  });
+
+  it("planflowStartWork resolves with void on a planflow_result frame", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.planflowStartWork("p1", "T1.1");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+    expect(frame.type).toBe("planflow_start_work");
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "planflow_result", id: frame.id, data: null }),
+    );
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("planflow_error rejects with WsPlanflowError carrying kind and status", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.planflowGetMe();
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({
+        type: "planflow_error",
+        id: frame.id,
+        kind: "unauthorized",
+        message: "bad token",
+        status: 401,
+      }),
+    );
+
+    await expect(pending).rejects.toBeInstanceOf(WsPlanflowError);
+    await expect(pending).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
+  });
+
+  it("planflowCreateComment forwards body verbatim (server adapts to `content`)", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    void client.planflowCreateComment("p1", "T1.1", "hello");
+    const frame = MockWebSocket.at(0).parseSent<
+      FrameWithId & { project_id?: string; task_id?: string; body?: string }
+    >(0);
+    expect(frame.type).toBe("planflow_create_comment");
+    expect(frame.body).toBe("hello");
+    expect(frame).not.toHaveProperty("content");
   });
 });

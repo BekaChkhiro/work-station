@@ -58,5 +58,12 @@ export function createRendererPlanFlowClient(
     defaultTimeoutMs: options.defaultTimeoutMs,
     defaultRetry: options.defaultRetry,
     fetchImpl: options.fetchImpl,
+    // T19.13 — every renderer-side PlanFlow Tasks call (task list, active
+    // work, comments, status flips, work locks, getMe) routes through the
+    // IPC transport so cloud mode lands on the cloud-agent's `planflow_*`
+    // WS handlers. Methods without a cloud counterpart (notifications,
+    // knowledge, list-changes, list-projects, get-branch-name) keep using
+    // the desktop's HTTP path regardless.
+    routeViaCloudAgent: true,
   });
 }
