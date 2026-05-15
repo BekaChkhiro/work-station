@@ -19,6 +19,7 @@ use workstation_core::ws::auth::AuthToken;
 
 mod cli;
 mod config;
+mod db;
 mod dispatch;
 mod logging;
 mod pair;
@@ -99,7 +100,23 @@ async fn run(config: Config) -> ExitCode {
         }
     };
 
-    let handle = match server::spawn(token, config.listen).await {
+    // T19.25 — open the cloud-agent's SQLite database and apply
+    // migrations before binding the listener. A migration failure here
+    // is a hard error (refuse to boot rather than serve handlers
+    // against a schema-incomplete database).
+    let pool = match db::open(&config.state_dir).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(
+                state_dir = %config.state_dir.display(),
+                error = %e,
+                "failed to open cloud-agent database",
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    let handle = match server::spawn(token, pool, config.listen).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!(

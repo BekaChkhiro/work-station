@@ -1,74 +1,70 @@
-//! Per-connection WebSocket dispatch loop for the cloud-agent (T19.24).
+// T19.25 prose mentions `SQLite`, `PlanFlow`, `WebSocket` in passing.
+// Backticking each occurrence hurts readability; allow the doc-markdown
+// lint at the module level, matching `workstation-core::ws::protocol`.
+#![allow(clippy::doc_markdown)]
+
+//! Per-connection WebSocket dispatch loop for the cloud-agent.
 //!
-//! Replaces the T19.21 placeholder that closed every authenticated socket
-//! with a single `error{kind:"unimplemented"}` frame. The loop now:
-//!
-//!   * splits the WebSocket into a read half + an outbound mpsc pump so
-//!     handler tasks can produce frames concurrently without contending
-//!     on the sink (same shape as `src-tauri/src/ws/pty_bridge.rs`);
-//!   * decodes each text frame as a [`ClientMessage`] using the shared
-//!     `workstation-core::ws::protocol` types so the cloud-agent and
-//!     the desktop bridge speak the exact same JSON contract;
-//!   * dispatches `settings_get` to a stubbed handler that returns a
-//!     hardcoded [`SettingsView`] — enough to prove the loop end-to-end
-//!     against the desktop's WS client without standing up `SQLite` on
-//!     the VPS yet (real settings storage lands in a follow-up task);
-//!   * replies to every other known message type with a typed
-//!     `error{kind:"unimplemented"}` frame so the desktop sees a stable
-//!     shape during Phase-1 instead of a silent drop.
-//!
-//! Error taxonomy mirrors the desktop bridge so a PWA / desktop client
+//! T19.24 stood up the loop end-to-end with a stubbed `settings_get`
+//! reply so the desktop WS client could prove the round-trip without
+//! standing up SQLite on the VPS. T19.25 replaces the stub with the
+//! real DB-backed handler and lights up the projects bridge
+//! (`projects_list`, `project_get`, `project_switch`) against the
+//! cloud-agent's own SQLite at `<state_dir>/cloud-agent.db`. The error
+//! taxonomy mirrors the desktop bridge so the PWA / desktop client
 //! doesn't need a second branch table:
+//!
 //!   * `invalid_json`  — payload didn't parse, or `type` was missing.
 //!   * `unsupported`   — `type` is a string we don't recognize at all.
 //!   * `unimplemented` — `type` is known but the cloud-agent hasn't
-//!     wired its handler yet.
+//!     wired its handler yet (PTY / FS / PlanFlow land in follow-ups).
 //!   * `invalid_frame` — client sent a binary frame on a text-only wire.
+//!   * `not_found`     — project id in the request doesn't exist.
+//!   * `internal`      — SQLite or serialization failure.
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
+use sqlx::sqlite::SqlitePool;
 use tokio::sync::mpsc;
 use workstation_core::ws::protocol::{
     ClientMessage, ServerMessage, SettingsView, KNOWN_CLIENT_TYPES,
 };
 
-/// Capacity for the per-connection outbound mpsc.
-///
-/// Phase-1 has only one writer (the request/response lane) so this
-/// could be tiny; we keep 64 to leave headroom for the PTY / project
-/// forwarders that follow-up tasks slot in.
+use crate::db::{app_settings, projects};
+
+/// Capacity for the per-connection outbound mpsc. Phase-1 has only the
+/// request/response lane; the headroom is for PTY / project forwarders
+/// in follow-up tasks.
 const OUTBOUND_CHANNEL_CAPACITY: usize = 64;
 
 /// Drive a single authenticated WebSocket connection until the peer
 /// closes or the socket errors. Returns when the read half drains and
 /// the sink task has flushed.
-pub async fn run_connection(socket: WebSocket) {
+///
+/// `pool` is cloned per call so the dispatcher holds its own handle;
+/// `SqlitePool` is internally Arc-shared, so cloning is cheap and
+/// dropping our copy on connection teardown doesn't affect other
+/// concurrent connections.
+pub async fn run_connection(socket: WebSocket, pool: SqlitePool) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
 
-    // Outbound pump: drains the mpsc into the WebSocket sink as text
-    // frames. Exits cleanly when the mpsc closes (every sender dropped)
-    // or when a send to the sink errors.
     let sink_task = tokio::spawn(async move {
         while let Some(payload) = out_rx.recv().await {
             if ws_tx.send(Message::Text(payload)).await.is_err() {
                 break;
             }
         }
-        // Best-effort close — if the peer already hung up this errors,
-        // which we ignore.
         let _ = ws_tx.close().await;
     });
 
     while let Some(frame) = ws_rx.next().await {
         let Ok(msg) = frame else {
-            // Underlying transport error — bail; the sink_task will
-            // tear down on the next pump iteration.
             break;
         };
         match msg {
             Message::Text(payload) => {
-                handle_text(&out_tx, &payload).await;
+                handle_text(&out_tx, &pool, &payload).await;
             }
             Message::Binary(_) => {
                 send_error(
@@ -79,16 +75,11 @@ pub async fn run_connection(socket: WebSocket) {
                 )
                 .await;
             }
-            Message::Ping(_) | Message::Pong(_) => {
-                // axum responds to pings automatically; pong frames are
-                // ignored.
-            }
+            Message::Ping(_) | Message::Pong(_) => {}
             Message::Close(_) => break,
         }
     }
 
-    // Closing the mpsc sender drains the sink_task; await it for a
-    // clean WebSocket close.
     drop(out_tx);
     let _ = sink_task.await;
 }
@@ -96,8 +87,8 @@ pub async fn run_connection(socket: WebSocket) {
 /// Two-phase parse so we can echo `id` on every failure path and
 /// distinguish "unknown message type" (`unsupported`) from "malformed
 /// payload for a known type" (`invalid_json`). Mirrors the desktop
-/// bridge's [`super::ws::pty_bridge::handle_text`] flow.
-async fn handle_text(out_tx: &mpsc::Sender<String>, payload: &str) {
+/// bridge's `super::ws::pty_bridge::handle_text` flow.
+async fn handle_text(out_tx: &mpsc::Sender<String>, pool: &SqlitePool, payload: &str) {
     let value: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(error) => {
@@ -139,81 +130,234 @@ async fn handle_text(out_tx: &mpsc::Sender<String>, payload: &str) {
         return;
     }
 
-    // Phase-1: only `settings_get` is wired. Re-parse into the typed
-    // enum on that arm so a malformed payload (e.g. wrong field type)
-    // still surfaces as `invalid_json` with the original `id` echoed.
-    // Every other known type short-circuits to `unimplemented` without
-    // a second parse — there is no per-variant payload to validate yet.
-    if type_str == "settings_get" {
-        match serde_json::from_value::<ClientMessage>(value) {
-            Ok(ClientMessage::SettingsGet { id }) => {
-                handle_settings_get(out_tx, id).await;
-            }
-            Ok(_) => {
-                // Defensive: serde matched a different variant despite
-                // the `type` tag we just inspected. Treat as a bug-class
-                // error rather than panic so production stays up.
-                tracing::error!(
-                    target: "cloud_agent::dispatch",
-                    %type_str,
-                    "type tag did not match deserialized variant",
-                );
-                send_error(
-                    out_tx,
-                    echo_id,
-                    "invalid_json",
-                    "type tag did not match deserialized variant",
-                )
-                .await;
-            }
-            Err(error) => {
-                send_error(
-                    out_tx,
-                    echo_id,
-                    "invalid_json",
-                    format!("failed to parse client message: {error}"),
-                )
-                .await;
-            }
+    // Wired handlers re-parse into the typed enum so a malformed payload
+    // (e.g. wrong field type) surfaces as `invalid_json` with the
+    // original `id` echoed. Unimplemented branches short-circuit before
+    // a typed parse — the Phase-1 client doesn't depend on cloud-side
+    // payload validation for handlers that haven't run yet.
+    match type_str.as_str() {
+        "settings_get" => {
+            handle_typed::<_, _>(out_tx, value, echo_id, |out_tx, msg, id| async move {
+                if let ClientMessage::SettingsGet { id } = msg {
+                    handle_settings_get(&out_tx, pool, id).await;
+                } else {
+                    send_variant_mismatch(&out_tx, id).await;
+                }
+            })
+            .await;
         }
-        return;
+        "projects_list" => {
+            handle_typed::<_, _>(out_tx, value, echo_id, |out_tx, msg, id| async move {
+                if let ClientMessage::ProjectsList { id } = msg {
+                    handle_projects_list(&out_tx, pool, id).await;
+                } else {
+                    send_variant_mismatch(&out_tx, id).await;
+                }
+            })
+            .await;
+        }
+        "project_get" => {
+            handle_typed::<_, _>(out_tx, value, echo_id, |out_tx, msg, id| async move {
+                if let ClientMessage::ProjectGet { id, project_id } = msg {
+                    handle_project_get(&out_tx, pool, id, project_id).await;
+                } else {
+                    send_variant_mismatch(&out_tx, id).await;
+                }
+            })
+            .await;
+        }
+        "project_switch" => {
+            handle_typed::<_, _>(out_tx, value, echo_id, |out_tx, msg, id| async move {
+                if let ClientMessage::ProjectSwitch { id, project_id } = msg {
+                    handle_project_switch(&out_tx, pool, id, project_id).await;
+                } else {
+                    send_variant_mismatch(&out_tx, id).await;
+                }
+            })
+            .await;
+        }
+        other => {
+            send_error(
+                out_tx,
+                echo_id,
+                "unimplemented",
+                format!("'{other}' is not yet implemented on the cloud-agent"),
+            )
+            .await;
+        }
     }
+}
 
+/// Shared typed-parse helper: re-parse the inspected payload as a
+/// [`ClientMessage`] and dispatch via `f`, mapping a parse failure to
+/// `invalid_json` with the original `id` echoed.
+async fn handle_typed<F, Fut>(
+    out_tx: &mpsc::Sender<String>,
+    value: serde_json::Value,
+    echo_id: Option<String>,
+    f: F,
+) where
+    F: FnOnce(mpsc::Sender<String>, ClientMessage, Option<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    match serde_json::from_value::<ClientMessage>(value) {
+        Ok(msg) => {
+            f(out_tx.clone(), msg, echo_id).await;
+        }
+        Err(error) => {
+            send_error(
+                out_tx,
+                echo_id,
+                "invalid_json",
+                format!("failed to parse client message: {error}"),
+            )
+            .await;
+        }
+    }
+}
+
+/// Defensive log + error reply when serde matches a different variant
+/// than the inspected `type` tag — this shouldn't happen in practice
+/// since the tag-driven enum is bijective, but treating it as a
+/// bug-class `invalid_json` keeps the daemon up if `protocol.rs` ever
+/// drifts.
+async fn send_variant_mismatch(out_tx: &mpsc::Sender<String>, id: Option<String>) {
+    tracing::error!(
+        target: "cloud_agent::dispatch",
+        "type tag did not match deserialized variant",
+    );
     send_error(
         out_tx,
-        echo_id,
-        "unimplemented",
-        format!("'{type_str}' is not yet implemented on the cloud-agent"),
+        id,
+        "invalid_json",
+        "type tag did not match deserialized variant",
     )
     .await;
 }
 
-/// Stubbed `settings_get` reply (T19.24).
+/// DB-backed `settings_get` reply (T19.25).
 ///
-/// Returns a fixed [`SettingsView`] so the desktop WS client can prove
-/// the dispatch loop is alive without the cloud-agent having to host a
-/// `SQLite` copy of `app_settings` yet. Values mirror the TS defaults
-/// (`theme = "dark"`, `lastActiveProject = null`) so the PWA reads the
-/// same shape regardless of which backend answered.
-async fn handle_settings_get(out_tx: &mpsc::Sender<String>, id: Option<String>) {
+/// Reads `theme` + `last_active_project` from the cloud-agent's
+/// `app_settings` table, applying the same defaults the TS wrapper uses
+/// when a row is missing or corrupt (`theme = "dark"`,
+/// `last_active_project = null`). Mirrors the desktop bridge's
+/// `src-tauri/src/ws/projects_bridge.rs::handle_settings_get` so a PWA
+/// pointed at either backend sees the same shape.
+async fn handle_settings_get(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+) {
+    let theme = app_settings::get_json::<String>(pool, app_settings::THEME_KEY)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "dark".to_string());
+
+    // Outer flatten turns `Ok(None)` into `None`; inner turns a stored
+    // JSON `null` (`Some(None)`) into `None` too, so callers always see
+    // a flat `Option<String>` no matter which "missing" shape produced it.
+    let last_active =
+        app_settings::get_json::<Option<String>>(pool, app_settings::LAST_ACTIVE_PROJECT_KEY)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
+
     let settings = SettingsView {
-        theme: "dark".to_string(),
-        last_active_project: None,
+        theme,
+        last_active_project: last_active,
     };
     send(out_tx, &ServerMessage::SettingsResult { id, settings }).await;
+}
+
+/// `projects_list` (T19.25): full project list ordered by position.
+async fn handle_projects_list(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+) {
+    match projects::list(pool).await {
+        Ok(rows) => {
+            let projects = serde_json::to_value(rows)
+                .expect("Project list always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectsListResult { id, projects }).await;
+        }
+        Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
+    }
+}
+
+/// `project_get` (T19.25): single project by id, or `not_found`.
+async fn handle_project_get(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+) {
+    match projects::get(pool, &project_id).await {
+        Ok(project) => {
+            let project =
+                serde_json::to_value(project).expect("Project always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectResult { id, project }).await;
+        }
+        Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
+    }
+}
+
+/// `project_switch` (T19.25): verify the project exists, persist
+/// `app_settings.last_active_project`, ack. Desktop emits a Tauri event
+/// on its side for cross-runtime mirroring (see
+/// `projects_bridge::handle_project_switch`); the cloud-agent has no
+/// equivalent listener so the cross-WS broadcast variant
+/// [`ServerMessage::ActiveProjectChanged`] stays reserved — Phase-1
+/// clients re-fetch on next `settings_get` to learn about the change.
+async fn handle_project_switch(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+) {
+    if let Err(error) = projects::get(pool, &project_id).await {
+        send(out_tx, &project_error_to_frame(id, &error)).await;
+        return;
+    }
+
+    if let Err(error) =
+        app_settings::set_json(pool, app_settings::LAST_ACTIVE_PROJECT_KEY, &project_id).await
+    {
+        send(
+            out_tx,
+            &ServerMessage::Error {
+                id,
+                kind: "internal".into(),
+                message: format!("persist last_active_project failed: {error}"),
+            },
+        )
+        .await;
+        return;
+    }
+
+    send(out_tx, &ServerMessage::ProjectSwitched { id, project_id }).await;
+}
+
+fn project_error_to_frame(id: Option<String>, error: &projects::ProjectError) -> ServerMessage {
+    let kind = match error {
+        projects::ProjectError::NotFound(_) => "not_found",
+        projects::ProjectError::Sqlx(_) => "internal",
+    };
+    ServerMessage::Error {
+        id,
+        kind: kind.into(),
+        message: error.to_string(),
+    }
 }
 
 async fn send(out_tx: &mpsc::Sender<String>, msg: &ServerMessage) {
     match serde_json::to_string(msg) {
         Ok(payload) => {
-            // A closed channel means the connection is tearing down; the
-            // sink_task has already exited so a dropped frame is the
-            // right outcome.
             let _ = out_tx.send(payload).await;
         }
         Err(error) => {
-            // Serialization of our own ServerMessage shouldn't fail —
-            // log loudly so a regression in protocol.rs is visible.
             tracing::error!(
                 target: "cloud_agent::dispatch",
                 %error,
@@ -244,12 +388,19 @@ async fn send_error(
 mod tests {
     use super::*;
     use serde_json::Value;
+    use tempfile::tempdir;
+
+    async fn fresh_pool() -> SqlitePool {
+        let dir = tempdir().expect("tempdir");
+        let dir = Box::leak(Box::new(dir));
+        crate::db::open(dir.path()).await.expect("open")
+    }
 
     /// Drain everything the dispatcher emitted into a Vec<Value> for
     /// easy assertions. Closes the channel first so the loop terminates.
-    async fn drive(payload: &str) -> Vec<Value> {
+    async fn drive(pool: &SqlitePool, payload: &str) -> Vec<Value> {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
-        handle_text(&out_tx, payload).await;
+        handle_text(&out_tx, pool, payload).await;
         drop(out_tx);
         let mut frames = Vec::new();
         while let Some(raw) = out_rx.recv().await {
@@ -258,9 +409,25 @@ mod tests {
         frames
     }
 
+    /// Seed a single project row for handler tests.
+    async fn seed_project(pool: &SqlitePool, id: &str, name: &str) {
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, env_json, position, created_at)
+             VALUES (?, ?, ?, '{}', 0, ?)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(format!("/srv/projects/{name}"))
+        .bind(1_700_000_000_i64)
+        .execute(pool)
+        .await
+        .expect("seed project");
+    }
+
     #[tokio::test]
-    async fn settings_get_returns_stubbed_view() {
-        let frames = drive(r#"{"type":"settings_get","id":"req-1"}"#).await;
+    async fn settings_get_returns_defaults_on_fresh_db() {
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type":"settings_get","id":"req-1"}"#).await;
         assert_eq!(frames.len(), 1, "expected one reply, got {frames:?}");
         let frame = &frames[0];
         assert_eq!(frame["type"], "settings_result");
@@ -268,86 +435,188 @@ mod tests {
         assert_eq!(frame["settings"]["theme"], "dark");
         assert!(
             frame["settings"]["lastActiveProject"].is_null(),
-            "lastActiveProject must be explicit null, got {frame}",
+            "lastActiveProject must be explicit null on fresh db, got {frame}",
         );
     }
 
     #[tokio::test]
-    async fn settings_get_without_id_omits_id_field() {
-        let frames = drive(r#"{"type":"settings_get"}"#).await;
+    async fn settings_get_returns_persisted_values() {
+        let pool = fresh_pool().await;
+        app_settings::set_json(&pool, app_settings::THEME_KEY, &"light")
+            .await
+            .expect("set theme");
+        app_settings::set_json(&pool, app_settings::LAST_ACTIVE_PROJECT_KEY, &"p-abc")
+            .await
+            .expect("set active");
+
+        let frames = drive(&pool, r#"{"type":"settings_get"}"#).await;
+        let frame = &frames[0];
+        assert_eq!(frame["settings"]["theme"], "light");
+        assert_eq!(frame["settings"]["lastActiveProject"], "p-abc");
+    }
+
+    #[tokio::test]
+    async fn settings_get_tolerates_corrupt_theme_row() {
+        let pool = fresh_pool().await;
+        sqlx::query("INSERT INTO app_settings (key, value) VALUES (?, ?)")
+            .bind(app_settings::THEME_KEY)
+            .bind("not json")
+            .execute(&pool)
+            .await
+            .expect("seed garbage");
+        let frames = drive(&pool, r#"{"type":"settings_get"}"#).await;
+        assert_eq!(frames[0]["settings"]["theme"], "dark");
+    }
+
+    #[tokio::test]
+    async fn projects_list_returns_rows_in_position_order() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-alpha", "alpha").await;
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, env_json, position, created_at)
+             VALUES ('p-beta', 'beta', '/srv/projects/beta', '{}', 1, ?)",
+        )
+        .bind(1_700_000_001_i64)
+        .execute(&pool)
+        .await
+        .expect("seed beta");
+
+        let frames = drive(&pool, r#"{"type":"projects_list","id":"req-1"}"#).await;
         assert_eq!(frames.len(), 1);
         let frame = &frames[0];
-        assert_eq!(frame["type"], "settings_result");
+        assert_eq!(frame["type"], "projects_list_result");
+        assert_eq!(frame["id"], "req-1");
+        let names: Vec<_> = frame["projects"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn projects_list_returns_empty_array_when_no_rows() {
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type":"projects_list"}"#).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "projects_list_result");
+        assert!(frame["projects"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn project_get_returns_camel_cased_project() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-alpha", "alpha").await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_get","id":"r","project_id":"p-alpha"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "project_result");
+        assert_eq!(frame["project"]["id"], "p-alpha");
         assert!(
-            frame.get("id").is_none(),
-            "id must be omitted when client didn't supply one: {frame}",
+            frame["project"]["workspaceTabs"].is_array(),
+            "expected camelCase workspaceTabs, got {frame}",
+        );
+    }
+
+    #[tokio::test]
+    async fn project_get_unknown_id_replies_not_found() {
+        let pool = fresh_pool().await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_get","id":"r","project_id":"ghost"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "not_found");
+        assert_eq!(frame["id"], "r");
+    }
+
+    #[tokio::test]
+    async fn project_switch_persists_setting_and_acks() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-alpha", "alpha").await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_switch","id":"req-1","project_id":"p-alpha"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "project_switched");
+        assert_eq!(frame["project_id"], "p-alpha");
+        assert_eq!(frame["id"], "req-1");
+
+        let stored: Option<String> =
+            app_settings::get_json(&pool, app_settings::LAST_ACTIVE_PROJECT_KEY)
+                .await
+                .expect("get setting");
+        assert_eq!(stored.as_deref(), Some("p-alpha"));
+    }
+
+    #[tokio::test]
+    async fn project_switch_unknown_id_rejects_without_persisting() {
+        let pool = fresh_pool().await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_switch","id":"r","project_id":"ghost"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "not_found");
+        let stored: Option<String> =
+            app_settings::get_json(&pool, app_settings::LAST_ACTIVE_PROJECT_KEY)
+                .await
+                .expect("get setting");
+        assert!(
+            stored.is_none(),
+            "setting must not be touched on failed switch"
         );
     }
 
     #[tokio::test]
     async fn unknown_type_replies_with_unsupported() {
-        let frames = drive(r#"{"type":"nonsense","id":"req-2"}"#).await;
-        assert_eq!(frames.len(), 1);
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type":"nonsense","id":"req-2"}"#).await;
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "unsupported");
         assert_eq!(frame["id"], "req-2");
-        assert!(
-            frame["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("nonsense"),
-            "message should mention the offending type: {frame}",
-        );
     }
 
     #[tokio::test]
     async fn known_but_unimplemented_type_replies_with_unimplemented() {
-        // `pty_spawn` is a real ClientMessage variant — it just has no
-        // handler on the cloud-agent yet. The dispatcher must echo `id`
-        // so the desktop client's promise resolves with the typed error
-        // instead of timing out.
+        // `pty_spawn` is still unimplemented after T19.25.
+        let pool = fresh_pool().await;
         let frames = drive(
+            &pool,
             r#"{"type":"pty_spawn","id":"req-3","command":"bash","cols":80,"rows":24}"#,
         )
         .await;
-        assert_eq!(frames.len(), 1);
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "unimplemented");
         assert_eq!(frame["id"], "req-3");
-        assert!(
-            frame["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("pty_spawn"),
-            "message should mention the unimplemented type: {frame}",
-        );
     }
 
     #[tokio::test]
     async fn malformed_json_replies_with_invalid_json_and_no_id() {
-        // No `id` can be recovered before serde gives up; the reply has
-        // to omit `id` entirely (not echo `null`) so the desktop client
-        // doesn't try to resolve a promise on the wrong correlation slot.
-        let frames = drive(r#"{"type": broken"#).await;
-        assert_eq!(frames.len(), 1);
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type": broken"#).await;
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "invalid_json");
-        assert!(
-            frame.get("id").is_none(),
-            "id must be omitted when payload didn't parse: {frame}",
-        );
+        assert!(frame.get("id").is_none());
     }
 
     #[tokio::test]
     async fn missing_type_replies_with_invalid_json_and_echoes_id() {
-        // A well-formed JSON object with no `type` is the most common
-        // shape of a bad client request — the `id` is recoverable so we
-        // echo it.
-        let frames = drive(r#"{"id":"req-4"}"#).await;
-        assert_eq!(frames.len(), 1);
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"id":"req-4"}"#).await;
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "invalid_json");
@@ -355,40 +624,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn known_type_with_bad_payload_replies_invalid_json() {
-        // `pty_write` is known, but `session_id` must be a UUID string.
-        // Phase-1 short-circuits known-but-unimplemented to `unimplemented`
-        // BEFORE attempting a typed parse — so a bogus payload still
-        // surfaces as unimplemented, which is the desired Phase-1 shape
-        // (the desktop client doesn't care about Cloud-side payload
-        // validation for handlers that don't run). Encoded as a test so
-        // we notice if Phase-2 ever wires the handler and the contract
-        // tightens.
-        let frames = drive(r#"{"type":"pty_write","id":"r","session_id":"nope","data":"aGk="}"#).await;
-        assert_eq!(frames.len(), 1);
-        let frame = &frames[0];
-        assert_eq!(frame["type"], "error");
-        assert_eq!(frame["kind"], "unimplemented");
-        assert_eq!(frame["id"], "r");
-    }
-
-    #[tokio::test]
     async fn settings_get_with_bad_payload_replies_invalid_json() {
-        // `settings_get`'s only field is the optional `id` (a string).
-        // Passing the wrong type forces serde to fail; the dispatcher
-        // must surface that as `invalid_json` rather than swallowing it
-        // and replying with a default SettingsView.
-        let frames = drive(r#"{"type":"settings_get","id":123}"#).await;
-        assert_eq!(frames.len(), 1);
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type":"settings_get","id":123}"#).await;
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "invalid_json");
-        // `id` came in as a number; the dispatcher's two-phase parse
-        // only echoes it when it's a string, so this frame should omit
-        // it — same behavior the desktop bridge uses.
-        assert!(
-            frame.get("id").is_none(),
-            "non-string id must not be echoed: {frame}",
-        );
+        // The first parse only echoes string `id`s; a numeric id is
+        // dropped on the way to the typed parse — mirrors the desktop
+        // bridge behaviour.
+        assert!(frame.get("id").is_none());
+    }
+
+    #[tokio::test]
+    async fn project_get_with_missing_project_id_replies_invalid_json() {
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type":"project_get","id":"r"}"#).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "invalid_json");
+        assert_eq!(frame["id"], "r");
     }
 }

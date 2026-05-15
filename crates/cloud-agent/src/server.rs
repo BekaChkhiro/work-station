@@ -1,3 +1,8 @@
+// T19.25 prose mentions `SQLite` and `WebSocket` in passing. Backticking
+// each occurrence hurts readability; allow the doc-markdown lint at the
+// module level, matching `workstation-core::ws::protocol`.
+#![allow(clippy::doc_markdown)]
+
 //! axum HTTP + WebSocket server scaffold for the cloud-agent (T19.21).
 //!
 //! Mirrors the shape of `src-tauri/src/ws/server.rs` (T18.1) but keeps
@@ -22,13 +27,14 @@
 use std::net::SocketAddr;
 
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Query, Request};
+use axum::extract::{Extension, Query, Request};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
+use sqlx::sqlite::SqlitePool;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -74,16 +80,22 @@ impl Drop for ServerHandle {
 ///
 /// Exposed (crate-internal) for tests that want to drive the server
 /// against a real `TcpListener` without going through [`spawn`].
-pub(crate) fn router(token: AuthToken) -> Router {
+pub(crate) fn router(token: AuthToken, pool: SqlitePool) -> Router {
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
     // T19.23: the middleware itself lives in `workstation-core::ws::auth`
     // so the desktop bridge and the cloud-agent share one implementation
     // of the header + query parsing / 401 response shape.
+    //
+    // T19.25: the pool is layered as an axum `Extension` rather than
+    // `Router::with_state` so the existing `with_state(token)` for the
+    // auth middleware stays uncomplicated. `SqlitePool` is internally
+    // Arc-shared so the per-request `Extension` extractor clones cheap.
     let ws_routes = Router::new()
         .route("/ws", get(ws_handler))
-        .route_layer(middleware::from_fn_with_state(token, require_bearer));
+        .route_layer(middleware::from_fn_with_state(token, require_bearer))
+        .layer(Extension(pool));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -102,8 +114,12 @@ pub(crate) fn router(token: AuthToken) -> Router {
 /// graceful-shutdown signal. The caller drives shutdown explicitly
 /// (`handle.shutdown().await`) — `Drop` is a fallback that aborts the
 /// task if the handle is dropped without an awaited shutdown.
-pub async fn spawn(token: AuthToken, addr: SocketAddr) -> std::io::Result<ServerHandle> {
-    let app = router(token);
+pub async fn spawn(
+    token: AuthToken,
+    pool: SqlitePool,
+    addr: SocketAddr,
+) -> std::io::Result<ServerHandle> {
+    let app = router(token, pool);
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -170,9 +186,15 @@ struct WsQuery {
 
 /// `GET /ws` — WebSocket upgrade. Auth has already passed at the
 /// middleware; we hand the live socket off to the dispatch loop which
-/// owns per-connection state until the peer closes (T19.24).
-async fn ws_handler(Query(_query): Query<WsQuery>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(dispatch::run_connection)
+/// owns per-connection state until the peer closes (T19.24). T19.25
+/// threads the SQLite pool through here so the dispatcher can serve
+/// DB-backed `settings_get` / projects handlers.
+async fn ws_handler(
+    Query(_query): Query<WsQuery>,
+    Extension(pool): Extension<SqlitePool>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    upgrade.on_upgrade(move |socket| dispatch::run_connection(socket, pool))
 }
 
 #[cfg(test)]
@@ -181,11 +203,24 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
+    /// Spin up a real server backed by a fresh on-disk SQLite (the
+    /// pool is opened by `crate::db::open` against a tempdir). The dir
+    /// is leaked for the test's lifetime — sqlite needs the file alive
+    /// until the pool drops, and these tests don't tear down the
+    /// server cleanly enough to use a guard with a clearly-bounded
+    /// lifetime.
     async fn spawn_test_server() -> (ServerHandle, SocketAddr) {
         let token = AuthToken::new("secret");
-        let handle = spawn(token, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-            .await
-            .expect("bind ephemeral");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = Box::leak(Box::new(dir));
+        let pool = crate::db::open(dir.path()).await.expect("open db");
+        let handle = spawn(
+            token,
+            pool,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )
+        .await
+        .expect("bind ephemeral");
         let addr = handle.local_addr;
         // Give axum a beat to start accepting before tests connect.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -232,13 +267,17 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    /// End-to-end smoke test for the T19.24 dispatch loop: a valid
-    /// upgrade keeps the socket open, and a real `settings_get` request
-    /// resolves with the stubbed `SettingsResult` frame. Together with
-    /// the dispatcher unit tests in `dispatch.rs` this proves the full
-    /// path: axum upgrade → auth middleware → dispatch loop → reply.
+    /// End-to-end smoke test for the dispatch loop: a valid upgrade
+    /// keeps the socket open, and a real `settings_get` request
+    /// resolves with the DB-backed `SettingsResult` frame. With a
+    /// fresh database the values fall back to the same defaults the
+    /// T19.24 stub returned (`theme=dark`, `lastActiveProject=null`),
+    /// so the regression coverage is unchanged after T19.25.
+    /// Together with the dispatcher unit tests in `dispatch.rs` this
+    /// proves the full path: axum upgrade → auth middleware → dispatch
+    /// loop → SQLite → reply.
     #[tokio::test]
-    async fn ws_settings_get_returns_stubbed_view() {
+    async fn ws_settings_get_returns_db_backed_view() {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         use tokio_tungstenite::tungstenite::Message;
@@ -302,12 +341,18 @@ mod tests {
             .expect("connect");
         assert_eq!(response.status().as_u16(), 101);
 
+        // `pty_spawn` is still routed to the `unimplemented` branch
+        // after T19.25 (PTY handlers land in T19.26). The projects /
+        // settings types that were unimplemented in T19.24 are now
+        // wired, so the probe has to use a type that hasn't been
+        // touched yet to exercise the right code path.
         socket
             .send(Message::Text(
-                r#"{"type":"projects_list","id":"smoke-2"}"#.to_string(),
+                r#"{"type":"pty_spawn","id":"smoke-2","command":"bash","cols":80,"rows":24}"#
+                    .to_string(),
             ))
             .await
-            .expect("send projects_list");
+            .expect("send pty_spawn");
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let mut payload_for_assert = String::new();

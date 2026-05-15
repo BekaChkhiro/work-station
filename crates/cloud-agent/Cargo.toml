@@ -52,6 +52,12 @@ axum = { version = "=0.7.9", features = ["ws"] }
 # resolves a single copy.
 futures-util = "=0.3.31"
 
+# T19.25 — DB-backed `settings_get` + projects handlers. The cloud-agent
+# now owns its own SQLite database at `<state_dir>/cloud-agent.db`, with
+# schema mirroring the desktop's projects + app_settings tables so the
+# same row written by either side decodes from the other.
+sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio"] }
+
 thiserror = "=2.0.18"
 
 [dev-dependencies]
