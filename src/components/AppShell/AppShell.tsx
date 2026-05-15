@@ -44,6 +44,7 @@ import { IntegrationReauthBanner } from "../IntegrationReauthBanner";
 import { PlanFlowTaskList } from "../PlanFlowTaskList";
 import { editorScratch, setEditorScratch } from "../../stores/editorScratch";
 import { editorAutosaveMs } from "../../stores/editorAutosave";
+import { cloudMode } from "../../stores/cloudMode";
 import { getSetting, setSetting } from "../../db/settings";
 import { hydrateReauthState, reauthSnapshot } from "../../integrations";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
@@ -1053,12 +1054,47 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
     }
   };
 
+  // T19.12 — when the workspace flips into cloud mode, drop every piece
+  // of editor state that ties back to local-disk file ops. `readTextFile`
+  // / `writeTextFile` / `startFileWatch` all raise
+  // `CloudTransportUnsupportedError` in cloud mode (T19.11), so leaving
+  // dirty buffers, queued autosaves, or live watches in place would
+  // either fail silently in the background or surface as "Save failed"
+  // errors on the next keystroke. We close the tabs the same way as
+  // closeTab() but unconditionally (bypassing the dirty-confirm prompt):
+  // the user is making an explicit workspace switch, not closing an
+  // individual tab. Tabs persist to settings only while in local mode —
+  // when they're cleared by this effect, the persist debounce later
+  // writes an empty record for this project, which restores cleanly when
+  // they toggle back.
+  createEffect(() => {
+    if (!cloudMode()) return;
+    if (tabs().length === 0 && activePath() === null) return;
+    clearAllAutosaveTimers();
+    for (const id of watchIdToPath.keys()) {
+      void stopFileWatch(id).catch(() => undefined);
+    }
+    watchIdToPath.clear();
+    openTokens.clear();
+    setTabs([]);
+    setActivePath(null);
+  });
+
   onMount(() => {
     // restoreTabs reads `tabs()` (a signal) inside an async tail — solid's
     // lint flags any reactive read outside a tracked scope as a possible
     // missed update. Here we intentionally only sample once after the
     // restore loop, so the read is correct and untracked is appropriate.
+    //
+    // T19.12 — skip restore in cloud mode: the persisted paths reference
+    // the local disk and the FS commands would fail with
+    // `CloudTransportUnsupportedError`. The list is restored on the next
+    // local-mode mount.
     untrack(() => {
+      if (cloudMode()) {
+        restored = true;
+        return;
+      }
       void restoreTabs();
     });
 
@@ -1101,204 +1137,232 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
   });
 
   return (
-    <div class="ws-editor-tab flex min-h-0 flex-1">
-      <Show when={props.projectPath}>
-        {(root) => (
-          <aside class="ws-editor-tab__tree" aria-label="Project files">
-            <FileTree
-              root={root()}
-              onSelectFile={(p) => void openOrActivate(p)}
-              selectedPath={activePath()}
-            />
-          </aside>
-        )}
-      </Show>
-      <div class="ws-editor-tab__editor min-h-0 flex-1 flex flex-col">
-        <Show when={tabs().length > 0}>
-          <div class="ws-editor-tab__tabs" role="tablist" aria-label="Open files">
-            <For each={tabs()}>
-              {(tab) => {
-                const isActive = (): boolean => activePath() === tab.path;
-                const label = fileLabelFromPath(tab.path);
-                const dirty = (): boolean => isTabDirty(tab);
-                return (
-                  <div
-                    class="ws-editor-tab__tab"
-                    data-active={isActive() ? "true" : undefined}
-                    data-dirty={dirty() ? "true" : undefined}
-                    role="tab"
-                    aria-selected={isActive() ? "true" : "false"}
-                    title={tab.path}
-                  >
-                    <button
-                      type="button"
-                      class="ws-editor-tab__tab-main"
-                      onClick={() => setActivePath(tab.path)}
-                      onAuxClick={(e) => {
-                        if (e.button === 1) {
-                          e.preventDefault();
+    <Show when={!cloudMode()} fallback={<EditorCloudPlaceholder />}>
+      <div class="ws-editor-tab flex min-h-0 flex-1">
+        <Show when={props.projectPath}>
+          {(root) => (
+            <aside class="ws-editor-tab__tree" aria-label="Project files">
+              <FileTree
+                root={root()}
+                onSelectFile={(p) => void openOrActivate(p)}
+                selectedPath={activePath()}
+              />
+            </aside>
+          )}
+        </Show>
+        <div class="ws-editor-tab__editor min-h-0 flex-1 flex flex-col">
+          <Show when={tabs().length > 0}>
+            <div class="ws-editor-tab__tabs" role="tablist" aria-label="Open files">
+              <For each={tabs()}>
+                {(tab) => {
+                  const isActive = (): boolean => activePath() === tab.path;
+                  const label = fileLabelFromPath(tab.path);
+                  const dirty = (): boolean => isTabDirty(tab);
+                  return (
+                    <div
+                      class="ws-editor-tab__tab"
+                      data-active={isActive() ? "true" : undefined}
+                      data-dirty={dirty() ? "true" : undefined}
+                      role="tab"
+                      aria-selected={isActive() ? "true" : "false"}
+                      title={tab.path}
+                    >
+                      <button
+                        type="button"
+                        class="ws-editor-tab__tab-main"
+                        onClick={() => setActivePath(tab.path)}
+                        onAuxClick={(e) => {
+                          if (e.button === 1) {
+                            e.preventDefault();
+                            closeTab(tab.path);
+                          }
+                        }}
+                      >
+                        <Show when={dirty()}>
+                          <span class="ws-editor-tab__tab-dirty" aria-label="Unsaved changes" />
+                        </Show>
+                        <span class="ws-editor-tab__tab-name">{label}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="ws-editor-tab__tab-close"
+                        aria-label={`Close ${label}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
                           closeTab(tab.path);
-                        }
-                      }}
-                    >
-                      <Show when={dirty()}>
-                        <span class="ws-editor-tab__tab-dirty" aria-label="Unsaved changes" />
-                      </Show>
-                      <span class="ws-editor-tab__tab-name">{label}</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="ws-editor-tab__tab-close"
-                      aria-label={`Close ${label}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        closeTab(tab.path);
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                );
-              }}
-            </For>
-          </div>
-        </Show>
-        <Show when={activeFileLabel()}>
-          {(label) => (
-            <div
-              class="ws-editor-tab__header"
-              role="toolbar"
-              aria-label="Editor status"
-              data-status={saveStatus()}
-            >
-              <span
-                class="ws-editor-tab__header-filename"
-                title={activeTabValue()?.path ?? undefined}
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
+          <Show when={activeFileLabel()}>
+            {(label) => (
+              <div
+                class="ws-editor-tab__header"
+                role="toolbar"
+                aria-label="Editor status"
+                data-status={saveStatus()}
               >
-                <Show when={isActiveDirty()}>
-                  <span class="ws-editor-tab__dirty-dot" aria-label="Unsaved changes" />
-                </Show>
-                {label()}
-              </span>
-              <Show when={saveStatus() === "saving"}>
-                <span class="ws-editor-tab__header-status">Saving…</span>
-              </Show>
-              <Show when={saveStatus() === "error"}>
-                <span class="ws-editor-tab__header-status ws-editor-tab__header-status--error">
-                  Save failed
-                  <Show
-                    when={(() => {
-                      const t = activeTabValue();
-                      return t?.kind === "text" && t.lastError ? t.lastError : null;
-                    })()}
-                  >
-                    {(msg) => <>: {msg()}</>}
+                <span
+                  class="ws-editor-tab__header-filename"
+                  title={activeTabValue()?.path ?? undefined}
+                >
+                  <Show when={isActiveDirty()}>
+                    <span class="ws-editor-tab__dirty-dot" aria-label="Unsaved changes" />
                   </Show>
+                  {label()}
                 </span>
-              </Show>
-            </div>
-          )}
-        </Show>
-        <Show
-          when={(() => {
-            const t = activeTabValue();
-            return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "banner"
-              ? t
-              : null;
-          })()}
-        >
-          {(t) => (
-            <div class="ws-editor-tab__conflict" role="status" aria-live="polite">
-              <span class="ws-editor-tab__conflict-text">
-                <strong>{fileLabelFromPath(t().path)}</strong> changed on disk while you were
-                editing. Your buffer has unsaved changes.
-              </span>
-              <div class="ws-editor-tab__conflict-actions">
-                <button
-                  type="button"
-                  class="ws-editor-tab__conflict-button"
-                  onClick={() => resolveReload(t().path)}
-                  title="Discard your changes and load the new disk content"
-                >
-                  Reload
-                </button>
-                <button
-                  type="button"
-                  class="ws-editor-tab__conflict-button"
-                  onClick={() => resolveKeepMine(t().path)}
-                  title="Keep your buffer; the next save will overwrite the new disk content"
-                >
-                  Keep mine
-                </button>
-                <button
-                  type="button"
-                  class="ws-editor-tab__conflict-button"
-                  onClick={() => resolveViewDiff(t().path)}
-                  title="See what changed on disk vs. what's in your buffer"
-                >
-                  View diff
-                </button>
+                <Show when={saveStatus() === "saving"}>
+                  <span class="ws-editor-tab__header-status">Saving…</span>
+                </Show>
+                <Show when={saveStatus() === "error"}>
+                  <span class="ws-editor-tab__header-status ws-editor-tab__header-status--error">
+                    Save failed
+                    <Show
+                      when={(() => {
+                        const t = activeTabValue();
+                        return t?.kind === "text" && t.lastError ? t.lastError : null;
+                      })()}
+                    >
+                      {(msg) => <>: {msg()}</>}
+                    </Show>
+                  </span>
+                </Show>
               </div>
-            </div>
-          )}
-        </Show>
-        <div class="min-h-0 flex-1">
+            )}
+          </Show>
           <Show
             when={(() => {
               const t = activeTabValue();
-              return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "diff"
+              return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "banner"
                 ? t
                 : null;
             })()}
-            fallback={
-              <MonacoEditor
-                value={editorValue()}
-                path={activeTabValue()?.path ?? undefined}
-                readOnly={isReadOnly()}
-                onChange={handleEditorChange}
-              />
-            }
           >
             {(t) => (
-              <div class="ws-editor-tab__diff flex min-h-0 flex-1 flex-col">
-                <div class="ws-editor-tab__diff-toolbar" role="toolbar" aria-label="Diff actions">
-                  <span class="ws-editor-tab__diff-label">
-                    <strong>On disk</strong> ↔ <strong>Your changes</strong>
-                  </span>
-                  <div class="ws-editor-tab__conflict-actions">
-                    <button
-                      type="button"
-                      class="ws-editor-tab__conflict-button"
-                      onClick={() => resolveReload(t().path)}
-                    >
-                      Reload
-                    </button>
-                    <button
-                      type="button"
-                      class="ws-editor-tab__conflict-button"
-                      onClick={() => resolveKeepMine(t().path)}
-                    >
-                      Keep mine
-                    </button>
-                    <button
-                      type="button"
-                      class="ws-editor-tab__conflict-button"
-                      onClick={() => resolveBackToEdit(t().path)}
-                    >
-                      Back to editor
-                    </button>
-                  </div>
-                </div>
-                <div class="min-h-0 flex-1">
-                  <MonacoDiff
-                    original={t().conflict?.newContent ?? ""}
-                    modified={t().content}
-                    path={t().path}
-                  />
+              <div class="ws-editor-tab__conflict" role="status" aria-live="polite">
+                <span class="ws-editor-tab__conflict-text">
+                  <strong>{fileLabelFromPath(t().path)}</strong> changed on disk while you were
+                  editing. Your buffer has unsaved changes.
+                </span>
+                <div class="ws-editor-tab__conflict-actions">
+                  <button
+                    type="button"
+                    class="ws-editor-tab__conflict-button"
+                    onClick={() => resolveReload(t().path)}
+                    title="Discard your changes and load the new disk content"
+                  >
+                    Reload
+                  </button>
+                  <button
+                    type="button"
+                    class="ws-editor-tab__conflict-button"
+                    onClick={() => resolveKeepMine(t().path)}
+                    title="Keep your buffer; the next save will overwrite the new disk content"
+                  >
+                    Keep mine
+                  </button>
+                  <button
+                    type="button"
+                    class="ws-editor-tab__conflict-button"
+                    onClick={() => resolveViewDiff(t().path)}
+                    title="See what changed on disk vs. what's in your buffer"
+                  >
+                    View diff
+                  </button>
                 </div>
               </div>
             )}
           </Show>
+          <div class="min-h-0 flex-1">
+            <Show
+              when={(() => {
+                const t = activeTabValue();
+                return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "diff"
+                  ? t
+                  : null;
+              })()}
+              fallback={
+                <MonacoEditor
+                  value={editorValue()}
+                  path={activeTabValue()?.path ?? undefined}
+                  readOnly={isReadOnly()}
+                  onChange={handleEditorChange}
+                />
+              }
+            >
+              {(t) => (
+                <div class="ws-editor-tab__diff flex min-h-0 flex-1 flex-col">
+                  <div class="ws-editor-tab__diff-toolbar" role="toolbar" aria-label="Diff actions">
+                    <span class="ws-editor-tab__diff-label">
+                      <strong>On disk</strong> ↔ <strong>Your changes</strong>
+                    </span>
+                    <div class="ws-editor-tab__conflict-actions">
+                      <button
+                        type="button"
+                        class="ws-editor-tab__conflict-button"
+                        onClick={() => resolveReload(t().path)}
+                      >
+                        Reload
+                      </button>
+                      <button
+                        type="button"
+                        class="ws-editor-tab__conflict-button"
+                        onClick={() => resolveKeepMine(t().path)}
+                      >
+                        Keep mine
+                      </button>
+                      <button
+                        type="button"
+                        class="ws-editor-tab__conflict-button"
+                        onClick={() => resolveBackToEdit(t().path)}
+                      >
+                        Back to editor
+                      </button>
+                    </div>
+                  </div>
+                  <div class="min-h-0 flex-1">
+                    <MonacoDiff
+                      original={t().conflict?.newContent ?? ""}
+                      modified={t().content}
+                      path={t().path}
+                    />
+                  </div>
+                </div>
+              )}
+            </Show>
+          </div>
+        </div>
+      </div>
+    </Show>
+  );
+}
+
+// T19.12 — Editor empty state for cloud mode. `read_text_file` /
+// `write_text_file` / `start_file_watch` all throw
+// `CloudTransportUnsupportedError` in cloud mode (T19.11) because the
+// cloud-agent has no filesystem RPCs yet, so the editor body is replaced
+// with a clear "not available" affordance instead of letting tree clicks
+// produce error tabs and save attempts produce "Save failed" toasts.
+function EditorCloudPlaceholder(): JSX.Element {
+  return (
+    <div
+      class="ws-editor-tab ws-editor-tab--cloud-empty"
+      role="region"
+      aria-label="Code editor — cloud workspace"
+    >
+      <div class="ws-editor-tab__cloud-empty-panel">
+        <div class="ws-editor-tab__cloud-empty-title">
+          Editor not available on cloud workspaces yet
+        </div>
+        <div class="ws-editor-tab__cloud-empty-subtitle">
+          File browsing and editing run against the local disk. Switch back to a local workspace to
+          open files from this project, or use the Terminal tab to work on the remote machine.
         </div>
       </div>
     </div>

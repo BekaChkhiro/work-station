@@ -6349,6 +6349,33 @@ button {
   min-height: 0;
 }
 
+/* T19.12 — cloud-mode placeholder shown in the editor tab when the
+   workspace is bound to the remote agent. The cloud-agent has no
+   filesystem RPCs yet, so we surface a deliberate empty state instead
+   of mounting the file tree / Monaco against an unreachable backend. */
+.ws-editor-tab--cloud-empty {
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+}
+.ws-editor-tab__cloud-empty-panel {
+  width: min(460px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  text-align: center;
+}
+.ws-editor-tab__cloud-empty-title {
+  color: var(--text-primary);
+  font-size: var(--fs-16);
+  font-weight: 600;
+}
+.ws-editor-tab__cloud-empty-subtitle {
+  color: var(--text-secondary);
+  font-size: var(--fs-12);
+  line-height: 1.55;
+}
+
 /* T13.4 — editor status bar above Monaco when a file is open. Filename
    left, ephemeral save state right. Sits flush with the tab strip so the
    dirty dot lines up with where the per-file tab indicator will land
