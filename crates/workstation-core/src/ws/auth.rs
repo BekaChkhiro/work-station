@@ -23,9 +23,20 @@
 //! Tauri. The `app_settings` schema lives in the desktop migrations;
 //! cloud-agent callers either point a fresh pool at the same DDL or
 //! mint tokens directly via [`AuthToken::new`] / [`generate_token`].
+//!
+//! T19.23: the axum middleware that turns the [`check_auth`] verdict
+//! into a 401 response (or forwards to the next layer) now lives here
+//! as [`require_bearer`]. Both `src-tauri/src/ws` and `cloud-agent`
+//! consume it via `axum::middleware::from_fn_with_state(token.clone(),
+//! require_bearer)` so the wire-format details (header parsing, query
+//! parsing, `WWW-Authenticate` header on 401) live in exactly one place.
 
 use std::sync::Arc;
 
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
@@ -163,6 +174,71 @@ pub fn check_auth(
     }
 }
 
+/// Inspect an incoming axum [`Request`] and decide whether its bearer
+/// material satisfies `expected`. Reads the same surfaces as
+/// [`check_auth`] — `Authorization: Bearer …` and `?token=…` — so
+/// callers that can't wire in [`require_bearer`] directly (custom
+/// dispatch, integration glue) get the same verdict.
+pub fn check_request_auth(expected: &AuthToken, req: &Request) -> AuthResult {
+    let header_value = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+    // Cheap manual query-string parse — only `token=…` is interesting
+    // here, so we don't want to pull a routing extractor in.
+    let query_token = req.uri().query().and_then(parse_query_token);
+    check_auth(expected, header_value, query_token.as_deref())
+}
+
+/// Axum middleware that gates a route behind a bearer token. Accepts
+/// the token via `Authorization: Bearer <token>` (native clients) or
+/// `?token=<token>` (browser `WebSocket` constructor, which can't set
+/// arbitrary headers). Failure responds with HTTP 401 plus the
+/// `WWW-Authenticate: Bearer` header so misconfigured clients see a
+/// deterministic shape instead of axum's generic 400 from the
+/// `WebSocketUpgrade` extractor.
+///
+/// Wire in via:
+///
+/// ```ignore
+/// use axum::middleware::{self, from_fn_with_state};
+/// use workstation_core::ws::auth::{require_bearer, AuthToken};
+///
+/// let token: AuthToken = /* ... */;
+/// let router = axum::Router::new()
+///     .route("/ws", axum::routing::get(handler))
+///     .route_layer(middleware::from_fn_with_state(token, require_bearer));
+/// ```
+pub async fn require_bearer(State(token): State<AuthToken>, req: Request, next: Next) -> Response {
+    match check_request_auth(&token, &req) {
+        AuthResult::Ok => next.run(req).await,
+        AuthResult::Missing => unauthorized_response("missing bearer token"),
+        AuthResult::Mismatch => unauthorized_response("invalid bearer token"),
+    }
+}
+
+/// Build the canonical 401 response — plain-text body + the
+/// `WWW-Authenticate: Bearer` header. Exposed so callers that need to
+/// short-circuit auth outside of [`require_bearer`] (e.g. a custom
+/// upgrade probe) can produce the same shape.
+pub fn unauthorized_response(message: &'static str) -> Response {
+    let mut response = (StatusCode::UNAUTHORIZED, message).into_response();
+    response
+        .headers_mut()
+        .insert("WWW-Authenticate", HeaderValue::from_static("Bearer"));
+    response
+}
+
+fn parse_query_token(query: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let mut it = pair.splitn(2, '=');
+        match (it.next(), it.next()) {
+            (Some("token"), Some(val)) => Some(val.to_owned()),
+            _ => None,
+        }
+    })
+}
+
 fn parse_bearer(header_value: &str) -> Option<&str> {
     let trimmed = header_value.trim();
     let rest = trimmed
@@ -258,6 +334,158 @@ mod tests {
         // base64-url-no-pad of 32 bytes = ceil(32 * 4 / 3) = 43 chars.
         assert_eq!(a.len(), 43);
         assert_eq!(b.len(), 43);
+    }
+
+    fn build_req(uri: &str, header: Option<&str>) -> Request {
+        let mut builder = axum::http::Request::builder().uri(uri);
+        if let Some(value) = header {
+            builder = builder.header(axum::http::header::AUTHORIZATION, value);
+        }
+        builder
+            .body(axum::body::Body::empty())
+            .expect("build request")
+    }
+
+    #[test]
+    fn check_request_auth_ok_via_header() {
+        let token = AuthToken::new("secret");
+        let req = build_req("/ws", Some("Bearer secret"));
+        assert_eq!(check_request_auth(&token, &req), AuthResult::Ok);
+    }
+
+    #[test]
+    fn check_request_auth_ok_via_query() {
+        let token = AuthToken::new("secret");
+        let req = build_req("/ws?token=secret", None);
+        assert_eq!(check_request_auth(&token, &req), AuthResult::Ok);
+    }
+
+    #[test]
+    fn check_request_auth_missing_when_neither_provided() {
+        let token = AuthToken::new("secret");
+        let req = build_req("/ws", None);
+        assert_eq!(check_request_auth(&token, &req), AuthResult::Missing);
+    }
+
+    #[test]
+    fn check_request_auth_mismatch_on_wrong_header() {
+        let token = AuthToken::new("secret");
+        let req = build_req("/ws", Some("Bearer wrong"));
+        assert_eq!(check_request_auth(&token, &req), AuthResult::Mismatch);
+    }
+
+    #[test]
+    fn check_request_auth_ignores_extra_query_params() {
+        // `?foo=bar&token=secret&baz=qux` — make sure the token=… needle
+        // is found regardless of position so PWA clients that tack on
+        // their own params (cache busters, locale hints) still authenticate.
+        let token = AuthToken::new("secret");
+        let req = build_req("/ws?foo=bar&token=secret&baz=qux", None);
+        assert_eq!(check_request_auth(&token, &req), AuthResult::Ok);
+    }
+
+    #[test]
+    fn check_request_auth_header_takes_precedence_over_query() {
+        let token = AuthToken::new("secret");
+        let req = build_req("/ws?token=secret", Some("Bearer wrong"));
+        // Header beats query — explicit > implicit, matching check_auth.
+        assert_eq!(check_request_auth(&token, &req), AuthResult::Mismatch);
+    }
+
+    #[test]
+    fn unauthorized_response_sets_www_authenticate_header() {
+        let response = unauthorized_response("missing bearer token");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("WWW-Authenticate")
+                .map(HeaderValue::as_bytes),
+            Some(b"Bearer".as_slice()),
+        );
+    }
+
+    /// End-to-end check that [`require_bearer`] composes with axum's
+    /// router as a `route_layer`. Drives a tiny router via tower's
+    /// `oneshot` and asserts each verdict reaches the right outcome —
+    /// no `TcpListener`, no async sleep, no port juggling.
+    #[tokio::test]
+    async fn require_bearer_middleware_gates_route() {
+        use axum::body::Body;
+        use axum::middleware;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        async fn ok() -> &'static str {
+            "passed"
+        }
+
+        let token = AuthToken::new("secret");
+        let app: Router = Router::new().route(
+            "/ws",
+            get(ok).route_layer(middleware::from_fn_with_state(token, require_bearer)),
+        );
+
+        // No auth → 401 + WWW-Authenticate.
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ws")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("WWW-Authenticate")
+                .map(HeaderValue::as_bytes),
+            Some(b"Bearer".as_slice()),
+        );
+
+        // Wrong token → 401.
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ws")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct header → handler runs.
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ws")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Correct query token → handler runs (browser WS path).
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ws?token=secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
