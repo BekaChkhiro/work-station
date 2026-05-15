@@ -48,13 +48,22 @@ pub struct Config {
     pub log_filter: String,
 
     /// Bearer token the WebSocket listener accepts on the `/ws`
-    /// upgrade (T19.21). Optional in TOML so an unconfigured agent
-    /// still boots — when absent, the daemon mints an ephemeral token
-    /// at startup and logs it once so an operator can copy it into the
-    /// config file or paste it into a pairing flow. Production
-    /// deployments should pin this so the token survives restarts.
+    /// upgrade (T19.21). Optional in TOML — when absent, the agent
+    /// falls back to a persisted pairing token at
+    /// `<state_dir>/pairing_token` (created on demand). Pin this in
+    /// the config when an operator wants the token under root-only
+    /// configuration management rather than the on-disk pairing file.
     #[serde(default)]
     pub auth_token: Option<String>,
+
+    /// T19.22 — public URL the desktop / PWA uses to reach this agent
+    /// (typically the Cloudflare Tunnel hostname). Optional: only the
+    /// `pair` subcommand consumes it, so it can pre-print the
+    /// "URL + token" block an operator pastes into Settings → Cloud.
+    /// When omitted, `pair` prints a placeholder so the operator
+    /// remembers to substitute their own URL.
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 impl Default for Config {
@@ -64,6 +73,7 @@ impl Default for Config {
             state_dir: default_state_dir(),
             log_filter: default_log_filter(),
             auth_token: None,
+            public_url: None,
         }
     }
 }
@@ -151,6 +161,7 @@ mod tests {
             state_dir = "/srv/cloud-agent"
             log_filter = "cloud_agent=debug,info"
             auth_token = "pinned-token-abc"
+            public_url = "wss://agent.example.com"
         "#;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(toml.as_bytes()).unwrap();
@@ -159,6 +170,7 @@ mod tests {
         assert_eq!(cfg.state_dir, PathBuf::from("/srv/cloud-agent"));
         assert_eq!(cfg.log_filter, "cloud_agent=debug,info");
         assert_eq!(cfg.auth_token.as_deref(), Some("pinned-token-abc"));
+        assert_eq!(cfg.public_url.as_deref(), Some("wss://agent.example.com"));
     }
 
     #[test]

@@ -21,9 +21,17 @@ state_dir = "/var/lib/cloud-agent"
 log_filter = "info"
 
 # Bearer token presented by the desktop / PWA on the /ws upgrade.
-# When this field is omitted, cloud-agent mints an ephemeral 256-bit
-# token at startup and prints it once on stderr; production
-# deployments should pin a value here so it survives restarts.
-# Generate a fresh token with:
+# Pin a value here to keep the token under root-owned configuration
+# management. When this field is omitted, cloud-agent falls back to a
+# persisted token at <state_dir>/pairing_token, managed by the
+# `cloud-agent pair show|rotate` subcommand (T19.22).
+# Generate a fresh value with:
 #   head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
 # auth_token = "REPLACE_ME"
+
+# Public URL the desktop / PWA uses to reach this agent — typically the
+# Cloudflare Tunnel hostname configured in step 3 of
+# docs/cloud-agent-vps.md. Only consumed by `cloud-agent pair show`
+# (T19.22) to pre-print the "URL + token" block an operator pastes into
+# Settings → Cloud → Pair.
+# public_url = "wss://agent.example.com"

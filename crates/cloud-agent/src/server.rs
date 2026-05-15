@@ -85,12 +85,13 @@ pub(crate) fn router(token: AuthToken) -> Router {
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
     // non-upgrade GET with 400, which would otherwise mask our 401.
-    let ws_routes = Router::new()
-        .route("/ws", get(ws_handler))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
-        ));
+    let ws_routes =
+        Router::new()
+            .route("/ws", get(ws_handler))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_bearer,
+            ));
 
     Router::new()
         .route("/healthz", get(healthz))
