@@ -1,5 +1,8 @@
-// Frontend IPC bindings: typed wrappers around Tauri `invoke` and event channels.
-// Implementations land alongside the first command-using feature.
+// Frontend IPC bindings: typed wrappers around Tauri `invoke`, event
+// channels, and (since T19.6) the cloud-agent WebSocket bridge —
+// transport selection happens inside each wrapper via
+// [`routeIpc`]. Implementations land alongside the first
+// command-using feature.
 export { cliListAvailable } from "./cli";
 export type { CliInfo } from "./cli";
 export { readTextFile, writeTextFile } from "./files";
@@ -17,3 +20,12 @@ export type {
   PtySubscription,
   PtyWriteArgs,
 } from "./pty";
+export {
+  CloudTransportUnavailableError,
+  CloudTransportUnsupportedError,
+  currentTransport,
+  getCloudAgentManager,
+  routeIpc,
+  routeIpcLocalOnly,
+} from "./transport";
+export type { RouteOptions, TransportKind } from "./transport";

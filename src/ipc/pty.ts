@@ -1,17 +1,26 @@
 // T4.4: typed wrappers for the PTY IPC surface.
+// T19.6: every call routes through [`routeIpc`] so cloud mode lands on
+// the remote cloud-agent's wsBridge (T19.7) instead of the local
+// Tauri backend.
 //
 // `pty_subscribe` is backed by a `tauri::ipc::Channel<InvokeResponseBody>` on
 // the Rust side that pushes raw frames as `InvokeResponseBody::Raw(Vec<u8>)`.
 // On the JS side those arrive as `ArrayBuffer` payloads delivered to the
 // Channel's `onmessage` callback. The wrapper exposes a tiny callback API and
 // returns a disposer so call sites don't have to know about the Channel
-// plumbing or the cleanup contract.
+// plumbing or the cleanup contract. In cloud mode the same shape is fed by
+// `pty_output` JSON frames from the WebSocket bridge instead.
 //
 // Subscriptions are short-circuited when the Tauri runtime is unavailable
 // (vite preview, isolated component harnesses) so consumers can mount the
-// Terminal component without a real backend behind it.
+// Terminal component without a real backend behind it. Cloud-mode is always
+// available regardless of Tauri so the same harness paths can dial a real
+// agent for live-component previews.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+
+import { awaitCloudClient, routeIpc } from "./transport";
+import { cloudMode } from "../stores/cloudMode";
 
 const isTauriRuntime = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -36,7 +45,31 @@ export interface PtySpawnResponse {
 }
 
 export async function ptySpawn(args: PtySpawnArgs): Promise<PtySpawnResponse> {
-  return invoke<PtySpawnResponse>("pty_spawn", { args });
+  return routeIpc(
+    () => invoke<PtySpawnResponse>("pty_spawn", { args }),
+    async (client) => {
+      // The cloud-agent does not yet honour `startupCommands` (it
+      // proxies through the wsBridge protocol, T18.x); skipping
+      // silently would lose user intent, so we replay them as
+      // sequential writes after spawn completes — matching what the
+      // local backend does internally.
+      const reply = await client.ptySpawn({
+        command: args.command,
+        args: args.args,
+        cwd: args.cwd,
+        env: args.env,
+        cols: args.cols,
+        rows: args.rows,
+      });
+      if (args.startupCommands && args.startupCommands.length > 0) {
+        for (const line of args.startupCommands) {
+          if (!line || /^\s*$/.test(line)) continue;
+          await client.ptyWrite(reply.sessionId, `${line}\n`);
+        }
+      }
+      return { sessionId: reply.sessionId };
+    },
+  );
 }
 
 export interface PtyWriteArgs {
@@ -47,28 +80,42 @@ export interface PtyWriteArgs {
 /**
  * Send raw bytes to a PTY's stdin. Tauri's JSON transport carries the bytes
  * as a number array, which Rust deserializes into `Vec<u8>` for
- * `pty_write`'s `WriteArgs::data` field.
+ * `pty_write`'s `WriteArgs::data` field. Cloud mode forwards the bytes as
+ * base64 over wsBridge instead.
  *
- * No-op when the Tauri runtime is unavailable (vite preview, isolated
- * harnesses) so the Terminal component's input handlers can be wired up
- * unconditionally.
+ * No-op when the local backend is unavailable in local mode (vite preview,
+ * isolated harnesses). Cloud mode always attempts the remote write.
  */
 export async function ptyWrite(sessionId: string, data: Uint8Array): Promise<void> {
-  if (!isTauriRuntime()) return;
   if (data.byteLength === 0) return;
-  await invoke("pty_write", {
-    args: { sessionId, data: Array.from(data) },
-  });
+  return routeIpc(
+    async () => {
+      if (!isTauriRuntime()) return;
+      await invoke("pty_write", {
+        args: { sessionId, data: Array.from(data) },
+      });
+    },
+    async (client) => {
+      await client.ptyWrite(sessionId, data);
+    },
+  );
 }
 
 /**
  * Best-effort graceful shutdown of a PTY session: SIGTERM (or close-stdin
  * on Windows), wait briefly, then SIGKILL if still alive. Safe to call
- * outside the Tauri runtime — it short-circuits.
+ * outside the local Tauri runtime — it short-circuits there.
  */
 export async function ptyKill(sessionId: string): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("pty_kill", { args: { sessionId } });
+  return routeIpc(
+    async () => {
+      if (!isTauriRuntime()) return;
+      await invoke("pty_kill", { args: { sessionId } });
+    },
+    async (client) => {
+      await client.ptyKill(sessionId);
+    },
+  );
 }
 
 export interface PtyResizeArgs {
@@ -81,14 +128,22 @@ export interface PtyResizeArgs {
  * Inform the backend that the PTY's window dimensions changed so the child
  * process receives SIGWINCH and re-renders to the new viewport.
  *
- * No-op outside the Tauri runtime so the Terminal component's resize
- * observer can fire unconditionally in vite preview / stress harnesses.
+ * No-op outside the Tauri runtime in local mode so the Terminal component's
+ * resize observer can fire unconditionally in vite preview / stress
+ * harnesses. Cloud mode always issues the resize over wsBridge.
  */
 export async function ptyResize(sessionId: string, cols: number, rows: number): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("pty_resize", {
-    args: { sessionId, cols, rows },
-  });
+  return routeIpc(
+    async () => {
+      if (!isTauriRuntime()) return;
+      await invoke("pty_resize", {
+        args: { sessionId, cols, rows },
+      });
+    },
+    async (client) => {
+      await client.ptyResize(sessionId, cols, rows);
+    },
+  );
 }
 
 export interface PtyScrollbackSnapshot {
@@ -113,19 +168,29 @@ interface RawScrollbackResponse {
  *
  * The single-shot full read avoids the pagination's "racing the live writer"
  * caveat documented on `pty_get_scrollback` — for stable replay we want one
- * consistent view, not a tail of a mutating buffer.
+ * consistent view, not a tail of a mutating buffer. Cloud mode requests
+ * `offset=0, limit=MAX_SAFE_INTEGER` from the cloud-agent for the same
+ * single-shot semantics.
  */
 export async function ptyGetScrollback(sessionId: string): Promise<PtyScrollbackSnapshot> {
-  if (!isTauriRuntime()) {
-    return { data: new Uint8Array(), totalBytes: 0 };
-  }
-  const raw = await invoke<RawScrollbackResponse>("pty_get_scrollback", {
-    args: { sessionId, offsetBytes: 0, limitBytes: Number.MAX_SAFE_INTEGER },
-  });
-  return {
-    data: Uint8Array.from(raw.data),
-    totalBytes: raw.totalBytes,
-  };
+  return routeIpc(
+    async () => {
+      if (!isTauriRuntime()) {
+        return { data: new Uint8Array(), totalBytes: 0 };
+      }
+      const raw = await invoke<RawScrollbackResponse>("pty_get_scrollback", {
+        args: { sessionId, offsetBytes: 0, limitBytes: Number.MAX_SAFE_INTEGER },
+      });
+      return {
+        data: Uint8Array.from(raw.data),
+        totalBytes: raw.totalBytes,
+      };
+    },
+    async (client) => {
+      const chunk = await client.ptyScrollback(sessionId, 0, Number.MAX_SAFE_INTEGER);
+      return { data: chunk.data, totalBytes: chunk.totalBytes };
+    },
+  );
 }
 
 export type PtyChunkHandler = (chunk: Uint8Array) => void;
@@ -162,10 +227,28 @@ const toUint8Array = (payload: unknown): Uint8Array | null => {
  * Subscribe to raw PTY output for `sessionId`.
  *
  * The handler is invoked once per backend frame with a fresh `Uint8Array`
- * view. Call `unsubscribe()` to drop the handler — the spawned forwarder on
- * the Rust side exits naturally when the channel is no longer reachable.
+ * view. Call `unsubscribe()` to drop the handler. Local mode uses a
+ * Tauri Channel; the spawned forwarder on the Rust side exits naturally
+ * when the channel is no longer reachable. Cloud mode attaches an
+ * `onPtyOutput` listener on the active wsBridge client and issues
+ * `pty_subscribe` over the WebSocket.
+ *
+ * Note on transport stability: a session lives on whichever backend
+ * spawned it; flipping `cloudMode` mid-session does not migrate
+ * subscriptions, since the session itself is not portable across
+ * backends. Future spawns land on the new transport.
  */
 export async function ptySubscribe(
+  sessionId: string,
+  onChunk: PtyChunkHandler,
+): Promise<PtySubscription> {
+  if (cloudMode()) {
+    return cloudPtySubscribe(sessionId, onChunk);
+  }
+  return localPtySubscribe(sessionId, onChunk);
+}
+
+async function localPtySubscribe(
   sessionId: string,
   onChunk: PtyChunkHandler,
 ): Promise<PtySubscription> {
@@ -210,6 +293,51 @@ export async function ptySubscribe(
          * `active` / `handler` nulling above already prevents user code
          * from running, so this is best-effort cleanup only. */
       }
+    },
+  };
+}
+
+async function cloudPtySubscribe(
+  sessionId: string,
+  onChunk: PtyChunkHandler,
+): Promise<PtySubscription> {
+  // Resolve the client via the same await/connect path the
+  // request-shaped wrappers use through routeIpc(). The subscription
+  // primitive is different enough that we can't reuse routeIpc()
+  // directly here (no per-call return value to thread through).
+  const client = await awaitCloudClient();
+
+  let alive = true;
+  let handler: PtyChunkHandler | null = onChunk;
+
+  const detach = client.onPtyOutput((bytes, frameSessionId) => {
+    if (!alive || !handler) return;
+    if (frameSessionId !== sessionId) return;
+    if (bytes.byteLength === 0) return;
+    // Hand the caller a fresh view backed by the same buffer — the
+    // bridge already allocated a Uint8Array per frame.
+    handler(bytes);
+  });
+
+  try {
+    await client.ptySubscribe(sessionId);
+  } catch (err) {
+    alive = false;
+    handler = null;
+    detach();
+    throw err;
+  }
+
+  return {
+    unsubscribe: () => {
+      alive = false;
+      handler = null;
+      detach();
+      // Best-effort unsubscribe on the wire — failures are logged by
+      // the bridge's onError hook but must not throw from a disposer.
+      void client.ptyUnsubscribe(sessionId).catch(() => {
+        /* swallowed — see comment above */
+      });
     },
   };
 }
