@@ -23,10 +23,10 @@ use super::session::PtySession;
 ///
 /// Gives well-behaved shells time to run trap handlers, flush, and
 /// teardown subprocesses before we resort to force-kill.
-pub(crate) const KILL_GRACE: Duration = Duration::from_secs(2);
+pub const KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Error)]
-pub(crate) enum PtyError {
+pub enum PtyError {
     #[error("cwd does not exist: {0}")]
     CwdMissing(PathBuf),
     #[error("command not found on PATH: {0}")]
@@ -58,7 +58,7 @@ pub(crate) enum PtyError {
 /// reads. `next_offset` is `offset + data.len()` clamped to total —
 /// pass it back as `offset` for the next page.
 #[derive(Debug, Clone)]
-pub(crate) struct ScrollbackChunk {
+pub struct ScrollbackChunk {
     pub data: Vec<u8>,
     pub total_bytes: usize,
     pub next_offset: usize,
@@ -73,7 +73,7 @@ pub(crate) struct ScrollbackChunk {
 /// That's fine for a debug panel — exactness across cores doesn't help
 /// the user spot "frontend is falling behind."
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BackpressureSnapshot {
+pub struct BackpressureSnapshot {
     pub broadcast_lag_events: u64,
     pub broadcast_dropped_frames: u64,
     pub subscribers_disconnected_on_lag: u64,
@@ -85,7 +85,7 @@ pub(crate) struct BackpressureSnapshot {
 
 /// Inputs for `PtyManager::spawn`. T2.5 fills these from frontend args.
 #[derive(Debug, Clone)]
-pub(crate) struct SpawnConfig {
+pub struct SpawnConfig {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -100,7 +100,7 @@ pub(crate) struct SpawnConfig {
 /// which is exactly the handle Tauri's `.manage()` will hand out via
 /// `State<PtyManager>`.
 #[derive(Default, Clone)]
-pub(crate) struct PtyManager {
+pub struct PtyManager {
     inner: Arc<RwLock<HashMap<Uuid, Arc<PtySession>>>>,
 }
 
