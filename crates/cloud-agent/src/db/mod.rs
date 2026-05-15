@@ -185,8 +185,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("count");
-        let expected =
-            i64::try_from(MIGRATIONS.len()).expect("migration count fits in i64");
+        let expected = i64::try_from(MIGRATIONS.len()).expect("migration count fits in i64");
         assert_eq!(count, expected);
     }
 

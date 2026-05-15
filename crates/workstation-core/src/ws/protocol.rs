@@ -65,6 +65,13 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "planflow_chat_send",
     "planflow_chat_history",
     "planflow_chat_clear",
+    // T19.27 — cloud-agent FS bridge. All paths are interpreted
+    // relative to the requested project's root; the agent enforces a
+    // canonical path-jail so a client can never escape it.
+    "fs_list",
+    "fs_read",
+    "fs_write",
+    "fs_delete",
 ];
 
 /// Client → server frame.
@@ -250,6 +257,63 @@ pub enum ClientMessage {
         id: Option<String>,
         project_id: String,
     },
+
+    // ---- T19.27: cloud-agent filesystem bridge ----
+    //
+    // Every variant carries `project_id` so the agent can look up the
+    // project root from its SQLite and use it as the allow-list anchor.
+    // `relative_path` is resolved + canonicalised against that root;
+    // anything that escapes (via `..`, symlinks, or an absolute path)
+    // is rejected with `Error { kind: "out_of_scope" }`. Mirrors the
+    // path-jail logic the desktop's `commands::files::resolve_in_root`
+    // applies, just behind the WS contract instead of a Tauri command.
+    /// List the immediate children of a directory inside a project. An
+    /// empty / omitted `relative_path` lists the project root itself.
+    FsList {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        #[serde(default)]
+        relative_path: Option<String>,
+        /// When `true` (default), skip noise directories (`.git`,
+        /// `node_modules`, build outputs). Mirrors the desktop's
+        /// `fs_list_dir` flag.
+        #[serde(default)]
+        respect_gitignore: Option<bool>,
+    },
+    /// Read a regular file as UTF-8 text (or report it as binary if
+    /// the bytes don't decode). Mirrors `read_text_file`'s semantics.
+    FsRead {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        relative_path: String,
+    },
+    /// Atomically overwrite a regular file with new UTF-8 content.
+    /// `encoding` round-trips the UTF-8 BOM the reader stripped; when
+    /// absent (or unrecognized) the writer defaults to `utf-8`. Unlike
+    /// the desktop write path the target may be created if missing,
+    /// since the PWA's mobile editor may not have called `fs_read`
+    /// first (e.g. quick-note flows).
+    FsWrite {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        relative_path: String,
+        content: String,
+        #[serde(default)]
+        encoding: Option<String>,
+    },
+    /// Delete a regular file inside the project root. Directories are
+    /// rejected with `invalid_path` to keep the surface tight — the
+    /// PWA never needs to remove whole trees, and accidental tree
+    /// deletes from a typo would be catastrophic.
+    FsDelete {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        relative_path: String,
+    },
 }
 
 /// Server → client frame.
@@ -416,6 +480,34 @@ pub enum ServerMessage {
         id: Option<String>,
         rows_deleted: i64,
     },
+
+    // ---- T19.27: cloud-agent FS bridge replies ----
+    //
+    // Failures share the generic `Error` envelope (kinds: `not_found`,
+    // `out_of_scope`, `invalid_path`, `not_a_directory`, `too_large`,
+    // `internal`) so the PWA branches on `type` first and `kind`
+    // second — same pattern projects + settings use.
+    /// Response to `fs_list`. `entries` is folder-first then
+    /// case-insensitive alphabetical, matching the desktop's
+    /// `fs_list_dir` ordering so muscle memory transfers.
+    FsListResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        entries: Vec<FsEntry>,
+    },
+    /// Response to `fs_read`. The discriminated `result` distinguishes
+    /// text from binary so the PWA can render Monaco vs. a "not text"
+    /// placeholder without re-sniffing the bytes.
+    FsReadResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        result: FsReadOutcome,
+    },
+    /// Acknowledgement for `fs_write` / `fs_delete` (no payload).
+    FsAck {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
 }
 
 /// Wire shape for a chat message row (T18.16). Mirrors the TypeScript
@@ -430,6 +522,35 @@ pub struct ChatMessageView {
     pub content: String,
     pub cli: Option<String>,
     pub created_at: i64,
+}
+
+/// Wire shape for a single entry in `fs_list_result` (T19.27). All
+/// paths are relative to the project root the request named — the
+/// agent never leaks absolute VPS paths over the wire, so the PWA
+/// can safely echo them back as `relative_path` on subsequent
+/// `fs_read` / `fs_write` calls without re-deriving a project anchor.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsEntry {
+    pub name: String,
+    pub relative_path: String,
+    pub is_dir: bool,
+}
+
+/// Discriminated read response (T19.27). Mirrors the desktop's
+/// `commands::files::ReadResult` shape so a PWA / desktop parser can
+/// be shared. `encoding` and `reason` use kebab-case values
+/// (`utf-8` / `utf-8-bom` / `nul-byte` / `not-utf-8`) for the same
+/// reason.
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum FsReadOutcome {
+    Text { content: String, encoding: String },
+    Binary { reason: String },
 }
 
 /// PWA-facing view of the small subset of `app_settings` we surface

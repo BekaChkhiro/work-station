@@ -486,6 +486,24 @@ async fn handle_text(
         ClientMessage::PlanflowChatClear { id, project_id } => {
             chat_bridge::handle_chat_clear(&conn.out_tx, pool, id, project_id).await;
         }
+        // T19.27 — `fs_*` are served by the cloud-agent's path-jailed
+        // handler. The desktop's WS bridge intentionally stays out of
+        // FS land: the PWA's `routeIpcLocalOnly` policy (T19.11)
+        // already pins editor reads/writes to Tauri commands when the
+        // user is on a desktop project, so a request arriving here
+        // would be a routing bug. Reply with `unimplemented` so the
+        // PWA surfaces a typed error instead of silently dropping.
+        ClientMessage::FsList { id, .. }
+        | ClientMessage::FsRead { id, .. }
+        | ClientMessage::FsWrite { id, .. }
+        | ClientMessage::FsDelete { id, .. } => {
+            let err = ServerMessage::Error {
+                id,
+                kind: "unimplemented".into(),
+                message: "fs_* is only available on the cloud-agent bridge".into(),
+            };
+            send_value(&conn.out_tx, &err).await;
+        }
     }
 }
 

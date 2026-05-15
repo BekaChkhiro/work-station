@@ -90,8 +90,8 @@ fn row_to_project(row: SqliteRow) -> Result<Project, ProjectError> {
     let startup_commands: Vec<String> =
         serde_json::from_str(&startup_commands_json).unwrap_or_default();
     let workspace_tabs_json: String = row.try_get("workspace_tabs_json")?;
-    let workspace_tabs: Vec<String> = serde_json::from_str(&workspace_tabs_json)
-        .unwrap_or_else(|_| vec!["terminal".to_string()]);
+    let workspace_tabs: Vec<String> =
+        serde_json::from_str(&workspace_tabs_json).unwrap_or_else(|_| vec!["terminal".to_string()]);
     let active_workspace_tab: String = row.try_get("active_workspace_tab")?;
     Ok(Project {
         id: row.try_get("id")?,
