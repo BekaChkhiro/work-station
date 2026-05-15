@@ -1577,18 +1577,23 @@ function MobileSection(): JSX.Element {
 
   onMount(() => {
     void load(true);
-    // Poll while the tunnel is starting — cloudflared takes 1-3s to
-    // publish the quick-tunnel URL, and the user is staring at the
-    // Settings panel waiting for the QR to render. Stop polling once
-    // the tunnel resolves (running / failed / unavailable).
-    const id = setInterval(() => {
+    // Poll fast while the tunnel is starting — cloudflared takes 1-3s
+    // to publish the quick-tunnel URL, and the user is staring at the
+    // Settings panel waiting for the QR to render. Once it resolves,
+    // keep polling slowly so the watchdog's URL changes (after a
+    // tunnel-restart) propagate to the QR without requiring the user
+    // to reopen the panel.
+    let fast = true;
+    let id = setInterval(tick, 1500);
+    function tick() {
       const tunnel = info()?.tunnel?.state;
-      if (tunnel === "running" || tunnel === "failed" || tunnel === "unavailable") {
+      if (fast && (tunnel === "running" || tunnel === "failed" || tunnel === "unavailable")) {
         clearInterval(id);
-        return;
+        fast = false;
+        id = setInterval(tick, 10_000);
       }
       void load();
-    }, 1500);
+    }
     onCleanup(() => clearInterval(id));
   });
 
