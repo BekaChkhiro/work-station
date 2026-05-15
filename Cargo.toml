@@ -4,7 +4,7 @@
 # don't depend on Tauri (PATH scanning, shell-path hydration, …) so
 # future surfaces (CLI tooling, headless daemon) can link the same
 # code without dragging in the webview stack.
-members = ["src-tauri", "crates/workstation-core"]
+members = ["src-tauri", "crates/workstation-core", "crates/cloud-agent"]
 resolver = "2"
 
 [workspace.package]

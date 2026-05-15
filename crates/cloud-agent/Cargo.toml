@@ -1,0 +1,57 @@
+[package]
+name = "cloud-agent"
+version = "0.1.0"
+description = "Work Station headless cloud agent — runs on a remote VPS and exposes PTY / project state to the desktop app over WebSocket."
+authors = ["Work Station maintainers"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Single binary target; the crate root is `src/main.rs`.
+[[bin]]
+name = "cloud-agent"
+path = "src/main.rs"
+
+[dependencies]
+# T19.1 — reuse PTY / push / pairing / credentials / logging primitives.
+# T19.2 only links the crate so the dependency graph and feature flags
+# are wired up; subsequent tasks (T19.7+) bring the modules into use.
+workstation-core = { path = "../workstation-core" }
+
+serde = { workspace = true }
+tracing = { workspace = true }
+
+# CLI parsing — keep the binary self-describing (`--help`, `--version`)
+# so it can be inspected on the VPS without external docs.
+clap = { version = "=4.5.20", features = ["derive"] }
+
+# TOML config — `/etc/cloud-agent/config.toml` is the source of truth
+# for listen address, state dir, log level, and (later) auth token.
+toml = "=1.1.2"
+
+# Daemon runtime + signal handling. systemd sends SIGTERM on stop, so
+# we listen for both Ctrl+C (dev) and SIGTERM (prod).
+tokio = { version = "=1.52.1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+
+# Stand-alone tracing subscriber for the daemon. systemd captures
+# stdout into the journal, so the file appender from workstation-core's
+# `logging` module would be redundant here; a stderr-only fmt layer
+# with env-filter is the right shape for a headless service.
+tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
+
+thiserror = "=2.0.18"
+
+[dev-dependencies]
+tempfile = "=3.13.0"
+
+[lints.clippy]
+# Mirror the rest of the workspace (T1.3 / T19.1) so the daemon picks
+# up the same lint policy as src-tauri and workstation-core.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+needless_pass_by_value = "allow"
+return_self_not_must_use = "allow"

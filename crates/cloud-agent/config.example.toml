@@ -1,0 +1,21 @@
+# Work Station cloud-agent — sample config.
+#
+# Installed at /etc/cloud-agent/config.toml by the T19.3 install
+# script. Edit in place; restart the unit with
+# `systemctl restart cloud-agent` to pick up changes.
+#
+# Every field is optional — the agent falls back to the values shown
+# below when omitted (or when this file is missing entirely).
+
+# host:port the WebSocket listener binds to. Loopback by default
+# because Cloudflare Tunnel terminates publicly and forwards locally
+# (see docs/cloud-agent-vps.md §3 — no inbound port is opened).
+listen = "127.0.0.1:7420"
+
+# Directory the agent owns: future pairing token, scrollback overflow,
+# the SQLite project DB (T19.4+). Created on first launch if missing.
+state_dir = "/var/lib/cloud-agent"
+
+# Tracing filter. Same syntax as RUST_LOG. The --log-filter CLI flag
+# overrides this for a single run without editing the file.
+log_filter = "info"
