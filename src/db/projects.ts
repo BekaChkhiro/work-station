@@ -5,17 +5,18 @@
 // payload with Zod here so a backend drift doesn't silently land in stores
 // or UI components — same pattern as `parseLayout` in `db/sessions.ts`.
 //
-// T19.9: `listProjects` routes through the IPC transport layer so cloud
-// mode hits the cloud-agent's `projects_list` WS handler. The write paths
-// (create / update / delete / reorder / workspace tabs) are not exposed by
-// the cloud-agent yet — they short-circuit via `routeIpcLocalOnly` so
-// the UI can render an affordance instead of silently writing to the local
-// SQLite while the user is viewing a remote machine's projects.
+// Routing:
+//   • Read paths (`listProjects`) hit either `project_list` (Tauri) or
+//     the cloud-agent's `projects_list` WS handler via `routeIpc`.
+//   • Write paths (create / update / delete / reorder / workspace tabs)
+//     route to the cloud-agent's matching `project_*` WS handlers, which
+//     mirror the desktop's CRUD shape so the same camelCase payload is
+//     valid on either side.
 
 import { invoke } from "@tauri-apps/api/core";
 import { z } from "zod";
 
-import { routeIpc, routeIpcLocalOnly } from "../ipc/transport";
+import { routeIpc } from "../ipc/transport";
 
 import {
   DEFAULT_ACTIVE_TAB,
@@ -143,40 +144,63 @@ export async function listProjects(): Promise<Project[]> {
   );
 }
 
-// Write paths — the cloud-agent does not yet expose project mutations
-// over its WS protocol. `routeIpcLocalOnly` throws
-// `CloudTransportUnsupportedError` in cloud mode so call sites can
-// surface a "not available on remote machine" affordance instead of
-// silently writing to the desktop's local SQLite while the user is
-// browsing a remote workspace.
+// Write paths — both backends share the same camelCase payload shape so
+// the renderer can hand `toArgs(input)` to either Tauri (`invoke`) or
+// the cloud-agent's WS handler (`client.projectCreate` / etc.) without
+// reshaping. The cloud-agent's path canonicalization runs against the
+// cloud filesystem, so a path the user typed locally has to exist on
+// the agent's host or the call fails with `invalid_args` — same surface
+// the desktop returns for missing-on-disk paths.
 
 export async function createProject(input: CreateProjectInput): Promise<Project> {
-  return routeIpcLocalOnly("project_create", async () => {
-    const raw = await invoke<unknown>("project_create", { args: toArgs(input) });
-    return ProjectSchema.parse(raw);
-  });
+  return routeIpc(
+    async () => {
+      const raw = await invoke<unknown>("project_create", { args: toArgs(input) });
+      return ProjectSchema.parse(raw);
+    },
+    async (client) => {
+      const raw = await client.projectCreate(toArgs(input));
+      return ProjectSchema.parse(raw);
+    },
+  );
 }
 
 export async function updateProject(input: UpdateProjectInput): Promise<Project> {
-  return routeIpcLocalOnly("project_update", async () => {
-    const raw = await invoke<unknown>("project_update", { args: toArgs(input) });
-    return ProjectSchema.parse(raw);
-  });
+  return routeIpc(
+    async () => {
+      const raw = await invoke<unknown>("project_update", { args: toArgs(input) });
+      return ProjectSchema.parse(raw);
+    },
+    async (client) => {
+      const raw = await client.projectUpdate(toArgs(input));
+      return ProjectSchema.parse(raw);
+    },
+  );
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  return routeIpcLocalOnly("project_delete", async () => {
-    await invoke("project_delete", { args: { id } });
-  });
+  return routeIpc(
+    async () => {
+      await invoke("project_delete", { args: { id } });
+    },
+    async (client) => {
+      await client.projectDelete(id);
+    },
+  );
 }
 
 /** T6.7: persist a new sidebar order. `ids` must list every project exactly
  *  once — the backend reassigns `position = idx` inside a single SQLite
  *  transaction. */
 export async function reorderProjects(ids: string[]): Promise<void> {
-  return routeIpcLocalOnly("project_reorder", async () => {
-    await invoke("project_reorder", { args: { ids } });
-  });
+  return routeIpc(
+    async () => {
+      await invoke("project_reorder", { args: { ids } });
+    },
+    async (client) => {
+      await client.projectReorder(ids);
+    },
+  );
 }
 
 /** T11.1: persist a project's workspace tab state (visible list + active
@@ -189,11 +213,16 @@ export async function updateProjectWorkspaceTabs(
   visible: WorkspaceTabKind[],
   active: WorkspaceTabKind,
 ): Promise<void> {
-  return routeIpcLocalOnly("project_update_workspace_tabs", async () => {
-    await invoke("project_update_workspace_tabs", {
-      args: { id, visible, active },
-    });
-  });
+  return routeIpc(
+    async () => {
+      await invoke("project_update_workspace_tabs", {
+        args: { id, visible, active },
+      });
+    },
+    async (client) => {
+      await client.projectUpdateWorkspaceTabs(id, [...visible], active);
+    },
+  );
 }
 
 // Normalize undefined → null so the Rust side sees a consistent shape.

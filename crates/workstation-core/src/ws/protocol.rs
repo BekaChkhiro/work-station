@@ -34,6 +34,48 @@ const fn default_scrollback_limit() -> usize {
     DEFAULT_SCROLLBACK_LIMIT
 }
 
+/// Wire-side args for `project_create`. Mirrors the desktop's
+/// `commands::projects::CreateProjectArgs` field-by-field so the
+/// frontend can send the same camelCase payload over either transport.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCreateArgs {
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub default_cli: Option<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub startup_commands: Vec<String>,
+}
+
+/// Wire-side args for `project_update`. The id rides inside the args
+/// payload (same shape as desktop's `UpdateProjectArgs`) rather than
+/// as a top-level wire field so the camelCase JSON the renderer
+/// builds for Tauri can be sent over WS verbatim.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUpdateArgs {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub default_cli: Option<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub startup_commands: Vec<String>,
+}
+
 /// Set of `type` discriminators the server understands. Used by the
 /// dispatcher in `pty_bridge` to distinguish "unknown message type"
 /// (reply with [`ServerMessage::Error`] kind `unsupported`) from
@@ -50,6 +92,11 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "projects_list",
     "project_get",
     "project_switch",
+    "project_create",
+    "project_update",
+    "project_delete",
+    "project_reorder",
+    "project_update_workspace_tabs",
     "settings_get",
     // T18.6 — PlanFlow Tasks bridge variants.
     "planflow_get_me",
@@ -157,6 +204,36 @@ pub enum ClientMessage {
         #[serde(default)]
         id: Option<String>,
         project_id: String,
+    },
+    /// Cloud-agent project CRUD. Mirrors the desktop's
+    /// `commands/projects.rs` shape so the same client args payload
+    /// (camelCase fields) can target either backend.
+    ProjectCreate {
+        #[serde(default)]
+        id: Option<String>,
+        args: ProjectCreateArgs,
+    },
+    ProjectUpdate {
+        #[serde(default)]
+        id: Option<String>,
+        args: ProjectUpdateArgs,
+    },
+    ProjectDelete {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    ProjectReorder {
+        #[serde(default)]
+        id: Option<String>,
+        ids: Vec<String>,
+    },
+    ProjectUpdateWorkspaceTabs {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        visible: Vec<String>,
+        active: String,
     },
     /// T18.4: read the small subset of `app_settings` the PWA needs
     /// (theme + last-active project). Other settings stay desktop-only
@@ -398,6 +475,13 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         project_id: String,
+    },
+    /// Generic "void" ack for project mutations whose handler has no
+    /// payload to return (delete / reorder / update_workspace_tabs).
+    /// `project_create` / `project_update` reuse [`ProjectResult`].
+    ProjectVoidResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     /// T18.4: response to `settings_get`.
     SettingsResult {

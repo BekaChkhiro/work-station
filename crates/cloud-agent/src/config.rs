@@ -76,6 +76,17 @@ pub struct Config {
     /// per request.
     #[serde(default)]
     pub planflow_api_token: Option<String>,
+
+    /// Filesystem root the agent uses when a `project_create` request
+    /// arrives with an empty or relative `path`. The desktop's cloud-
+    /// mode "New Project" dialog only collects a name; the agent then
+    /// `mkdir -p`s `<projects_root>/<slug-of-name>` so the user doesn't
+    /// have to SSH in to lay down the directory first. Absolute paths
+    /// in `project_create` keep the strict validate-must-exist
+    /// semantics — only auto-creation under this root is opt-in.
+    /// Default: `<state_dir>/projects`.
+    #[serde(default)]
+    pub projects_root: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -87,7 +98,21 @@ impl Default for Config {
             auth_token: None,
             public_url: None,
             planflow_api_token: None,
+            projects_root: None,
         }
+    }
+}
+
+impl Config {
+    /// Resolve the projects-root path, falling back to
+    /// `<state_dir>/projects` when the operator hasn't pinned one in
+    /// the config file. Centralized here so every call site picks up
+    /// the same default.
+    #[must_use]
+    pub fn resolve_projects_root(&self) -> PathBuf {
+        self.projects_root
+            .clone()
+            .unwrap_or_else(|| self.state_dir.join("projects"))
     }
 }
 

@@ -89,6 +89,7 @@ pub(crate) fn router(
     manager: PtyManager,
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
+    projects_root: dispatch::ProjectsRoot,
 ) -> Router {
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
@@ -123,7 +124,8 @@ pub(crate) fn router(
         .layer(Extension(pool))
         .layer(Extension(manager))
         .layer(Extension(monitor))
-        .layer(Extension(planflow));
+        .layer(Extension(planflow))
+        .layer(Extension(projects_root));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -146,6 +148,7 @@ pub async fn spawn(
     token: AuthToken,
     pool: SqlitePool,
     planflow: PlanflowState,
+    projects_root: dispatch::ProjectsRoot,
     addr: SocketAddr,
 ) -> std::io::Result<ServerHandle> {
     // T19.26 — one `PtyManager` per daemon, shared across every
@@ -158,7 +161,7 @@ pub async fn spawn(
     // broadcast sender keeps the publisher task alive even when no
     // receivers are connected (idle daemon between PWA sessions).
     let monitor = system_monitor::start(manager.clone());
-    spawn_with_components(token, pool, manager, monitor, planflow, addr).await
+    spawn_with_components(token, pool, manager, monitor, planflow, projects_root, addr).await
 }
 
 /// Same as [`spawn`] but with caller-supplied `PtyManager` and
@@ -171,9 +174,10 @@ pub(crate) async fn spawn_with_components(
     manager: PtyManager,
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
+    projects_root: dispatch::ProjectsRoot,
     addr: SocketAddr,
 ) -> std::io::Result<ServerHandle> {
-    let app = router(token, pool, manager, monitor, planflow);
+    let app = router(token, pool, manager, monitor, planflow, projects_root);
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -249,10 +253,11 @@ async fn ws_handler(
     Extension(manager): Extension<PtyManager>,
     Extension(monitor): Extension<SystemMonitorHandle>,
     Extension(planflow): Extension<PlanflowState>,
+    Extension(projects_root): Extension<dispatch::ProjectsRoot>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     upgrade.on_upgrade(move |socket| {
-        dispatch::run_connection(socket, manager, pool, monitor, planflow)
+        dispatch::run_connection(socket, manager, pool, monitor, planflow, projects_root)
     })
 }
 
@@ -283,10 +288,13 @@ mod tests {
             "http://127.0.0.1:1",
             std::sync::Arc::new(|| Ok(None)),
         );
+        let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
+        std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
         let handle = spawn(
             token,
             pool,
             planflow,
+            projects_root,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )
         .await
@@ -475,12 +483,15 @@ mod tests {
             "http://127.0.0.1:1",
             std::sync::Arc::new(|| Ok(None)),
         );
+        let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
+        std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
         let handle = spawn_with_components(
             token,
             pool,
             manager,
             monitor,
             planflow,
+            projects_root,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )
         .await

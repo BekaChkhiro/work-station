@@ -1,15 +1,15 @@
 // T19.9 — Tests for the projects data layer's cloud routing.
 //
 // The Tauri side is exercised by `cargo test` on
-// `src-tauri/src/commands/projects.rs`. These tests pin the transport
-// choice each wrapper makes:
+// `src-tauri/src/commands/projects.rs`; the cloud-agent's matching
+// `project_*` handlers are exercised by `cargo test -p cloud-agent`.
+// These tests pin the transport choice each wrapper makes:
 //
 //   • `listProjects` reads from Tauri in local mode and from the
 //     cloud-agent's `projectsList` in cloud mode.
-//   • All write paths short-circuit via `routeIpcLocalOnly` so cloud
-//     mode raises `CloudTransportUnsupportedError` instead of writing
-//     to the desktop's local SQLite while the user is browsing a
-//     remote workspace.
+//   • Every write path (create / update / delete / reorder /
+//     update_workspace_tabs) routes to the matching WS handler in
+//     cloud mode and to Tauri in local mode.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,7 +19,6 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 import {
-  CloudTransportUnsupportedError,
   _resetCloudAgentManagerFactoryForTests,
   _setCloudAgentManagerForTests,
 } from "../ipc/transport";
@@ -125,39 +124,82 @@ describe("listProjects()", () => {
 });
 
 describe("project mutations in cloud mode", () => {
-  beforeEach(async () => {
-    const stubClient = {} as unknown as WsBridgeClient;
+  it("createProject routes to projectCreate over WS and parses the reply", async () => {
+    const projectCreate = vi.fn(async () => projectFixture({ id: "remote-1" }));
+    const stubClient = { projectCreate } as unknown as WsBridgeClient;
     _setCloudAgentManagerForTests(makeStubManager(stubClient));
     await setCloudMode(true);
+
+    const result = await createProject({ name: "alpha", path: "/srv/alpha" });
+
+    expect(projectCreate).toHaveBeenCalledWith({
+      name: "alpha",
+      path: "/srv/alpha",
+      color: null,
+      icon: null,
+      defaultCli: null,
+      env: {},
+      startupCommands: [],
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(result.id).toBe("remote-1");
   });
 
-  it("createProject throws CloudTransportUnsupportedError naming the operation", async () => {
-    await expect(createProject({ name: "n", path: "/p" })).rejects.toBeInstanceOf(
-      CloudTransportUnsupportedError,
-    );
+  it("updateProject routes to projectUpdate over WS", async () => {
+    const projectUpdate = vi.fn(async () => projectFixture({ id: "p1" }));
+    const stubClient = { projectUpdate } as unknown as WsBridgeClient;
+    _setCloudAgentManagerForTests(makeStubManager(stubClient));
+    await setCloudMode(true);
+
+    await updateProject({ id: "p1", name: "renamed", path: "/srv/p" });
+
+    expect(projectUpdate).toHaveBeenCalledWith({
+      id: "p1",
+      name: "renamed",
+      path: "/srv/p",
+      color: null,
+      icon: null,
+      defaultCli: null,
+      env: {},
+      startupCommands: [],
+    });
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("updateProject throws CloudTransportUnsupportedError", async () => {
-    await expect(updateProject({ id: "p1", name: "n", path: "/p" })).rejects.toBeInstanceOf(
-      CloudTransportUnsupportedError,
-    );
+  it("deleteProject routes to projectDelete over WS", async () => {
+    const projectDelete = vi.fn(async () => undefined);
+    const stubClient = { projectDelete } as unknown as WsBridgeClient;
+    _setCloudAgentManagerForTests(makeStubManager(stubClient));
+    await setCloudMode(true);
+
+    await deleteProject("p1");
+
+    expect(projectDelete).toHaveBeenCalledWith("p1");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("deleteProject throws CloudTransportUnsupportedError", async () => {
-    await expect(deleteProject("p1")).rejects.toBeInstanceOf(CloudTransportUnsupportedError);
+  it("reorderProjects routes to projectReorder over WS", async () => {
+    const projectReorder = vi.fn(async () => undefined);
+    const stubClient = { projectReorder } as unknown as WsBridgeClient;
+    _setCloudAgentManagerForTests(makeStubManager(stubClient));
+    await setCloudMode(true);
+
+    await reorderProjects(["p2", "p1"]);
+
+    expect(projectReorder).toHaveBeenCalledWith(["p2", "p1"]);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("reorderProjects throws CloudTransportUnsupportedError", async () => {
-    await expect(reorderProjects(["p1", "p2"])).rejects.toBeInstanceOf(
-      CloudTransportUnsupportedError,
-    );
-  });
+  it("updateProjectWorkspaceTabs routes to projectUpdateWorkspaceTabs over WS", async () => {
+    const projectUpdateWorkspaceTabs = vi.fn(async () => undefined);
+    const stubClient = { projectUpdateWorkspaceTabs } as unknown as WsBridgeClient;
+    _setCloudAgentManagerForTests(makeStubManager(stubClient));
+    await setCloudMode(true);
 
-  it("updateProjectWorkspaceTabs throws CloudTransportUnsupportedError", async () => {
-    await expect(updateProjectWorkspaceTabs("p1", ["terminal"], "terminal")).rejects.toBeInstanceOf(
-      CloudTransportUnsupportedError,
-    );
+    await updateProjectWorkspaceTabs("p1", ["terminal", "editor"], "editor");
+
+    expect(projectUpdateWorkspaceTabs).toHaveBeenCalledWith("p1", ["terminal", "editor"], "editor");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

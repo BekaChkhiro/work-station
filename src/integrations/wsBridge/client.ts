@@ -55,6 +55,7 @@ export type ServerMessage =
   | { type: "projects_list_result"; id?: string; projects: WsBridgeProject[] }
   | { type: "project_result"; id?: string; project: WsBridgeProject }
   | { type: "project_switched"; id?: string; project_id: string }
+  | { type: "project_void_result"; id?: string }
   | { type: "settings_result"; id?: string; settings: WsBridgeSettings }
   | { type: "active_project_changed"; project_id?: string | null }
   // T19.14 — live host stats. The cloud-agent broadcasts these every
@@ -117,6 +118,32 @@ export interface WsBridgeProject {
   activeWorkspaceTab?: string;
   position: number;
   createdAt: number;
+}
+
+/** Wire shape for `project_create.args`. Mirrors the desktop Tauri
+ *  command's `CreateProjectArgs` so the renderer can hand the same
+ *  camelCase object to either backend. */
+export interface WsBridgeProjectCreateArgs {
+  name: string;
+  path: string;
+  color?: string | null;
+  icon?: string | null;
+  defaultCli?: string | null;
+  env?: Record<string, string>;
+  startupCommands?: string[];
+}
+
+/** Wire shape for `project_update.args`. The id rides inside the args
+ *  payload (same shape as desktop's `UpdateProjectArgs`). */
+export interface WsBridgeProjectUpdateArgs {
+  id: string;
+  name: string;
+  path: string;
+  color?: string | null;
+  icon?: string | null;
+  defaultCli?: string | null;
+  env?: Record<string, string>;
+  startupCommands?: string[];
 }
 
 export interface WsBridgeSettings {
@@ -443,6 +470,57 @@ export class WsBridgeClient {
     }
   }
 
+  // Cloud-agent project CRUD. The `args` payload mirrors the desktop's
+  // `commands::projects::{CreateProjectArgs, UpdateProjectArgs}` so the
+  // same camelCase object the renderer hands to Tauri's `invoke` can be
+  // forwarded verbatim over WS.
+
+  async projectCreate(args: WsBridgeProjectCreateArgs): Promise<WsBridgeProject> {
+    const reply = await this.request({ type: "project_create", args });
+    if (reply.type !== "project_result") {
+      throw new WsBridgeError("protocol", `expected project_result, got ${reply.type}`);
+    }
+    return reply.project;
+  }
+
+  async projectUpdate(args: WsBridgeProjectUpdateArgs): Promise<WsBridgeProject> {
+    const reply = await this.request({ type: "project_update", args });
+    if (reply.type !== "project_result") {
+      throw new WsBridgeError("protocol", `expected project_result, got ${reply.type}`);
+    }
+    return reply.project;
+  }
+
+  async projectDelete(projectId: string): Promise<void> {
+    const reply = await this.request({ type: "project_delete", project_id: projectId });
+    if (reply.type !== "project_void_result") {
+      throw new WsBridgeError("protocol", `expected project_void_result, got ${reply.type}`);
+    }
+  }
+
+  async projectReorder(ids: string[]): Promise<void> {
+    const reply = await this.request({ type: "project_reorder", ids });
+    if (reply.type !== "project_void_result") {
+      throw new WsBridgeError("protocol", `expected project_void_result, got ${reply.type}`);
+    }
+  }
+
+  async projectUpdateWorkspaceTabs(
+    projectId: string,
+    visible: string[],
+    active: string,
+  ): Promise<void> {
+    const reply = await this.request({
+      type: "project_update_workspace_tabs",
+      project_id: projectId,
+      visible,
+      active,
+    });
+    if (reply.type !== "project_void_result") {
+      throw new WsBridgeError("protocol", `expected project_void_result, got ${reply.type}`);
+    }
+  }
+
   async settingsGet(): Promise<WsBridgeSettings> {
     const reply = await this.request({ type: "settings_get" });
     if (reply.type !== "settings_result") {
@@ -733,6 +811,7 @@ export class WsBridgeClient {
       case "projects_list_result":
       case "project_result":
       case "project_switched":
+      case "project_void_result":
       case "settings_result":
       case "planflow_result": {
         const id = parsed.id;

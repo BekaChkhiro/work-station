@@ -124,7 +124,21 @@ async fn run(config: Config) -> ExitCode {
     // reqwest client + caches are all Arc-shared internally).
     let planflow = planflow_proxy::PlanflowState::new(config.planflow_api_token.clone());
 
-    let handle = match server::spawn(token, pool, planflow, config.listen).await {
+    // Workspace root for cloud-mode "New Project" flows. Auto-created
+    // here so the first create-with-empty-path request doesn't race a
+    // bare-filesystem state_dir.
+    let projects_root_path = config.resolve_projects_root();
+    if let Err(error) = std::fs::create_dir_all(&projects_root_path) {
+        tracing::error!(
+            projects_root = %projects_root_path.display(),
+            error = %error,
+            "failed to ensure cloud-agent projects root",
+        );
+        return ExitCode::from(1);
+    }
+    let projects_root = dispatch::ProjectsRoot::new(projects_root_path);
+
+    let handle = match server::spawn(token, pool, planflow, projects_root, config.listen).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!(

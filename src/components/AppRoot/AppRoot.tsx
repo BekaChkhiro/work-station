@@ -1105,10 +1105,14 @@ export function AppRoot(): JSX.Element {
     // Snapshot the project list once — `projects()` is reactive and the
     // mutations below (setLayout) would otherwise reorder the iteration.
     const snapshot = projects().map((p) => p);
+
+    // Tear down PTYs and clear layouts for every currently-mounted
+    // project. The IPC transport has already flipped at this point
+    // (cloudMode() drove this effect), so ptyKill would route to the
+    // NEW backend — which doesn't own the PTY anyway. Fire-and-forget:
+    // the previous backend reaps orphans on disconnect, and awaiting
+    // every kill round-trip serially is what made the swap feel slow.
     for (const project of snapshot) {
-      // Kill PTYs spawned in the previous mode. The layout tree is the
-      // authoritative live-session list (T5.6 split panes); the shadow
-      // map covers the brief window between spawn and layout-attach.
       const live = new Set<string>();
       const ws = getWorkspace(project.id);
       if (ws?.layout) {
@@ -1116,49 +1120,92 @@ export function AppRoot(): JSX.Element {
       }
       for (const id of sessionsByProject[project.id] ?? []) live.add(id);
       for (const sessionId of live) {
-        try {
-          await ptyKill(sessionId);
-        } catch {
+        void ptyKill(sessionId).catch(() => {
           // Best-effort — already gone or backend will reap on disconnect.
-        }
+        });
         forgetSessionCli(sessionId);
       }
       sessionsByProject[project.id] = [];
-
-      // Cancel the persister wired to the previous mode's session id —
-      // no pending write must land in the wrong row after we swap.
-      // Both maps are overwritten below with the new mode's row, so we
-      // don't need to delete the keys first.
       persisterByProject[project.id]?.cancel();
-
-      // Drop the displayed layout so the auto-launch effect (T7.4) and
-      // the restore below have a clean slate. Auto-launch is gated on
-      // `autoLaunchedProjects`; clearing the entry lets a project with
-      // no saved layout in the new mode bring the CLI launcher back.
       setLayout(project.id, null);
       autoLaunchedProjects.delete(project.id);
+    }
 
-      // Load (or create) the mode-scoped row and rewire the persister.
-      const projectPath = projectPaths[project.id] ?? null;
-      const projectCli = projectClis[project.id] ?? null;
-      const { id: nextSessionId, layout: savedLayout } = await getOrCreateProjectSession(
-        project.id,
-        projectCli,
-        projectPath,
-        next,
-      );
-      dbSessionByProject[project.id] = nextSessionId;
-      persisterByProject[project.id] = createLayoutPersister(nextSessionId, {
-        onError: (err) => console.error("[T19.17] layout persist failed:", err),
-      });
+    // Re-fetch the project list from whichever backend `next` routes to.
+    // Without this, flipping the workspace toggle wouldn't visibly change
+    // anything: the sidebar would keep showing the previous mode's
+    // projects (loaded once at boot) even though every subsequent IPC
+    // call now lands on the other backend.
+    //
+    // On failure (cloud-agent unreachable, timeout) we treat it as
+    // "the new backend currently has no projects to show" rather than
+    // re-using the previous mode's snapshot. Reusing the snapshot
+    // would route subsequent PTY spawns through the new backend with
+    // paths that only exist on the old one — surfaced to the user as
+    // a "cwd does not exist" error from the cloud-agent. The
+    // CloudConnectionBanner already surfaces the connectivity issue
+    // separately so the empty sidebar is interpretable.
+    let nextProjects: Project[];
+    try {
+      nextProjects = await listProjects();
+    } catch (err) {
+      console.error("[T19.17] listProjects after mode swap failed:", err);
+      nextProjects = [];
+    }
 
-      if (!isEmptyLayout(savedLayout)) {
-        const cli = resolveDefaultCli(project.id);
-        await restoreProjectLayout(project.id, savedLayout, cli);
-        autoLaunchedProjects.add(project.id);
-      }
+    // Drop projects that don't exist in the new mode so the sidebar
+    // reflects the new backend. Shadow maps use `undefined` assignment
+    // instead of `delete` to keep the no-dynamic-delete lint happy; the
+    // store's `removeProject` handles the visible-state removal.
+    const nextIds = new Set(nextProjects.map((p) => p.id));
+    for (const project of snapshot) {
+      if (nextIds.has(project.id)) continue;
+      projectPaths[project.id] = "";
+      projectClis[project.id] = null;
+      projectEnvs[project.id] = {};
+      projectStartupCommands[project.id] = [];
+      dbSessionByProject[project.id] = "";
+      persisterByProject[project.id]?.cancel();
+      removeProject(project.id);
+    }
+
+    // Register (or refresh) every project in the new list synchronously
+    // so the sidebar paints the new project list immediately — without
+    // this the user would stare at an empty workspace while the per-
+    // project session/PTY restore played out below. registerProject is
+    // idempotent on id; subsequent calls just replace metadata.
+    for (const project of nextProjects) {
+      registerProject(project);
     }
     setMountedMode(next);
+
+    // Load each project's mode-scoped session row and restore its
+    // layout in parallel. Projects are independent — there's no shared
+    // state between their PTY spawns — so serialising the loop just
+    // added latency proportional to N projects.
+    await Promise.all(
+      // eslint-disable-next-line solid/reactivity -- one-shot async restore, not a reactive subscription
+      nextProjects.map(async (project) => {
+        const projectPath = projectPaths[project.id] ?? null;
+        const projectCli = projectClis[project.id] ?? null;
+        const { id: nextSessionId, layout: savedLayout } = await getOrCreateProjectSession(
+          project.id,
+          projectCli,
+          projectPath,
+          next,
+        );
+        dbSessionByProject[project.id] = nextSessionId;
+        persisterByProject[project.id] = createLayoutPersister(nextSessionId, {
+          onError: (err) => console.error("[T19.17] layout persist failed:", err),
+        });
+
+        if (!isEmptyLayout(savedLayout)) {
+          const cli = resolveDefaultCli(project.id);
+          await restoreProjectLayout(project.id, savedLayout, cli);
+          autoLaunchedProjects.add(project.id);
+        }
+      }),
+    );
   };
 
   // T5.9 — persist the active project id on every change so the next launch

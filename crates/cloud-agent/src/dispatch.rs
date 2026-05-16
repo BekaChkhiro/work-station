@@ -58,7 +58,8 @@
 //!     [`crate::planflow_proxy`].
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
@@ -70,13 +71,32 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 use workstation_core::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
 use workstation_core::ws::protocol::{
-    ClientMessage, ServerMessage, SettingsView, KNOWN_CLIENT_TYPES,
+    ClientMessage, ProjectCreateArgs, ProjectUpdateArgs, ServerMessage, SettingsView,
+    KNOWN_CLIENT_TYPES,
 };
 use workstation_core::ws::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
 use crate::db::{app_settings, projects};
 use crate::fs::{self as cfs, FsError};
 use crate::planflow_proxy::{self, PlanflowState};
+
+/// Newtype around the cloud-agent's projects root path so axum's
+/// `Extension` extractor can resolve it by type. Cloning is an Arc
+/// bump, so the per-connection clone in `ws_handler` is cheap.
+#[derive(Debug, Clone)]
+pub struct ProjectsRoot(pub Arc<PathBuf>);
+
+impl ProjectsRoot {
+    #[must_use]
+    pub fn new(path: PathBuf) -> Self {
+        Self(Arc::new(path))
+    }
+
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        self.0.as_path()
+    }
+}
 
 /// Capacity for the per-connection outbound mpsc.
 ///
@@ -153,6 +173,7 @@ pub async fn run_connection(
     pool: SqlitePool,
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
+    projects_root: ProjectsRoot,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
@@ -181,7 +202,7 @@ pub async fn run_connection(
         };
         match msg {
             Message::Text(payload) => {
-                handle_text(&mut conn, &pool, &planflow, &payload).await;
+                handle_text(&mut conn, &pool, &planflow, &projects_root, &payload).await;
             }
             Message::Binary(_) => {
                 send_error(
@@ -238,6 +259,7 @@ async fn handle_text(
     conn: &mut Connection,
     pool: &SqlitePool,
     planflow: &PlanflowState,
+    projects_root: &ProjectsRoot,
     payload: &str,
 ) {
     let value: serde_json::Value = match serde_json::from_str(payload) {
@@ -287,12 +309,14 @@ async fn handle_text(
     // a typed parse — the Phase-1 client doesn't depend on cloud-side
     // payload validation for handlers that haven't run yet.
     let typed = match type_str.as_str() {
-        "settings_get" | "projects_list" | "project_get" | "project_switch" | "pty_spawn"
-        | "pty_write" | "pty_resize" | "pty_kill" | "pty_scrollback" | "pty_subscribe"
-        | "pty_unsubscribe" | "fs_list" | "fs_read" | "fs_write" | "fs_delete"
-        | "planflow_get_me" | "planflow_list_projects" | "planflow_list_tasks"
-        | "planflow_list_active_work" | "planflow_list_comments" | "planflow_create_comment"
-        | "planflow_start_work" | "planflow_stop_work" | "planflow_update_task_status" => {
+        "settings_get" | "projects_list" | "project_get" | "project_switch" | "project_create"
+        | "project_update" | "project_delete" | "project_reorder"
+        | "project_update_workspace_tabs" | "pty_spawn" | "pty_write" | "pty_resize"
+        | "pty_kill" | "pty_scrollback" | "pty_subscribe" | "pty_unsubscribe" | "fs_list"
+        | "fs_read" | "fs_write" | "fs_delete" | "planflow_get_me" | "planflow_list_projects"
+        | "planflow_list_tasks" | "planflow_list_active_work" | "planflow_list_comments"
+        | "planflow_create_comment" | "planflow_start_work" | "planflow_stop_work"
+        | "planflow_update_task_status" => {
             match serde_json::from_value::<ClientMessage>(value) {
                 Ok(msg) => msg,
                 Err(error) => {
@@ -319,7 +343,7 @@ async fn handle_text(
         }
     };
 
-    dispatch_typed(conn, pool, planflow, typed).await;
+    dispatch_typed(conn, pool, planflow, projects_root, typed).await;
 }
 
 /// Route a parsed [`ClientMessage`] to its handler. Split out of
@@ -337,6 +361,7 @@ async fn dispatch_typed(
     conn: &mut Connection,
     pool: &SqlitePool,
     planflow: &PlanflowState,
+    projects_root: &ProjectsRoot,
     typed: ClientMessage,
 ) {
     match typed {
@@ -348,6 +373,34 @@ async fn dispatch_typed(
         }
         ClientMessage::ProjectGet { id, project_id } => {
             handle_project_get(&conn.out_tx, pool, id, project_id).await;
+        }
+        ClientMessage::ProjectCreate { id, args } => {
+            handle_project_create(&conn.out_tx, pool, projects_root, id, args).await;
+        }
+        ClientMessage::ProjectUpdate { id, args } => {
+            handle_project_update(&conn.out_tx, pool, id, args).await;
+        }
+        ClientMessage::ProjectDelete { id, project_id } => {
+            handle_project_delete(&conn.out_tx, pool, id, project_id).await;
+        }
+        ClientMessage::ProjectReorder { id, ids } => {
+            handle_project_reorder(&conn.out_tx, pool, id, ids).await;
+        }
+        ClientMessage::ProjectUpdateWorkspaceTabs {
+            id,
+            project_id,
+            visible,
+            active,
+        } => {
+            handle_project_update_workspace_tabs(
+                &conn.out_tx,
+                pool,
+                id,
+                project_id,
+                visible,
+                active,
+            )
+            .await;
         }
         ClientMessage::ProjectSwitch { id, project_id } => {
             handle_project_switch(&conn.out_tx, pool, id, project_id).await;
@@ -621,10 +674,186 @@ async fn handle_project_switch(
     send(out_tx, &ServerMessage::ProjectSwitched { id, project_id }).await;
 }
 
+async fn handle_project_create(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    projects_root: &ProjectsRoot,
+    id: Option<String>,
+    args: ProjectCreateArgs,
+) {
+    // Cloud-mode "New Project" only collects a name in the most common
+    // flow — the dialog leaves the path empty so the agent decides
+    // where the project lives on its own filesystem. We resolve here
+    // (rather than inside `projects::create`) so the existing
+    // strict-validation semantics for absolute paths keep working
+    // unchanged.
+    let path = match resolve_create_path(&args.name, &args.path, projects_root) {
+        Ok(p) => p,
+        Err(error) => {
+            send(out_tx, &project_error_to_frame(id, &error)).await;
+            return;
+        }
+    };
+
+    let input = projects::NewProject {
+        name: args.name,
+        path,
+        color: args.color,
+        icon: args.icon,
+        default_cli: args.default_cli,
+        env: args.env,
+        startup_commands: args.startup_commands,
+    };
+    match projects::create(pool, input).await {
+        Ok(project) => {
+            let project = serde_json::to_value(project).expect("Project always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectResult { id, project }).await;
+        }
+        Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
+    }
+}
+
+/// Decide where a `project_create` request lands on the cloud-agent's
+/// filesystem.
+///
+/// Rules:
+///   • Empty path → `<projects_root>/<slug-of-name>`, auto-created.
+///   • Relative path → joined with `<projects_root>`, auto-created.
+///   • Absolute path → returned verbatim. `projects::create` then runs
+///     its strict canonicalize-must-exist validation; we never auto-
+///     create absolute paths, since that would let a malformed
+///     request silently lay down directories anywhere on the host.
+fn resolve_create_path(
+    name: &str,
+    path: &str,
+    projects_root: &ProjectsRoot,
+) -> Result<String, projects::ProjectError> {
+    let trimmed = path.trim();
+    if !trimmed.is_empty() && Path::new(trimmed).is_absolute() {
+        return Ok(trimmed.to_string());
+    }
+
+    let leaf = if trimmed.is_empty() {
+        slugify_project_name(name)
+    } else {
+        trimmed.to_string()
+    };
+    if leaf.is_empty() {
+        return Err(projects::ProjectError::EmptyPath);
+    }
+
+    let candidate = projects_root.as_path().join(&leaf);
+    std::fs::create_dir_all(&candidate).map_err(|_| projects::ProjectError::PathNotReadable)?;
+    Ok(candidate.to_string_lossy().into_owned())
+}
+
+/// Lowercase + ASCII-friendly version of a name suitable for a
+/// directory leaf. Mirrors the lightweight slug shape the desktop
+/// applies elsewhere — keeps `[a-z0-9_-]`, collapses whitespace into
+/// `-`, drops everything else.
+fn slugify_project_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_was_dash = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if ch == '-' || ch == '_' {
+            out.push(ch);
+            last_was_dash = ch == '-';
+        } else if ch.is_whitespace() {
+            if !last_was_dash {
+                out.push('-');
+                last_was_dash = true;
+            }
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "project".to_string()
+    } else {
+        out
+    }
+}
+
+async fn handle_project_update(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    args: ProjectUpdateArgs,
+) {
+    let input = projects::ProjectUpdate {
+        id: args.id,
+        name: args.name,
+        path: args.path,
+        color: args.color,
+        icon: args.icon,
+        default_cli: args.default_cli,
+        env: args.env,
+        startup_commands: args.startup_commands,
+    };
+    match projects::update(pool, input).await {
+        Ok(project) => {
+            let project = serde_json::to_value(project).expect("Project always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectResult { id, project }).await;
+        }
+        Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
+    }
+}
+
+async fn handle_project_delete(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+) {
+    match projects::delete(pool, &project_id).await {
+        Ok(()) => send(out_tx, &ServerMessage::ProjectVoidResult { id }).await,
+        Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
+    }
+}
+
+async fn handle_project_reorder(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    ids: Vec<String>,
+) {
+    match projects::reorder(pool, &ids).await {
+        Ok(()) => send(out_tx, &ServerMessage::ProjectVoidResult { id }).await,
+        Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
+    }
+}
+
+async fn handle_project_update_workspace_tabs(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    visible: Vec<String>,
+    active: String,
+) {
+    match projects::update_workspace_tabs(pool, &project_id, &visible, &active).await {
+        Ok(()) => send(out_tx, &ServerMessage::ProjectVoidResult { id }).await,
+        Err(error) => send(out_tx, &project_error_to_frame(id, &error)).await,
+    }
+}
+
 fn project_error_to_frame(id: Option<String>, error: &projects::ProjectError) -> ServerMessage {
     let kind = match error {
         projects::ProjectError::NotFound(_) => "not_found",
-        projects::ProjectError::Sqlx(_) => "internal",
+        projects::ProjectError::EmptyName
+        | projects::ProjectError::NameTooLong(_)
+        | projects::ProjectError::NameAlreadyExists(_)
+        | projects::ProjectError::EmptyPath
+        | projects::ProjectError::PathDoesNotExist
+        | projects::ProjectError::PathNotDirectory
+        | projects::ProjectError::PathNotReadable
+        | projects::ProjectError::ReorderMismatch { .. }
+        | projects::ProjectError::ReorderDuplicate(_) => "invalid_args",
+        projects::ProjectError::EnvSerialize(_) | projects::ProjectError::Sqlx(_) => "internal",
     };
     ServerMessage::Error {
         id,
@@ -1215,13 +1444,25 @@ mod tests {
         PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|| Ok(None)))
     }
 
+    /// Materialize a fresh `ProjectsRoot` under a tempdir. Tests that
+    /// don't care about the path can ignore the returned `TempDir` —
+    /// the dir is dropped at scope exit which is fine because no
+    /// background task is using it.
+    fn fresh_projects_root() -> (ProjectsRoot, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("projects");
+        std::fs::create_dir_all(&path).expect("mkdir projects root");
+        (ProjectsRoot::new(path), dir)
+    }
+
     /// Drain everything the dispatcher emitted into a Vec<Value> for
     /// easy assertions. Closes the channel first so the loop terminates.
     async fn drive(pool: &SqlitePool, payload: &str) -> Vec<Value> {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
         let mut conn = fresh_conn(out_tx);
         let planflow = offline_planflow_state();
-        handle_text(&mut conn, pool, &planflow, payload).await;
+        let (projects_root, _guard) = fresh_projects_root();
+        handle_text(&mut conn, pool, &planflow, &projects_root, payload).await;
         drop(conn);
         let mut frames = Vec::new();
         while let Some(raw) = out_rx.recv().await {
@@ -1514,10 +1755,12 @@ mod tests {
         // Drive through handle_text so the dispatcher's routing is
         // exercised end-to-end (typed parse + spawn arm).
         let planflow = offline_planflow_state();
+        let (projects_root, _guard) = fresh_projects_root();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &projects_root,
             r#"{"type":"pty_spawn","id":"spawn-1","command":"/bin/sh","args":["-c","echo HELLO_FROM_CLOUD; sleep 30"],"cols":80,"rows":24}"#,
         )
         .await;
@@ -1581,10 +1824,12 @@ mod tests {
         let mut conn = fresh_conn(out_tx);
 
         let planflow = offline_planflow_state();
+        let (projects_root, _guard) = fresh_projects_root();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &projects_root,
             r#"{"type":"pty_spawn","id":"x","command":"   ","cols":80,"rows":24}"#,
         )
         .await;
@@ -1602,10 +1847,12 @@ mod tests {
         let mut conn = fresh_conn(out_tx);
 
         let planflow = offline_planflow_state();
+        let (projects_root, _guard) = fresh_projects_root();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &projects_root,
             r#"{"type":"pty_spawn","id":"x","command":"/bin/sh","cols":0,"rows":24}"#,
         )
         .await;
@@ -1660,15 +1907,64 @@ mod tests {
         // we ack so the PWA doesn't have to special-case races between
         // its own session teardown and the agent's session removal.
         let planflow = offline_planflow_state();
+        let (projects_root, _guard) = fresh_projects_root();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &projects_root,
             r#"{"type":"pty_unsubscribe","id":"u-1","session_id":"00000000-0000-0000-0000-000000000000"}"#,
         )
         .await;
         let frame = out_rx.recv().await.expect("frame");
         assert!(frame.contains(r#""type":"pty_ack""#), "got {frame}");
+    }
+
+    #[test]
+    fn slugify_project_name_handles_common_cases() {
+        assert_eq!(slugify_project_name("Test Project"), "test-project");
+        assert_eq!(slugify_project_name("  spaced  "), "spaced");
+        assert_eq!(slugify_project_name("a/b\\c?d"), "abcd");
+        assert_eq!(slugify_project_name("ka-bo_om"), "ka-bo_om");
+        assert_eq!(slugify_project_name("   "), "project");
+        // Trailing dashes collapsed away.
+        assert_eq!(slugify_project_name("trail--"), "trail");
+    }
+
+    #[test]
+    fn resolve_create_path_returns_absolute_paths_verbatim() {
+        let (root, _guard) = fresh_projects_root();
+        let resolved = resolve_create_path("ignored", "/srv/projects/explicit", &root)
+            .expect("absolute keeps semantics");
+        assert_eq!(resolved, "/srv/projects/explicit");
+    }
+
+    #[test]
+    fn resolve_create_path_creates_under_root_when_empty() {
+        let (root, _guard) = fresh_projects_root();
+        let resolved =
+            resolve_create_path("Cool App", "", &root).expect("auto-create under root");
+        let prefix = root.as_path().to_string_lossy();
+        assert!(
+            resolved.starts_with(prefix.as_ref()),
+            "expected {resolved} to start with {prefix}",
+        );
+        assert!(
+            std::path::Path::new(&resolved).is_dir(),
+            "expected {resolved} to exist as a directory",
+        );
+    }
+
+    #[test]
+    fn resolve_create_path_uses_relative_segment_under_root() {
+        let (root, _guard) = fresh_projects_root();
+        let resolved = resolve_create_path("ignored", "client-frontends", &root)
+            .expect("relative resolved under root");
+        let expected = root.as_path().join("client-frontends");
+        assert_eq!(
+            std::path::PathBuf::from(&resolved).canonicalize().unwrap(),
+            expected.canonicalize().unwrap(),
+        );
     }
 
     #[cfg(unix)]

@@ -34,6 +34,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
 import { PROJECT_CLI_OPTIONS } from "../../types/cli";
+import { cloudMode } from "../../stores/cloudMode";
 
 export type ProjectEnvVars = Record<string, string>;
 
@@ -257,9 +258,16 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
 
   const envValid = createMemo<boolean>(() => Object.keys(envRowErrors()).length === 0);
 
+  // Cloud mode lets the agent pick the project folder when the user
+  // leaves Folder empty (cloud-agent creates `<projects_root>/<slug>`
+  // on its own filesystem). Local mode keeps the original requirement:
+  // the Tauri command rejects an empty path before reaching SQLite.
+  const folderRequired = (): boolean => !cloudMode();
+
   const valid = createMemo<boolean>(() => {
     if (submitting()) return false;
-    if (name().trim().length === 0 || path().trim().length === 0) return false;
+    if (name().trim().length === 0) return false;
+    if (folderRequired() && path().trim().length === 0) return false;
     if (!envValid()) return false;
     if (isEdit() && !dirty()) return false;
     return true;
@@ -458,7 +466,12 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
             </label>
 
             <div class="ws-apm__field">
-              <span class="ws-apm__field-label">Folder</span>
+              <span class="ws-apm__field-label">
+                Folder
+                <Show when={cloudMode()}>
+                  <span class="ws-apm__field-hint"> · optional in cloud mode</span>
+                </Show>
+              </span>
               <div class="ws-apm__input-wrap">
                 <span class="ws-apm__input-icon" aria-hidden="true">
                   <IconFolder />
@@ -468,21 +481,27 @@ export function AddProjectModal(props: AddProjectModalProps): JSX.Element {
                   type="text"
                   value={path()}
                   onInput={(e) => setPath(e.currentTarget.value)}
-                  placeholder="/Users/you/code/my-project"
+                  placeholder={
+                    cloudMode()
+                      ? "Leave empty to auto-create on cloud, or type an absolute path"
+                      : "/Users/you/code/my-project"
+                  }
                   spellcheck={false}
                   autocomplete="off"
                   disabled={submitting()}
                 />
-                <span class="ws-apm__input-aside">
-                  <button
-                    type="button"
-                    class="ws-apm__btn ws-apm__btn--ghost ws-apm__btn--sm"
-                    onClick={() => void handleBrowse()}
-                    disabled={submitting()}
-                  >
-                    Browse…
-                  </button>
-                </span>
+                <Show when={!cloudMode()}>
+                  <span class="ws-apm__input-aside">
+                    <button
+                      type="button"
+                      class="ws-apm__btn ws-apm__btn--ghost ws-apm__btn--sm"
+                      onClick={() => void handleBrowse()}
+                      disabled={submitting()}
+                    >
+                      Browse…
+                    </button>
+                  </span>
+                </Show>
               </div>
             </div>
 
