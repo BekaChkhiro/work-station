@@ -56,6 +56,7 @@ export type ServerMessage =
   | { type: "project_result"; id?: string; project: WsBridgeProject }
   | { type: "project_switched"; id?: string; project_id: string }
   | { type: "project_void_result"; id?: string }
+  | { type: "pty_list_result"; id?: string; sessions: WsBridgePtySession[] }
   | { type: "settings_result"; id?: string; settings: WsBridgeSettings }
   | { type: "active_project_changed"; project_id?: string | null }
   // T19.14 — live host stats. The cloud-agent broadcasts these every
@@ -117,6 +118,20 @@ export interface WsBridgeProject {
   workspaceTabs?: string[];
   activeWorkspaceTab?: string;
   position: number;
+  createdAt: number;
+}
+
+/** Wire shape of a row in `pty_list_result.sessions`. Mirrors the
+ *  cloud-agent's `PtySessionView` struct (camelCase serde rename).
+ *  All fields are optional-strict — `projectId` and `cwd` may be
+ *  absent on legacy sessions spawned before the sidecar shipped. */
+export interface WsBridgePtySession {
+  sessionId: string;
+  projectId?: string | null;
+  command: string;
+  cwd?: string | null;
+  cols: number;
+  rows: number;
   createdAt: number;
 }
 
@@ -412,6 +427,20 @@ export class WsBridgeClient {
       type: "pty_kill",
       session_id: sessionId,
     });
+  }
+
+  /** Ask the agent for its live PTY registry. Optional `projectId`
+   *  scopes the reply to one project — the desktop uses it on cloud-
+   *  mode boot to find sessions worth resuming instead of spawning a
+   *  fresh PTY into an already-running claude / codex. */
+  async ptyList(projectId?: string | null): Promise<WsBridgePtySession[]> {
+    const payload: Record<string, unknown> = { type: "pty_list" };
+    if (projectId != null) payload.project_id = projectId;
+    const reply = await this.request(payload);
+    if (reply.type !== "pty_list_result") {
+      throw new WsBridgeError("protocol", `expected pty_list_result, got ${reply.type}`);
+    }
+    return reply.sessions;
   }
 
   async ptyScrollback(sessionId: string, offset = 0, limit?: number): Promise<PtyScrollbackChunk> {
@@ -812,6 +841,7 @@ export class WsBridgeClient {
       case "project_result":
       case "project_switched":
       case "project_void_result":
+      case "pty_list_result":
       case "settings_result":
       case "planflow_result": {
         const id = parsed.id;

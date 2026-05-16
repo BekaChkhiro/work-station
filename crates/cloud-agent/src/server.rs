@@ -90,6 +90,7 @@ pub(crate) fn router(
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
     projects_root: dispatch::ProjectsRoot,
+    sessions_meta: dispatch::SessionMetadataStore,
 ) -> Router {
     // Auth lives in a route-scoped middleware so it runs *before*
     // axum's `WebSocketUpgrade` extractor — the latter rejects any
@@ -125,7 +126,8 @@ pub(crate) fn router(
         .layer(Extension(manager))
         .layer(Extension(monitor))
         .layer(Extension(planflow))
-        .layer(Extension(projects_root));
+        .layer(Extension(projects_root))
+        .layer(Extension(sessions_meta));
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -161,7 +163,18 @@ pub async fn spawn(
     // broadcast sender keeps the publisher task alive even when no
     // receivers are connected (idle daemon between PWA sessions).
     let monitor = system_monitor::start(manager.clone());
-    spawn_with_components(token, pool, manager, monitor, planflow, projects_root, addr).await
+    let sessions_meta = dispatch::new_session_metadata_store();
+    spawn_with_components(
+        token,
+        pool,
+        manager,
+        monitor,
+        planflow,
+        projects_root,
+        sessions_meta,
+        addr,
+    )
+    .await
 }
 
 /// Same as [`spawn`] but with caller-supplied `PtyManager` and
@@ -175,9 +188,18 @@ pub(crate) async fn spawn_with_components(
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
     projects_root: dispatch::ProjectsRoot,
+    sessions_meta: dispatch::SessionMetadataStore,
     addr: SocketAddr,
 ) -> std::io::Result<ServerHandle> {
-    let app = router(token, pool, manager, monitor, planflow, projects_root);
+    let app = router(
+        token,
+        pool,
+        manager,
+        monitor,
+        planflow,
+        projects_root,
+        sessions_meta,
+    );
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -254,10 +276,19 @@ async fn ws_handler(
     Extension(monitor): Extension<SystemMonitorHandle>,
     Extension(planflow): Extension<PlanflowState>,
     Extension(projects_root): Extension<dispatch::ProjectsRoot>,
+    Extension(sessions_meta): Extension<dispatch::SessionMetadataStore>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     upgrade.on_upgrade(move |socket| {
-        dispatch::run_connection(socket, manager, pool, monitor, planflow, projects_root)
+        dispatch::run_connection(
+            socket,
+            manager,
+            pool,
+            monitor,
+            planflow,
+            projects_root,
+            sessions_meta,
+        )
     })
 }
 
@@ -485,6 +516,7 @@ mod tests {
         );
         let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
         std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
+        let sessions_meta = dispatch::new_session_metadata_store();
         let handle = spawn_with_components(
             token,
             pool,
@@ -492,6 +524,7 @@ mod tests {
             monitor,
             planflow,
             projects_root,
+            sessions_meta,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )
         .await

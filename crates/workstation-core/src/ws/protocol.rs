@@ -34,6 +34,25 @@ const fn default_scrollback_limit() -> usize {
     DEFAULT_SCROLLBACK_LIMIT
 }
 
+/// One row in `pty_list_result.sessions`. Snapshot of the agent's
+/// session registry plus the metadata sidecar; enough for the
+/// desktop to group sessions by project and decide which one to
+/// resume on relaunch.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtySessionView {
+    pub session_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    /// Unix-epoch seconds when the session was spawned.
+    pub created_at: i64,
+}
+
 /// Wire-side args for `project_create`. Mirrors the desktop's
 /// `commands::projects::CreateProjectArgs` field-by-field so the
 /// frontend can send the same camelCase payload over either transport.
@@ -97,6 +116,7 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "project_delete",
     "project_reorder",
     "project_update_workspace_tabs",
+    "pty_list",
     "settings_get",
     // T18.6 — PlanFlow Tasks bridge variants.
     "planflow_get_me",
@@ -184,6 +204,15 @@ pub enum ClientMessage {
         #[serde(default)]
         id: Option<String>,
         session_id: Uuid,
+    },
+    /// List PTY sessions the agent has alive. Optional `project_id`
+    /// filter scopes the reply to one project; omit it to see
+    /// everything (useful for an admin / orphan cleanup view).
+    PtyList {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        project_id: Option<String>,
     },
     /// T18.4: list every project (mirrors `db::projects::list`).
     ProjectsList {
@@ -437,6 +466,14 @@ pub enum ServerMessage {
     /// (child exited or session was killed). Subscribers can drop
     /// their xterm.js instance.
     PtyExit { session_id: Uuid },
+    /// Response to `pty_list`. Each entry is the minimum the desktop
+    /// needs to decide whether to reattach (session_id, project_id,
+    /// command + cwd snapshots, terminal geometry, created_at).
+    PtyListResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        sessions: Vec<PtySessionView>,
+    },
     /// T18.4: generic, non-PTY error envelope used by the projects /
     /// settings handlers and by the unknown-type dispatch path.
     ///

@@ -71,14 +71,37 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 use workstation_core::pty::{spawn_reader, PtyError, PtyManager, SpawnConfig};
 use workstation_core::ws::protocol::{
-    ClientMessage, ProjectCreateArgs, ProjectUpdateArgs, ServerMessage, SettingsView,
-    KNOWN_CLIENT_TYPES,
+    ClientMessage, ProjectCreateArgs, ProjectUpdateArgs, PtySessionView, ServerMessage,
+    SettingsView, KNOWN_CLIENT_TYPES,
 };
 use workstation_core::ws::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
 use crate::db::{app_settings, projects};
 use crate::fs::{self as cfs, FsError};
 use crate::planflow_proxy::{self, PlanflowState};
+
+/// Per-session metadata the agent stashes alongside the live PTY so
+/// `pty_list` can hand the desktop the minimum needed to decide which
+/// session to resume on relaunch. The map is daemon-scoped and shared
+/// (Arc) across every WS connection; entries land at spawn-time and
+/// are reaped on read when the underlying [`PtyManager`] no longer
+/// has the session (child exited / SIGKILL / disconnect cleanup).
+#[derive(Debug, Clone)]
+pub struct SessionMetadata {
+    pub project_id: Option<String>,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub created_at: i64,
+}
+
+pub type SessionMetadataStore = Arc<tokio::sync::RwLock<HashMap<Uuid, SessionMetadata>>>;
+
+#[must_use]
+pub fn new_session_metadata_store() -> SessionMetadataStore {
+    Arc::new(tokio::sync::RwLock::new(HashMap::new()))
+}
 
 /// Newtype around the cloud-agent's projects root path so axum's
 /// `Extension` extractor can resolve it by type. Cloning is an Arc
@@ -174,6 +197,7 @@ pub async fn run_connection(
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
     projects_root: ProjectsRoot,
+    sessions_meta: SessionMetadataStore,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTBOUND_CHANNEL_CAPACITY);
@@ -202,7 +226,15 @@ pub async fn run_connection(
         };
         match msg {
             Message::Text(payload) => {
-                handle_text(&mut conn, &pool, &planflow, &projects_root, &payload).await;
+                handle_text(
+                    &mut conn,
+                    &pool,
+                    &planflow,
+                    &projects_root,
+                    &sessions_meta,
+                    &payload,
+                )
+                .await;
             }
             Message::Binary(_) => {
                 send_error(
@@ -260,6 +292,7 @@ async fn handle_text(
     pool: &SqlitePool,
     planflow: &PlanflowState,
     projects_root: &ProjectsRoot,
+    sessions_meta: &SessionMetadataStore,
     payload: &str,
 ) {
     let value: serde_json::Value = match serde_json::from_str(payload) {
@@ -312,11 +345,11 @@ async fn handle_text(
         "settings_get" | "projects_list" | "project_get" | "project_switch" | "project_create"
         | "project_update" | "project_delete" | "project_reorder"
         | "project_update_workspace_tabs" | "pty_spawn" | "pty_write" | "pty_resize"
-        | "pty_kill" | "pty_scrollback" | "pty_subscribe" | "pty_unsubscribe" | "fs_list"
-        | "fs_read" | "fs_write" | "fs_delete" | "planflow_get_me" | "planflow_list_projects"
-        | "planflow_list_tasks" | "planflow_list_active_work" | "planflow_list_comments"
-        | "planflow_create_comment" | "planflow_start_work" | "planflow_stop_work"
-        | "planflow_update_task_status" => {
+        | "pty_kill" | "pty_scrollback" | "pty_subscribe" | "pty_unsubscribe" | "pty_list"
+        | "fs_list" | "fs_read" | "fs_write" | "fs_delete" | "planflow_get_me"
+        | "planflow_list_projects" | "planflow_list_tasks" | "planflow_list_active_work"
+        | "planflow_list_comments" | "planflow_create_comment" | "planflow_start_work"
+        | "planflow_stop_work" | "planflow_update_task_status" => {
             match serde_json::from_value::<ClientMessage>(value) {
                 Ok(msg) => msg,
                 Err(error) => {
@@ -343,7 +376,7 @@ async fn handle_text(
         }
     };
 
-    dispatch_typed(conn, pool, planflow, projects_root, typed).await;
+    dispatch_typed(conn, pool, planflow, projects_root, sessions_meta, typed).await;
 }
 
 /// Route a parsed [`ClientMessage`] to its handler. Split out of
@@ -362,6 +395,7 @@ async fn dispatch_typed(
     pool: &SqlitePool,
     planflow: &PlanflowState,
     projects_root: &ProjectsRoot,
+    sessions_meta: &SessionMetadataStore,
     typed: ClientMessage,
 ) {
     match typed {
@@ -421,7 +455,18 @@ async fn dispatch_typed(
                 Some(value) => Some(PathBuf::from(value)),
                 None => active_project_cwd(pool).await,
             };
-            handle_spawn(conn, id, command, args, resolved, env, cols, rows).await;
+            handle_spawn(
+                conn,
+                sessions_meta,
+                id,
+                command,
+                args,
+                resolved,
+                env,
+                cols,
+                rows,
+            )
+            .await;
         }
         ClientMessage::PtyWrite {
             id,
@@ -451,6 +496,9 @@ async fn dispatch_typed(
         }
         ClientMessage::PtySubscribe { id, session_id } => {
             handle_subscribe(conn, id, session_id).await;
+        }
+        ClientMessage::PtyList { id, project_id } => {
+            handle_pty_list(&conn.out_tx, &conn.manager, sessions_meta, id, project_id).await;
         }
         ClientMessage::PtyUnsubscribe { id, session_id } => {
             conn.unsubscribe(session_id);
@@ -879,6 +927,7 @@ async fn active_project_cwd(pool: &SqlitePool) -> Option<PathBuf> {
 #[allow(clippy::too_many_arguments)]
 async fn handle_spawn(
     conn: &mut Connection,
+    sessions_meta: &SessionMetadataStore,
     id: Option<String>,
     command: String,
     args: Vec<String>,
@@ -908,6 +957,16 @@ async fn handle_spawn(
         return;
     }
 
+    // Snapshot the metadata we want to remember for pty_list before we
+    // hand `env` off to the spawn — the desktop sends WS_PROJECT_ID on
+    // every spawn, which is how we group orphaned sessions by project
+    // when the user reopens the app.
+    let project_id = env.get("WS_PROJECT_ID").cloned();
+    let command_meta = command.clone();
+    let cwd_meta = cwd
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+
     let manager = conn.manager.clone();
     let config = SpawnConfig {
         command,
@@ -935,6 +994,23 @@ async fn handle_spawn(
 
     match spawn_result {
         Ok(Ok(session_id)) => {
+            // Persist the sidecar entry so `pty_list` can advertise
+            // this session to a future relaunch even after the
+            // spawning connection has gone away.
+            {
+                let mut meta = sessions_meta.write().await;
+                meta.insert(
+                    session_id,
+                    SessionMetadata {
+                        project_id,
+                        command: command_meta,
+                        cwd: cwd_meta,
+                        cols,
+                        rows,
+                        created_at: epoch_seconds(),
+                    },
+                );
+            }
             // Auto-subscribe the spawning client so the first frames
             // (shell banner, prompt) reach it without a round-trip.
             conn.subscribe_to(session_id);
@@ -952,6 +1028,53 @@ async fn handle_spawn(
             .await;
         }
     }
+}
+
+fn epoch_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// Reply to `pty_list`. Walks the live `PtyManager` registry, joins
+/// against the metadata sidecar, drops any stale sidecar entries whose
+/// session is no longer alive (child exited / killed). Filters the
+/// result by `project_id` when the client passed one — same shape the
+/// desktop uses on relaunch to find sessions for the project it's
+/// about to mount.
+async fn handle_pty_list(
+    out_tx: &mpsc::Sender<String>,
+    manager: &PtyManager,
+    sessions_meta: &SessionMetadataStore,
+    id: Option<String>,
+    project_id_filter: Option<String>,
+) {
+    let live: std::collections::HashSet<Uuid> = manager.list().into_iter().collect();
+    let mut meta = sessions_meta.write().await;
+    // Purge sidecar rows whose session is gone.
+    meta.retain(|session_id, _| live.contains(session_id));
+
+    let mut sessions: Vec<PtySessionView> = meta
+        .iter()
+        .filter(|(_, info)| match &project_id_filter {
+            Some(want) => info.project_id.as_ref() == Some(want),
+            None => true,
+        })
+        .map(|(session_id, info)| PtySessionView {
+            session_id: *session_id,
+            project_id: info.project_id.clone(),
+            command: info.command.clone(),
+            cwd: info.cwd.clone(),
+            cols: info.cols,
+            rows: info.rows,
+            created_at: info.created_at,
+        })
+        .collect();
+    // Newest first — the typical reattach UI picks the most recent.
+    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    send(out_tx, &ServerMessage::PtyListResult { id, sessions }).await;
 }
 
 async fn handle_write(conn: &Connection, id: Option<String>, session_id: Uuid, data_b64: &str) {
@@ -1462,7 +1585,16 @@ mod tests {
         let mut conn = fresh_conn(out_tx);
         let planflow = offline_planflow_state();
         let (projects_root, _guard) = fresh_projects_root();
-        handle_text(&mut conn, pool, &planflow, &projects_root, payload).await;
+        let sessions_meta = new_session_metadata_store();
+        handle_text(
+            &mut conn,
+            pool,
+            &planflow,
+            &projects_root,
+            &sessions_meta,
+            payload,
+        )
+        .await;
         drop(conn);
         let mut frames = Vec::new();
         while let Some(raw) = out_rx.recv().await {
@@ -1756,11 +1888,13 @@ mod tests {
         // exercised end-to-end (typed parse + spawn arm).
         let planflow = offline_planflow_state();
         let (projects_root, _guard) = fresh_projects_root();
+        let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
             &projects_root,
+            &sessions_meta,
             r#"{"type":"pty_spawn","id":"spawn-1","command":"/bin/sh","args":["-c","echo HELLO_FROM_CLOUD; sleep 30"],"cols":80,"rows":24}"#,
         )
         .await;
@@ -1825,11 +1959,13 @@ mod tests {
 
         let planflow = offline_planflow_state();
         let (projects_root, _guard) = fresh_projects_root();
+        let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
             &projects_root,
+            &sessions_meta,
             r#"{"type":"pty_spawn","id":"x","command":"   ","cols":80,"rows":24}"#,
         )
         .await;
@@ -1848,11 +1984,13 @@ mod tests {
 
         let planflow = offline_planflow_state();
         let (projects_root, _guard) = fresh_projects_root();
+        let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
             &projects_root,
+            &sessions_meta,
             r#"{"type":"pty_spawn","id":"x","command":"/bin/sh","cols":0,"rows":24}"#,
         )
         .await;
@@ -1908,11 +2046,13 @@ mod tests {
         // its own session teardown and the agent's session removal.
         let planflow = offline_planflow_state();
         let (projects_root, _guard) = fresh_projects_root();
+        let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
             &projects_root,
+            &sessions_meta,
             r#"{"type":"pty_unsubscribe","id":"u-1","session_id":"00000000-0000-0000-0000-000000000000"}"#,
         )
         .await;

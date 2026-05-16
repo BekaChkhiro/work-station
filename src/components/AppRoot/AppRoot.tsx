@@ -51,7 +51,7 @@ import {
 import { getSetting, setSetting } from "../../db/settings";
 import { pickProjectFolder } from "../../ipc/picker";
 import { cliListAvailable } from "../../ipc/cli";
-import { ptyKill, ptySpawn, ptySubscribe, ptyWrite } from "../../ipc/pty";
+import { ptyKill, ptyListCloud, ptySpawn, ptySubscribe, ptyWrite } from "../../ipc/pty";
 import { setThemeMode, themeMode, type ThemeMode } from "../../stores/theme";
 import {
   activeProjectId,
@@ -420,6 +420,37 @@ export function AppRoot(): JSX.Element {
     if (restoredPanes[0]) setFocusedSession(projectId, restoredPanes[0].sessionId);
   };
 
+  // Cloud-mode reattach: pull any live PTY sessions the agent kept
+  // alive (we deliberately skip ptyKill on app close in cloud mode —
+  // see onCleanup), pick the newest one for the project, and drop
+  // it into the layout as a single pane. `Terminal` subscribes via
+  // `ptySubscribe` on mount so xterm starts streaming output and
+  // replays the scrollback the agent buffered while we were away.
+  //
+  // Silent failure is intentional: no sessions / agent unreachable /
+  // protocol error all degrade to "auto-launch a fresh CLI" via the
+  // T7.4 effect, which is the same fallback a brand-new project
+  // would hit anyway.
+  const restoreCloudSessions = async (projectId: string): Promise<void> => {
+    try {
+      const sessions = await ptyListCloud(projectId);
+      if (sessions.length === 0) return;
+      // `pty_list_result.sessions` is already sorted newest-first by
+      // the agent; reusing index 0 keeps the contract simple.
+      const newest = sessions[0];
+      if (!newest) return;
+      setLayout(projectId, paneNode(newest.sessionId));
+      setFocusedSession(projectId, newest.sessionId);
+      trackSession(projectId, newest.sessionId);
+      // Treat the reattached session as if the auto-launch already
+      // happened so the T7.4 effect doesn't try to spawn a duplicate
+      // CLI alongside the one we just reattached to.
+      autoLaunchedProjects.add(projectId);
+    } catch (err) {
+      console.warn("[cloud-reattach] ptyList failed; falling back to auto-launch:", err);
+    }
+  };
+
   const registerProject = (persisted: Project): void => {
     projectPaths[persisted.id] = persisted.path;
     projectClis[persisted.id] = persisted.defaultCli;
@@ -553,6 +584,16 @@ export function AppRoot(): JSX.Element {
               // Prevent auto-launch (T7.4) from spawning a duplicate first pane.
               autoLaunchedProjects.add(p.id);
             }
+          } else {
+            // Cloud mode: ask the agent for any PTY sessions left
+            // alive from a previous run of this app and reattach to
+            // them instead of starting a fresh shell. This is what
+            // turns "close app" from "claude dies" into "claude is
+            // still here when I come back". `restoreCloudSessions`
+            // is a no-op when the agent reports no sessions for the
+            // project — the auto-launch effect (T7.4) will take over
+            // and spawn the project's default CLI as usual.
+            await restoreCloudSessions(p.id);
           }
         }
         // T19.17 — record the mode the persister/session maps now point at.
@@ -606,8 +647,17 @@ export function AppRoot(): JSX.Element {
       void closeAllPlanflowChatRuntimes();
       // Best-effort — if the window is closing the OS will reap them
       // anyway, but explicit kills help during HMR-style remounts.
-      for (const list of Object.values(sessionsByProject)) {
-        for (const id of list) void ptyKill(id);
+      //
+      // Cloud mode is the exception: leaving the agent's PTY sessions
+      // alive across an app close is exactly the feature — the user
+      // wants to relaunch later and find their claude / codex still
+      // running. The boot path queries `pty_list` and reattaches.
+      // Killing here would silently destroy the in-progress session
+      // every time the user quit, which is the bug we're fixing.
+      if (!cloudMode()) {
+        for (const list of Object.values(sessionsByProject)) {
+          for (const id of list) void ptyKill(id);
+        }
       }
       // T11.1 — flush any pending tab persist windows. We deliberately do
       // not await the writes here: HMR remounts shouldn't block, and a
@@ -1210,10 +1260,6 @@ export function AppRoot(): JSX.Element {
     // layout in parallel. Projects are independent — there's no shared
     // state between their PTY spawns — so serialising the loop just
     // added latency proportional to N projects.
-    //
-    // Cloud mode skips both the session row (the project lives in the
-    // cloud-agent's DB, not this desktop's) and the layout restore
-    // (cloud PTYs die with the WS link — there's nothing to bring back).
     if (next === "local") {
       await Promise.all(
         // eslint-disable-next-line solid/reactivity -- one-shot async restore, not a reactive subscription
@@ -1238,6 +1284,11 @@ export function AppRoot(): JSX.Element {
           }
         }),
       );
+    } else {
+      // Cloud mode: same reattach pass as boot — if the agent kept
+      // a PTY alive across the local→cloud toggle, surface it here
+      // instead of spawning a fresh CLI.
+      await Promise.all(nextProjects.map((project) => restoreCloudSessions(project.id)));
     }
   };
 

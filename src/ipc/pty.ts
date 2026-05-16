@@ -132,6 +132,18 @@ export interface PtyResizeArgs {
  * resize observer can fire unconditionally in vite preview / stress
  * harnesses. Cloud mode always issues the resize over wsBridge.
  */
+/** Cloud-only: ask the cloud-agent for its live PTY registry. Returns
+ *  an empty list in local mode (the desktop's Tauri PTY layer has no
+ *  metadata sidecar today, so reattach UI is a cloud-mode-only flow). */
+export async function ptyListCloud(
+  projectId?: string | null,
+): Promise<import("../integrations/wsBridge/client").WsBridgePtySession[]> {
+  return routeIpc(
+    async () => [],
+    async (client) => client.ptyList(projectId),
+  );
+}
+
 export async function ptyResize(sessionId: string, cols: number, rows: number): Promise<void> {
   return routeIpc(
     async () => {
