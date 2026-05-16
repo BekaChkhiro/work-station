@@ -35,6 +35,13 @@ export interface RendererPlanFlowClientOptions {
   defaultTimeoutMs?: number;
   defaultRetry?: RetryOptions;
   fetchImpl?: typeof fetch;
+  /** T19.35 — Work Station project UUID that scopes this client. The
+   *  routed `planflow_*` WS calls (Start, Status, Comments, GetMe, …)
+   *  ship this as `cloud_project_id` so the cloud-agent's per-project
+   *  token resolver (T19.34) picks the right PlanFlow account for the
+   *  linked project. Unscoped views (NotificationsBell, …) leave it
+   *  unset and fall back to the agent's global token. */
+  cloudProjectId?: string;
 }
 
 /** Create a PlanFlowClient wired to the renderer's credential store and the
@@ -65,5 +72,6 @@ export function createRendererPlanFlowClient(
     // knowledge, list-changes, list-projects, get-branch-name) keep using
     // the desktop's HTTP path regardless.
     routeViaCloudAgent: true,
+    cloudProjectId: options.cloudProjectId,
   });
 }

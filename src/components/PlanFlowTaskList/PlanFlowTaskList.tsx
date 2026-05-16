@@ -169,7 +169,13 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
   // Single client instance for this view. The factory wraps every call
   // in the T11.8 reauth guard. We deliberately don't enable the cache
   // layer here so a manual Retry always hits the network.
-  const client = createRendererPlanFlowClient();
+  // T19.35 — scope the client to the workspace project so routed
+  // `planflow_*` WS calls ship `cloud_project_id` and the cloud-agent's
+  // per-project token resolver (T19.34) picks the right account. The
+  // parent `<Show when={link()}>` remounts this component when the
+  // workspace projectId changes, so the captured value is always live.
+  // eslint-disable-next-line solid/reactivity
+  const client = createRendererPlanFlowClient({ cloudProjectId: props.workspaceProjectId });
   const [reloadKey, setReloadKey] = createSignal(0);
 
   const [tasks, { refetch }] = createResource(
@@ -283,7 +289,13 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
         </div>
         <Show
           when={selectedTaskId() != null}
-          fallback={<ActiveWorkPanel externalId={props.externalId} onJumpToTask={handleJump} />}
+          fallback={
+            <ActiveWorkPanel
+              externalId={props.externalId}
+              workspaceProjectId={props.workspaceProjectId}
+              onJumpToTask={handleJump}
+            />
+          }
         >
           <TaskDetailPanel
             client={client}
@@ -296,7 +308,11 @@ function LinkedTaskList(props: LinkedTaskListProps): JSX.Element {
           />
         </Show>
       </div>
-      <ActivityFeed externalId={props.externalId} onJumpToTask={handleJump} />
+      <ActivityFeed
+        externalId={props.externalId}
+        workspaceProjectId={props.workspaceProjectId}
+        onJumpToTask={handleJump}
+      />
       <PlanFlowChat projectId={props.workspaceProjectId} externalId={props.externalId} />
     </div>
   );
