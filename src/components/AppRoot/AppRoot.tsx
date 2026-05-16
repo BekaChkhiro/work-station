@@ -1207,11 +1207,18 @@ export function AppRoot(): JSX.Element {
       // Sending both in one call lets the CLI process \r before echoing the
       // text characters — the submit fires on an empty buffer and the prompt
       // text ends up as stray output rather than a submitted command.
+      // 500ms between prompt text and CR. The local-PTY default of
+      // 150ms was just enough for Tauri's in-process IPC, but cloud
+      // mode routes each ptyWrite through WS + Cloudflare Tunnel —
+      // claude's Ink TUI hasn't finished consuming the prompt chars by
+      // the time CR lands, so the submit fires on a partial buffer
+      // (looked to the user like "Start did nothing — I had to press
+      // Enter myself").
       void ptyWrite(sessionId, encoder.encode(prompt))
         .then(
           () =>
             new Promise<void>((resolve) => {
-              window.setTimeout(resolve, 150);
+              window.setTimeout(resolve, 500);
             }),
         )
         .then(() => ptyWrite(sessionId, encoder.encode("\r")))
