@@ -112,6 +112,23 @@ const defaultShell = (): string => {
   return isMac ? "/bin/zsh" : "/bin/bash";
 };
 
+// Build a PaneCliOption for "system default shell". Local mode hands
+// the spawn an absolute path on this Mac; cloud mode sends a bare
+// command name that resolves on the remote host's PATH. The remote
+// might not have zsh (Ubuntu doesn't by default), so we always pick
+// `bash` in cloud mode — universally installed.
+const cloudDefaultShellOption = (): PaneCliOption => {
+  if (cloudMode()) {
+    return { name: "bash", path: "bash", version: null };
+  }
+  const shell = defaultShell();
+  return {
+    name: shell.split("/").pop() ?? "shell",
+    path: shell,
+    version: null,
+  };
+};
+
 // Run shells as a login shell on Unix so `~/.zprofile` / `~/.bash_profile`
 // load (Homebrew PATH, asdf, nvm, mise, etc.). When the .app is launched
 // from Finder, the parent process gets a minimal PATH and PATH-discovered
@@ -378,11 +395,7 @@ export function AppRoot(): JSX.Element {
     const panes = collectPanes(savedLayout);
     if (panes.length === 0) return;
 
-    const effectiveCli: PaneCliOption = cli ?? {
-      name: defaultShell().split("/").pop() ?? "shell",
-      path: defaultShell(),
-      version: null,
-    };
+    const effectiveCli: PaneCliOption = cli ?? cloudDefaultShellOption();
 
     const mapping = new Map<string, string>();
     try {
@@ -788,8 +801,15 @@ export function AppRoot(): JSX.Element {
     const env = projectEnvs[projectId] ?? {};
     const projectStartups = projectStartupCommands[projectId] ?? [];
     const combined = [...projectStartups, ...extraStartupCommands];
+    // Local mode hands the cloud-agent / Tauri spawn the absolute path
+    // resolved by `cliListAvailable` on this Mac. That path is
+    // meaningless on the cloud-agent's filesystem, so cloud mode falls
+    // back to the bare CLI name and lets the remote host's PATH
+    // resolve it. Names match what the user actually installed there
+    // (`claude`, `codex`, `bash`, `zsh`, …).
+    const command = cloudMode() ? cli.name : cli.path;
     const resp = await ptySpawn({
-      command: cli.path,
+      command,
       args: [],
       cwd: cwd && cwd.length > 0 ? cwd : undefined,
       env: { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: cli.name },
@@ -1076,13 +1096,7 @@ export function AppRoot(): JSX.Element {
     if (missing) {
       autoLaunchedProjects.add(projectId);
       setCliNotFoundWarnings((prev) => ({ ...prev, [projectId]: missing }));
-      const shell = defaultShell();
-      const fallback: PaneCliOption = {
-        name: shell.split("/").pop() ?? "shell",
-        path: shell,
-        version: null,
-      };
-      void handleLaunchFirstCli(projectId, fallback);
+      void handleLaunchFirstCli(projectId, cloudDefaultShellOption());
     }
   });
 
