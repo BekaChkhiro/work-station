@@ -335,17 +335,18 @@ async fn handle_text(
             projects_bridge::handle_project_switch(&conn.out_tx, pool, events, id, project_id)
                 .await;
         }
-        // Project write paths are wired on the cloud-agent side (the
-        // desktop renderer talks to it via `WsBridgeClient` for cloud
-        // mode). The desktop's own WS bridge only serves the mobile
-        // PWA, which is read-only on projects today — surface a
-        // typed `unsupported` so a future PWA write path fails loudly
-        // rather than silently no-oping.
+        // Project write paths and pty_list are wired on the cloud-agent
+        // side (the desktop renderer talks to it via `WsBridgeClient`
+        // for cloud mode). The desktop's own WS bridge only serves the
+        // mobile PWA, which doesn't use these yet — surface a typed
+        // `unsupported` so a future PWA write path fails loudly rather
+        // than silently no-oping.
         ClientMessage::ProjectCreate { id, .. }
         | ClientMessage::ProjectUpdate { id, .. }
         | ClientMessage::ProjectDelete { id, .. }
         | ClientMessage::ProjectReorder { id, .. }
-        | ClientMessage::ProjectUpdateWorkspaceTabs { id, .. } => {
+        | ClientMessage::ProjectUpdateWorkspaceTabs { id, .. }
+        | ClientMessage::PtyList { id, .. } => {
             send(
                 &conn.out_tx,
                 &ServerMessage::Error {
