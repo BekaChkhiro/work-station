@@ -128,6 +128,9 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "planflow_start_work",
     "planflow_stop_work",
     "planflow_update_task_status",
+    // T19.34 — drop a per-project PlanFlow API token on the cloud-agent
+    // so each linked Work Station project can use its own credentials.
+    "planflow_token_set",
     // T18.16 — PlanFlow Chat on mobile.
     "planflow_chat_send",
     "planflow_chat_history",
@@ -287,15 +290,29 @@ pub enum ClientMessage {
     // upstream payload (envelope stripped); failures use
     // `planflow_error` with a stable `kind`. The mobile side never
     // sees the user's PlanFlow token directly — auth is the WS bearer.
+    //
+    // T19.34: each variant carries an optional `cloud_project_id` —
+    // the Work Station project UUID the call is scoped to. When set,
+    // the cloud-agent resolves the PlanFlow API token from the
+    // per-project keychain file (`<state_dir>/planflow_tokens/<id>`);
+    // when absent or no such file, the global token (config / env)
+    // applies. This is what lets two linked PlanFlow accounts coexist
+    // on one cloud-agent. Names the cloud (Work Station) project id
+    // explicitly so it doesn't collide with the PlanFlow `project_id`
+    // PlanflowListTasks etc. already use as the upstream identifier.
     PlanflowGetMe {
         #[serde(default)]
         id: Option<String>,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowListProjects {
         #[serde(default)]
         id: Option<String>,
         #[serde(default)]
         organization_id: Option<String>,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowListTasks {
         #[serde(default)]
@@ -303,17 +320,23 @@ pub enum ClientMessage {
         project_id: String,
         #[serde(default)]
         status: Option<String>,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowListActiveWork {
         #[serde(default)]
         id: Option<String>,
         project_id: String,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowListComments {
         #[serde(default)]
         id: Option<String>,
         project_id: String,
         task_id: String,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowCreateComment {
         #[serde(default)]
@@ -321,17 +344,23 @@ pub enum ClientMessage {
         project_id: String,
         task_id: String,
         body: String,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowStartWork {
         #[serde(default)]
         id: Option<String>,
         project_id: String,
         task_id: String,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowStopWork {
         #[serde(default)]
         id: Option<String>,
         project_id: String,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
     },
     PlanflowUpdateTaskStatus {
         #[serde(default)]
@@ -342,6 +371,18 @@ pub enum ClientMessage {
         /// The bridge forwards the string as-is; the PlanFlow API
         /// enforces the enum.
         status: String,
+        #[serde(default)]
+        cloud_project_id: Option<String>,
+    },
+    // T19.34: write (or clear) a per-project PlanFlow API token in the
+    // cloud-agent's keychain dir. An empty `token` removes the file so
+    // the next planflow_* call for this project falls back to the
+    // global config/env credential.
+    PlanflowTokenSet {
+        #[serde(default)]
+        id: Option<String>,
+        cloud_project_id: String,
+        token: String,
     },
 
     // ---- T18.16: PlanFlow Chat on mobile ----

@@ -317,7 +317,7 @@ mod tests {
         // `planflow_proxy::tests` suite against a wiremock server.
         let planflow = PlanflowState::for_test(
             "http://127.0.0.1:1",
-            std::sync::Arc::new(|| Ok(None)),
+            std::sync::Arc::new(|_pid| Ok(None)),
         );
         let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
         std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
@@ -512,7 +512,7 @@ mod tests {
             system_monitor::start_with_interval(manager.clone(), Duration::from_millis(50));
         let planflow = PlanflowState::for_test(
             "http://127.0.0.1:1",
-            std::sync::Arc::new(|| Ok(None)),
+            std::sync::Arc::new(|_pid| Ok(None)),
         );
         let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
         std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");

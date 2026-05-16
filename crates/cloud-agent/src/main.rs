@@ -122,7 +122,12 @@ async fn run(config: Config) -> ExitCode {
     // `cached_org_id` survives across PWA reconnects. Cloned per
     // WebSocket connection via the axum `Extension` layer (cheap; the
     // reqwest client + caches are all Arc-shared internally).
-    let planflow = planflow_proxy::PlanflowState::new(config.planflow_api_token.clone());
+    // T19.34 — passes `state_dir` so the proxy can resolve per-project
+    // tokens from `<state_dir>/planflow_tokens/<cloud_project_id>`.
+    let planflow = planflow_proxy::PlanflowState::new(
+        config.planflow_api_token.clone(),
+        config.state_dir.clone(),
+    );
 
     // Workspace root for cloud-mode "New Project" flows. Auto-created
     // here so the first create-with-empty-path request doesn't race a
