@@ -19,6 +19,8 @@ export type {
   SystemStatsSnapshot,
   WsBridgeClientOptions,
   WsBridgeProject,
+  WsBridgeProjectLink,
+  WsBridgeProjectLinkSetArgs,
   WsBridgeSettings,
 } from "./client";
 export { decodeBase64, encodeBase64 } from "./base64";
