@@ -1175,8 +1175,16 @@ export function AppRoot(): JSX.Element {
   // MAX_WAIT_MS is a hard ceiling so we always write, even if the CLI
   // never fully goes idle.
   function writePromptWhenReady(sessionId: string, prompt: string): void {
+    // Idle-detection lets fast CLIs (claude, codex) get the prompt as
+    // soon as their TUI settles — typically ~1s after spawn. The hard
+    // ceiling guarantees a write even when the CLI keeps sending
+    // periodic redraws (cursor blink, status ticker) so idle never
+    // actually quiesces. Cloud mode forwards frames in coarser batches
+    // than a local PTY, so 2.5s is plenty for either transport — the
+    // pre-T19.x default of 10s left the user staring at an idle pane
+    // wondering whether Start was even wired up.
     const IDLE_MS = 600;
-    const MAX_WAIT_MS = 10_000;
+    const MAX_WAIT_MS = 2_500;
 
     // Shared mutable state for the timers and subscription reference so
     // both the chunk handler and the flush function can reach them.
