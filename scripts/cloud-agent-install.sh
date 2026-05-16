@@ -178,7 +178,13 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
+# MemoryDenyWriteExecute is intentionally NOT set. The cloud-agent
+# itself doesn't need W+X mmap, but it spawns PTY children for the
+# user's CLI sessions (Claude Code, Codex, Node-based REPLs) which
+# rely on V8's JIT — that JIT needs W+X pages and crashes with an
+# ENOMEM-shaped V8 fatal if the flag is inherited. Without spawning
+# these tools the agent has nothing to do, so keeping the flag would
+# break the primary use case.
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
