@@ -35,6 +35,17 @@
 //! load is lazy per request, so the next call after a rotation picks
 //! up the new value without a daemon restart.
 //!
+//! ### Per-project tokens (T19.34)
+//!
+//! When the WS request carries `cloud_project_id` the proxy first
+//! consults `<state_dir>/planflow_tokens/<project_id>` — a 0600
+//! keychain-style file written by [`handle_token_set`] from the
+//! frontend "Connect" flow. This lets two linked Work Station projects
+//! authenticate against two different PlanFlow accounts on the same
+//! cloud-agent. Missing/empty per-project file falls through to the
+//! daemon-wide env/config token, so existing single-tenant setups
+//! keep working with no migration.
+//!
 //! ## Scope
 //!
 //! Only the read/write proxy variants land here:
@@ -45,6 +56,7 @@
 //! desktop-only — those route PWA messages into a live PTY on the
 //! desktop, and the cloud-agent has no analogous side channel.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,7 +86,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Token loader function. Boxed so tests can swap in a synchronous
 /// stub without touching the environment.
-pub type TokenLoader = Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync + 'static>;
+///
+/// The argument is the optional Work Station `cloud_project_id` the
+/// request was scoped to. T19.34's production loader uses it to pick
+/// a per-project token file before falling back to env/config.
+pub type TokenLoader =
+    Arc<dyn Fn(Option<&str>) -> Result<Option<String>, String> + Send + Sync + 'static>;
 
 /// Shared state for the PlanFlow proxy. One instance per daemon, cloned
 /// cheaply (`reqwest::Client` is internally Arc-shared, the loader and
@@ -85,6 +102,10 @@ pub struct PlanflowState {
     client: reqwest::Client,
     base_url: String,
     token_loader: TokenLoader,
+    /// Directory holding per-project keychain files written by
+    /// [`handle_token_set`]. `None` in test setups that don't want the
+    /// per-project path to touch the filesystem; `Some` in production.
+    tokens_dir: Option<Arc<PathBuf>>,
     /// Cached "first organization id" so the auto-resolve path in
     /// `handle_list_projects` doesn't pay a `/organizations` round-trip
     /// on every Tasks-tab load. Cleared on bridge boot — orgs rarely
@@ -104,11 +125,14 @@ impl std::fmt::Debug for PlanflowState {
 impl PlanflowState {
     /// Build the proxy state for production use.
     ///
-    /// `config_token` is the value pinned in `config.toml`. The loader
-    /// returned by [`make_env_token_loader`] reads `PLANFLOW_API_TOKEN`
-    /// first and falls back to the config value, so a rotation via
-    /// systemd env-override picks up without a config edit.
-    pub fn new(config_token: Option<String>) -> Self {
+    /// `config_token` is the value pinned in `config.toml`. The
+    /// production loader checks (1) the per-project keychain file at
+    /// `<state_dir>/planflow_tokens/<cloud_project_id>`, (2) the
+    /// `PLANFLOW_API_TOKEN` env var, and (3) the config value, in that
+    /// order — so a rotation via systemd env-override picks up without
+    /// a config edit, and a per-project token wins over the daemon-wide
+    /// default for the projects that have one.
+    pub fn new(config_token: Option<String>, state_dir: PathBuf) -> Self {
         let base_url = std::env::var(BASE_URL_ENV)
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -118,16 +142,20 @@ impl PlanflowState {
             .user_agent("work-station-cloud-agent")
             .build()
             .expect("reqwest::Client::builder must succeed with default rustls config");
+        let tokens_dir = Arc::new(tokens_dir_path(&state_dir));
         Self {
             client,
             base_url: trim_trailing_slash(&base_url),
-            token_loader: make_env_token_loader(config_token),
+            token_loader: make_token_loader(config_token, Some(tokens_dir.clone())),
+            tokens_dir: Some(tokens_dir),
             cached_org_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// Test seam: build a state pointed at a custom base URL (typically
-    /// a wiremock instance) with an arbitrary token loader.
+    /// a wiremock instance) with an arbitrary token loader. `tokens_dir`
+    /// is `None` so `handle_token_set` short-circuits — callers that
+    /// need to exercise the keychain path use [`Self::for_test_with_dir`].
     #[cfg(test)]
     pub fn for_test(base_url: impl Into<String>, token_loader: TokenLoader) -> Self {
         let client = reqwest::Client::builder()
@@ -138,20 +166,56 @@ impl PlanflowState {
             client,
             base_url: trim_trailing_slash(&base_url.into()),
             token_loader,
+            tokens_dir: None,
+            cached_org_id: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Test seam: build a state with a real `tokens_dir` so
+    /// `handle_token_set` and the per-project lookup can be exercised
+    /// end-to-end. The loader is the production loader so the test
+    /// covers env/config fallback as well.
+    #[cfg(test)]
+    pub fn for_test_with_dir(
+        base_url: impl Into<String>,
+        config_token: Option<String>,
+        state_dir: PathBuf,
+    ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("reqwest test client");
+        let tokens_dir = Arc::new(tokens_dir_path(&state_dir));
+        Self {
+            client,
+            base_url: trim_trailing_slash(&base_url.into()),
+            token_loader: make_token_loader(config_token, Some(tokens_dir.clone())),
+            tokens_dir: Some(tokens_dir),
             cached_org_id: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
 
-/// Build the production token loader. Reads `PLANFLOW_API_TOKEN` first;
-/// falls back to the config-pinned value on each call. Returning a
-/// closure (rather than caching the result) means the env var is
-/// re-read per request, so a `systemctl set-environment` + daemon
-/// restart cycle isn't required for token rotation — the operator can
-/// drop a new env value into the unit file's `EnvironmentFile=` and
-/// the next request picks it up.
-fn make_env_token_loader(config_token: Option<String>) -> TokenLoader {
-    Arc::new(move || {
+/// Build the production token loader. For the given `cloud_project_id`
+/// (when supplied), check the per-project keychain file under
+/// `<state_dir>/planflow_tokens/<id>` first; on miss, fall through to
+/// `PLANFLOW_API_TOKEN`; finally the config-pinned value. Returning a
+/// closure (rather than caching the result) means the env var and the
+/// keychain file are re-read per request, so token rotation — whether
+/// via `systemctl set-environment` or a fresh `planflow_token_set`
+/// frame — picks up without a daemon restart.
+fn make_token_loader(
+    config_token: Option<String>,
+    tokens_dir: Option<Arc<PathBuf>>,
+) -> TokenLoader {
+    Arc::new(move |cloud_project_id: Option<&str>| {
+        if let (Some(dir), Some(pid)) = (tokens_dir.as_deref(), cloud_project_id) {
+            match read_project_token(dir, pid) {
+                Ok(Some(t)) => return Ok(Some(t)),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
         if let Ok(env_value) = std::env::var(TOKEN_ENV) {
             let trimmed = env_value.trim().to_string();
             if !trimmed.is_empty() {
@@ -170,14 +234,148 @@ fn trim_trailing_slash(s: &str) -> String {
     s.trim_end_matches('/').to_string()
 }
 
+// ---------- Per-project token keychain (T19.34) ----------
+
+/// Subdirectory of `state_dir` holding per-project keychain files.
+pub const TOKENS_SUBDIR: &str = "planflow_tokens";
+
+/// Mode applied to each per-project token file on Unix. `0600` — only
+/// the owning user (`wsagent` under systemd) can read it. Mirrors
+/// [`crate::pair`]'s pairing-token policy.
+#[cfg(unix)]
+const TOKEN_FILE_MODE: u32 = 0o600;
+
+#[must_use]
+pub fn tokens_dir_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(TOKENS_SUBDIR)
+}
+
+/// Per-project keychain file path. `None` when `project_id` would map
+/// outside `tokens_dir` — i.e. anything with `/`, `\`, `..`, or
+/// non-printable characters. The allow-list (alphanum + `-` + `_`)
+/// covers every UUID shape Work Station / PlanFlow emit while
+/// preventing a malicious frame from escaping the dir.
+#[must_use]
+pub fn token_file_path(tokens_dir: &Path, project_id: &str) -> Option<PathBuf> {
+    if !is_safe_project_id(project_id) {
+        return None;
+    }
+    Some(tokens_dir.join(project_id))
+}
+
+fn is_safe_project_id(s: &str) -> bool {
+    if s.is_empty() || s.len() > 128 {
+        return false;
+    }
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Read the per-project token, if any. Whitespace-trimmed; an empty
+/// file (or one that contains only whitespace) is treated as absent so
+/// `truncate(0)` is a sensible "delete" backstop on platforms where
+/// unlink-then-rename would race.
+pub fn read_project_token(tokens_dir: &Path, project_id: &str) -> Result<Option<String>, String> {
+    let Some(path) = token_file_path(tokens_dir, project_id) else {
+        return Err(format!("invalid project id: {project_id}"));
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_owned()))
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("token file: {e}")),
+    }
+}
+
+/// Atomically write `token` to the per-project keychain file. Creates
+/// `tokens_dir` (mode `0700` on Unix) if missing, writes a sibling
+/// tempfile, sets `0600`, then renames into place — same pattern as
+/// [`crate::pair::write_pairing_token`] so a concurrent reader never
+/// sees a half-written file.
+pub fn write_project_token(
+    tokens_dir: &Path,
+    project_id: &str,
+    token: &str,
+) -> Result<(), String> {
+    let Some(final_path) = token_file_path(tokens_dir, project_id) else {
+        return Err(format!("invalid project id: {project_id}"));
+    };
+    std::fs::create_dir_all(tokens_dir).map_err(|e| format!("create tokens dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Best-effort tighten — don't fail the write if the dir was
+        // created by a more permissive umask upstream; the file mode
+        // below is the security-critical bit.
+        let _ = std::fs::set_permissions(tokens_dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let tmp_path = tokens_dir.join(format!(".{project_id}.{}.tmp", std::process::id()));
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("open tmp: {e}"))?;
+        f.write_all(token.as_bytes())
+            .map_err(|e| format!("write tmp: {e}"))?;
+        // Trailing newline matches the pairing-token convention so
+        // `cat` output stays readable on the VPS.
+        f.write_all(b"\n").map_err(|e| format!("write tmp: {e}"))?;
+        f.sync_all().map_err(|e| format!("fsync tmp: {e}"))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(TOKEN_FILE_MODE))
+            .map_err(|e| format!("chmod tmp: {e}"))?;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("rename: {e}"));
+    }
+    Ok(())
+}
+
+/// Remove the per-project keychain file. Idempotent — `NotFound` is
+/// treated as success so the caller doesn't need to check existence
+/// first.
+pub fn delete_project_token(tokens_dir: &Path, project_id: &str) -> Result<(), String> {
+    let Some(path) = token_file_path(tokens_dir, project_id) else {
+        return Err(format!("invalid project id: {project_id}"));
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove: {e}")),
+    }
+}
+
 // ---------- Public handler entry points ----------
 
 pub async fn handle_get_me(
     state: &PlanflowState,
     out_tx: &mpsc::Sender<String>,
     id: Option<String>,
+    cloud_project_id: Option<String>,
 ) {
-    proxy_get(state, out_tx, id, "/auth/me", &[]).await;
+    proxy_get(
+        state,
+        out_tx,
+        id,
+        "/auth/me",
+        &[],
+        cloud_project_id.as_deref(),
+    )
+    .await;
 }
 
 pub async fn handle_list_projects(
@@ -185,6 +383,7 @@ pub async fn handle_list_projects(
     out_tx: &mpsc::Sender<String>,
     id: Option<String>,
     organization_id: Option<String>,
+    cloud_project_id: Option<String>,
 ) {
     // PlanFlow's `/projects` requires `organizationId`. The desktop
     // client handles this by listing organizations first and using the
@@ -193,7 +392,7 @@ pub async fn handle_list_projects(
     // across surfaces.
     let resolved_org = match organization_id {
         Some(org) if !org.is_empty() => Some(org),
-        _ => match resolve_first_org_id(state).await {
+        _ => match resolve_first_org_id(state, cloud_project_id.as_deref()).await {
             Ok(Some(org)) => Some(org),
             Ok(None) => {
                 send_error(
@@ -216,10 +415,21 @@ pub async fn handle_list_projects(
         Some(org) => vec![("organizationId", org)],
         None => Vec::new(),
     };
-    proxy_get(state, out_tx, id, "/projects", &query).await;
+    proxy_get(
+        state,
+        out_tx,
+        id,
+        "/projects",
+        &query,
+        cloud_project_id.as_deref(),
+    )
+    .await;
 }
 
-async fn resolve_first_org_id(state: &PlanflowState) -> Result<Option<String>, ProxyError> {
+async fn resolve_first_org_id(
+    state: &PlanflowState,
+    cloud_project_id: Option<&str>,
+) -> Result<Option<String>, ProxyError> {
     if let Some(id) = state
         .cached_org_id
         .lock()
@@ -228,7 +438,7 @@ async fn resolve_first_org_id(state: &PlanflowState) -> Result<Option<String>, P
     {
         return Ok(Some(id));
     }
-    let value = proxy_request(state, Method::GET, "/organizations", None).await?;
+    let value = proxy_request(state, Method::GET, "/organizations", None, cloud_project_id).await?;
     let orgs = value
         .get("organizations")
         .and_then(|v| v.as_array())
@@ -252,6 +462,7 @@ pub async fn handle_list_tasks(
     id: Option<String>,
     project_id: String,
     status: Option<String>,
+    cloud_project_id: Option<String>,
 ) {
     if project_id.trim().is_empty() {
         send_error(
@@ -269,7 +480,7 @@ pub async fn handle_list_tasks(
         Some(s) if !s.is_empty() => vec![("status", s)],
         _ => Vec::new(),
     };
-    proxy_get(state, out_tx, id, &path, &query).await;
+    proxy_get(state, out_tx, id, &path, &query, cloud_project_id.as_deref()).await;
 }
 
 pub async fn handle_list_active_work(
@@ -277,6 +488,7 @@ pub async fn handle_list_active_work(
     out_tx: &mpsc::Sender<String>,
     id: Option<String>,
     project_id: String,
+    cloud_project_id: Option<String>,
 ) {
     if project_id.trim().is_empty() {
         send_error(
@@ -290,7 +502,7 @@ pub async fn handle_list_active_work(
         return;
     }
     let path = format!("/projects/{}/active-work", urlencode(&project_id));
-    proxy_get(state, out_tx, id, &path, &[]).await;
+    proxy_get(state, out_tx, id, &path, &[], cloud_project_id.as_deref()).await;
 }
 
 pub async fn handle_list_comments(
@@ -299,6 +511,7 @@ pub async fn handle_list_comments(
     id: Option<String>,
     project_id: String,
     task_id: String,
+    cloud_project_id: Option<String>,
 ) {
     if project_id.trim().is_empty() || task_id.trim().is_empty() {
         send_error(
@@ -316,7 +529,7 @@ pub async fn handle_list_comments(
         urlencode(&project_id),
         urlencode(&task_id)
     );
-    proxy_get(state, out_tx, id, &path, &[]).await;
+    proxy_get(state, out_tx, id, &path, &[], cloud_project_id.as_deref()).await;
 }
 
 pub async fn handle_create_comment(
@@ -326,6 +539,7 @@ pub async fn handle_create_comment(
     project_id: String,
     task_id: String,
     body: String,
+    cloud_project_id: Option<String>,
 ) {
     if project_id.trim().is_empty() || task_id.trim().is_empty() {
         send_error(
@@ -357,7 +571,16 @@ pub async fn handle_create_comment(
     // PlanFlow expects `content`, not `body` — matches the desktop
     // bridge's translation.
     let payload = json!({ "content": body });
-    proxy_json(state, out_tx, id, Method::POST, &path, &payload).await;
+    proxy_json(
+        state,
+        out_tx,
+        id,
+        Method::POST,
+        &path,
+        &payload,
+        cloud_project_id.as_deref(),
+    )
+    .await;
 }
 
 pub async fn handle_start_work(
@@ -366,6 +589,7 @@ pub async fn handle_start_work(
     id: Option<String>,
     project_id: String,
     task_id: String,
+    cloud_project_id: Option<String>,
 ) {
     if project_id.trim().is_empty() || task_id.trim().is_empty() {
         send_error(
@@ -384,7 +608,16 @@ pub async fn handle_start_work(
         urlencode(&task_id)
     );
     let payload = json!({ "action": "start" });
-    proxy_json(state, out_tx, id, Method::POST, &path, &payload).await;
+    proxy_json(
+        state,
+        out_tx,
+        id,
+        Method::POST,
+        &path,
+        &payload,
+        cloud_project_id.as_deref(),
+    )
+    .await;
 }
 
 pub async fn handle_stop_work(
@@ -392,6 +625,7 @@ pub async fn handle_stop_work(
     out_tx: &mpsc::Sender<String>,
     id: Option<String>,
     project_id: String,
+    cloud_project_id: Option<String>,
 ) {
     if project_id.trim().is_empty() {
         send_error(
@@ -408,7 +642,16 @@ pub async fn handle_stop_work(
     // mirrors the desktop client.
     let path = format!("/projects/{}/tasks/_/work", urlencode(&project_id));
     let payload = json!({ "action": "stop" });
-    proxy_json(state, out_tx, id, Method::POST, &path, &payload).await;
+    proxy_json(
+        state,
+        out_tx,
+        id,
+        Method::POST,
+        &path,
+        &payload,
+        cloud_project_id.as_deref(),
+    )
+    .await;
 }
 
 pub async fn handle_update_task_status(
@@ -418,6 +661,7 @@ pub async fn handle_update_task_status(
     project_id: String,
     task_id: String,
     status: String,
+    cloud_project_id: Option<String>,
 ) {
     if project_id.trim().is_empty() || task_id.trim().is_empty() {
         send_error(
@@ -448,7 +692,7 @@ pub async fn handle_update_task_status(
     let task_uuid = if looks_like_uuid(&task_id) {
         task_id.clone()
     } else {
-        match resolve_task_uuid(state, &project_id, &task_id).await {
+        match resolve_task_uuid(state, &project_id, &task_id, cloud_project_id.as_deref()).await {
             Ok(uuid) => uuid,
             Err(err) => {
                 send_proxy_error(out_tx, id, err).await;
@@ -459,11 +703,62 @@ pub async fn handle_update_task_status(
 
     let path = format!("/projects/{}/tasks/bulk-status", urlencode(&project_id));
     let payload = json!({ "taskIds": [task_uuid], "status": status });
-    let response = proxy_request(state, Method::POST, &path, Some(&payload)).await;
+    let response =
+        proxy_request(state, Method::POST, &path, Some(&payload), cloud_project_id.as_deref())
+            .await;
 
     match response {
         Ok(value) => send(out_tx, &ServerMessage::planflow_result(id, value)).await,
         Err(err) => send_proxy_error(out_tx, id, err).await,
+    }
+}
+
+/// T19.34: write (or clear) the per-project PlanFlow API token. An
+/// empty `token` removes the file, so the next `planflow_*` call for
+/// `cloud_project_id` falls back to the daemon-wide credential.
+///
+/// Replies with `planflow_result { id, data: null }` on success and a
+/// `planflow_error` with kind `invalid_args` / `credential` on failure
+/// — same taxonomy the rest of this module uses, so the PWA / desktop
+/// client only branches on response type.
+pub async fn handle_token_set(
+    state: &PlanflowState,
+    out_tx: &mpsc::Sender<String>,
+    id: Option<String>,
+    cloud_project_id: String,
+    token: String,
+) {
+    let Some(tokens_dir) = state.tokens_dir.as_deref() else {
+        send_error(
+            out_tx,
+            id,
+            "credential",
+            "per-project token store is not configured on this cloud-agent",
+            None,
+        )
+        .await;
+        return;
+    };
+    if !is_safe_project_id(&cloud_project_id) {
+        send_error(
+            out_tx,
+            id,
+            "invalid_args",
+            "cloud_project_id contains invalid characters",
+            None,
+        )
+        .await;
+        return;
+    }
+    let trimmed = token.trim();
+    let result = if trimmed.is_empty() {
+        delete_project_token(tokens_dir, &cloud_project_id)
+    } else {
+        write_project_token(tokens_dir, &cloud_project_id, trimmed)
+    };
+    match result {
+        Ok(()) => send(out_tx, &ServerMessage::planflow_result(id, Value::Null)).await,
+        Err(message) => send_error(out_tx, id, "credential", message, None).await,
     }
 }
 
@@ -492,9 +787,10 @@ async fn proxy_get(
     id: Option<String>,
     path: &str,
     query: &[(&str, String)],
+    cloud_project_id: Option<&str>,
 ) {
     let url = build_url(&state.base_url, path, query);
-    match proxy_request_url(state, Method::GET, &url, None).await {
+    match proxy_request_url(state, Method::GET, &url, None, cloud_project_id).await {
         Ok(value) => send(out_tx, &ServerMessage::planflow_result(id, value)).await,
         Err(err) => send_proxy_error(out_tx, id, err).await,
     }
@@ -507,8 +803,9 @@ async fn proxy_json(
     method: Method,
     path: &str,
     body: &Value,
+    cloud_project_id: Option<&str>,
 ) {
-    match proxy_request(state, method, path, Some(body)).await {
+    match proxy_request(state, method, path, Some(body), cloud_project_id).await {
         Ok(value) => send(out_tx, &ServerMessage::planflow_result(id, value)).await,
         Err(err) => send_proxy_error(out_tx, id, err).await,
     }
@@ -519,9 +816,10 @@ async fn proxy_request(
     method: Method,
     path: &str,
     body: Option<&Value>,
+    cloud_project_id: Option<&str>,
 ) -> Result<Value, ProxyError> {
     let url = build_url(&state.base_url, path, &[]);
-    proxy_request_url(state, method, &url, body).await
+    proxy_request_url(state, method, &url, body, cloud_project_id).await
 }
 
 async fn proxy_request_url(
@@ -529,8 +827,9 @@ async fn proxy_request_url(
     method: Method,
     url: &str,
     body: Option<&Value>,
+    cloud_project_id: Option<&str>,
 ) -> Result<Value, ProxyError> {
-    let token = match (state.token_loader)() {
+    let token = match (state.token_loader)(cloud_project_id) {
         Ok(Some(t)) => t,
         Ok(None) => return Err(ProxyError::NoCredential),
         Err(e) => return Err(ProxyError::Credential(e)),
@@ -598,10 +897,11 @@ async fn resolve_task_uuid(
     state: &PlanflowState,
     project_id: &str,
     task_id: &str,
+    cloud_project_id: Option<&str>,
 ) -> Result<String, ProxyError> {
     let path = format!("/projects/{}/tasks", urlencode(project_id));
     let url = build_url(&state.base_url, &path, &[]);
-    let value = proxy_request_url(state, Method::GET, &url, None).await?;
+    let value = proxy_request_url(state, Method::GET, &url, None, cloud_project_id).await?;
     let tasks = value
         .get("tasks")
         .and_then(|v| v.as_array())
@@ -734,7 +1034,7 @@ mod tests {
 
     fn token_loader(value: Option<&str>) -> TokenLoader {
         let owned = value.map(str::to_string);
-        Arc::new(move || Ok(owned.clone()))
+        Arc::new(move |_pid| Ok(owned.clone()))
     }
 
     fn channel() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
@@ -760,7 +1060,7 @@ mod tests {
             .await;
         let state = PlanflowState::for_test(server.uri(), token_loader(Some("secret")));
         let (tx, mut rx) = channel();
-        handle_get_me(&state, &tx, Some("req-1".to_string())).await;
+        handle_get_me(&state, &tx, Some("req-1".to_string()), None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_result");
         assert_eq!(frame["id"], "req-1");
@@ -771,7 +1071,7 @@ mod tests {
     async fn missing_token_emits_no_credential() {
         let state = PlanflowState::for_test("http://127.0.0.1:1", token_loader(None));
         let (tx, mut rx) = channel();
-        handle_get_me(&state, &tx, Some("req-2".to_string())).await;
+        handle_get_me(&state, &tx, Some("req-2".to_string()), None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_error");
         assert_eq!(frame["kind"], "no_credential");
@@ -799,7 +1099,7 @@ mod tests {
             .await;
         let state = PlanflowState::for_test(server.uri(), token_loader(Some("t")));
         let (tx, mut rx) = channel();
-        handle_list_projects(&state, &tx, Some("req-3".to_string()), None).await;
+        handle_list_projects(&state, &tx, Some("req-3".to_string()), None, None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_result");
         assert!(frame["data"]["projects"].is_array());
@@ -830,7 +1130,7 @@ mod tests {
             .await;
         let state = PlanflowState::for_test(server.uri(), token_loader(Some("t")));
         let (tx, mut rx) = channel();
-        handle_list_projects(&state, &tx, None, Some("org-pinned".to_string())).await;
+        handle_list_projects(&state, &tx, None, Some("org-pinned".to_string()), None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_result");
     }
@@ -839,7 +1139,7 @@ mod tests {
     async fn list_tasks_empty_project_id_short_circuits() {
         let state = PlanflowState::for_test("http://127.0.0.1:1", token_loader(Some("t")));
         let (tx, mut rx) = channel();
-        handle_list_tasks(&state, &tx, None, "  ".to_string(), None).await;
+        handle_list_tasks(&state, &tx, None, "  ".to_string(), None, None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_error");
         assert_eq!(frame["kind"], "invalid_args");
@@ -865,6 +1165,7 @@ mod tests {
             None,
             "proj-1".to_string(),
             Some("IN_PROGRESS".to_string()),
+            None,
         )
         .await;
         let frame = collect_one(&mut rx).await;
@@ -892,6 +1193,7 @@ mod tests {
             "proj-1".to_string(),
             "task-1".to_string(),
             "hello".to_string(),
+            None,
         )
         .await;
         let frame = collect_one(&mut rx).await;
@@ -909,7 +1211,7 @@ mod tests {
             .await;
         let state = PlanflowState::for_test(server.uri(), token_loader(Some("t")));
         let (tx, mut rx) = channel();
-        handle_get_me(&state, &tx, None).await;
+        handle_get_me(&state, &tx, None, None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_error");
         assert_eq!(frame["kind"], "unauthorized");
@@ -927,7 +1229,7 @@ mod tests {
             .await;
         let state = PlanflowState::for_test(server.uri(), token_loader(Some("t")));
         let (tx, mut rx) = channel();
-        handle_get_me(&state, &tx, None).await;
+        handle_get_me(&state, &tx, None, None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_error");
         assert_eq!(frame["kind"], "rate_limited");
@@ -944,7 +1246,7 @@ mod tests {
             .await;
         let state = PlanflowState::for_test(server.uri(), token_loader(Some("t")));
         let (tx, mut rx) = channel();
-        handle_get_me(&state, &tx, None).await;
+        handle_get_me(&state, &tx, None, None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_error");
         assert_eq!(frame["kind"], "server");
@@ -962,7 +1264,7 @@ mod tests {
             .await;
         let state = PlanflowState::for_test(server.uri(), token_loader(Some("t")));
         let (tx, mut rx) = channel();
-        handle_stop_work(&state, &tx, None, "proj-1".to_string()).await;
+        handle_stop_work(&state, &tx, None, "proj-1".to_string(), None).await;
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_result");
         assert!(frame["data"].is_null());
@@ -1005,6 +1307,7 @@ mod tests {
             "proj-1".to_string(),
             "T1.1".to_string(),
             "DONE".to_string(),
+            None,
         )
         .await;
         let frame = collect_one(&mut rx).await;
@@ -1036,6 +1339,7 @@ mod tests {
             "proj-1".to_string(),
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
             "TODO".to_string(),
+            None,
         )
         .await;
         let frame = collect_one(&mut rx).await;
@@ -1047,9 +1351,263 @@ mod tests {
         // Use a unique env var name per invocation to avoid clashing
         // with other parallel tests touching real env vars.
         std::env::set_var("PLANFLOW_API_TOKEN", "from-env");
-        let loader = make_env_token_loader(Some("from-config".to_string()));
-        assert_eq!(loader().unwrap().as_deref(), Some("from-env"));
+        let loader = make_token_loader(Some("from-config".to_string()), None);
+        assert_eq!(loader(None).unwrap().as_deref(), Some("from-env"));
         std::env::remove_var("PLANFLOW_API_TOKEN");
-        assert_eq!(loader().unwrap().as_deref(), Some("from-config"));
+        assert_eq!(loader(None).unwrap().as_deref(), Some("from-config"));
+    }
+
+    // ---------- T19.34: per-project token resolver ----------
+
+    #[test]
+    fn project_token_round_trip_and_permissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tokens_dir_path(tmp.path());
+        write_project_token(&dir, "p1", "tok-a").unwrap();
+        assert_eq!(
+            read_project_token(&dir, "p1").unwrap().as_deref(),
+            Some("tok-a")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("p1"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "per-project token file must be 0600");
+        }
+
+        // Overwriting works in-place.
+        write_project_token(&dir, "p1", "tok-b").unwrap();
+        assert_eq!(
+            read_project_token(&dir, "p1").unwrap().as_deref(),
+            Some("tok-b")
+        );
+
+        // Delete is idempotent.
+        delete_project_token(&dir, "p1").unwrap();
+        assert!(read_project_token(&dir, "p1").unwrap().is_none());
+        delete_project_token(&dir, "p1").unwrap();
+    }
+
+    #[test]
+    fn project_id_path_traversal_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tokens_dir_path(tmp.path());
+        for bad in ["", "../etc/passwd", "p/1", "p\\1", "..", ".", "p 1", "p\n"] {
+            assert!(token_file_path(&dir, bad).is_none(), "{bad:?} should be rejected");
+            assert!(write_project_token(&dir, bad, "x").is_err(), "write {bad:?}");
+            assert!(read_project_token(&dir, bad).is_err(), "read {bad:?}");
+            assert!(delete_project_token(&dir, bad).is_err(), "delete {bad:?}");
+        }
+    }
+
+    #[test]
+    fn token_loader_prefers_project_file_over_env_and_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Arc::new(tokens_dir_path(tmp.path()));
+        write_project_token(&dir, "pA", "from-file-A").unwrap();
+        std::env::set_var("PLANFLOW_API_TOKEN", "from-env");
+
+        let loader = make_token_loader(Some("from-config".to_string()), Some(dir.clone()));
+        // Per-project file wins for project A.
+        assert_eq!(
+            loader(Some("pA")).unwrap().as_deref(),
+            Some("from-file-A")
+        );
+        // Project without a file falls back to env.
+        assert_eq!(loader(Some("pB")).unwrap().as_deref(), Some("from-env"));
+        // Calls without a project id also fall back to env.
+        assert_eq!(loader(None).unwrap().as_deref(), Some("from-env"));
+
+        std::env::remove_var("PLANFLOW_API_TOKEN");
+        // With env cleared, project A still uses its file; project B
+        // drops to the config-pinned token.
+        assert_eq!(
+            loader(Some("pA")).unwrap().as_deref(),
+            Some("from-file-A")
+        );
+        assert_eq!(
+            loader(Some("pB")).unwrap().as_deref(),
+            Some("from-config")
+        );
+    }
+
+    /// T19.34 acceptance: two projects with two different keychain
+    /// entries each see their own account's tasks on a single agent.
+    #[tokio::test]
+    async fn list_tasks_uses_per_project_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/proj-A/tasks"))
+            .and(header("authorization", "Bearer token-A"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": { "tasks": [{ "id": "tA", "owner": "alice" }] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/proj-B/tasks"))
+            .and(header("authorization", "Bearer token-B"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": { "tasks": [{ "id": "tB", "owner": "bob" }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Use the production loader so this also covers the wiring in
+        // PlanflowState::new (minus the env var read, which the unit
+        // test above covers).
+        let state = PlanflowState::for_test_with_dir(
+            server.uri(),
+            None,
+            tmp.path().to_path_buf(),
+        );
+
+        // Stage per-project tokens via the WS handler so the test
+        // exercises the full set+lookup loop.
+        let (tx, mut rx) = channel();
+        handle_token_set(
+            &state,
+            &tx,
+            None,
+            "wsproj-A".to_string(),
+            "token-A".to_string(),
+        )
+        .await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_result");
+
+        let (tx, mut rx) = channel();
+        handle_token_set(
+            &state,
+            &tx,
+            None,
+            "wsproj-B".to_string(),
+            "token-B".to_string(),
+        )
+        .await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_result");
+
+        let (tx, mut rx) = channel();
+        handle_list_tasks(
+            &state,
+            &tx,
+            None,
+            "proj-A".to_string(),
+            None,
+            Some("wsproj-A".to_string()),
+        )
+        .await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_result");
+        assert_eq!(frame["data"]["tasks"][0]["owner"], "alice");
+
+        let (tx, mut rx) = channel();
+        handle_list_tasks(
+            &state,
+            &tx,
+            None,
+            "proj-B".to_string(),
+            None,
+            Some("wsproj-B".to_string()),
+        )
+        .await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_result");
+        assert_eq!(frame["data"]["tasks"][0]["owner"], "bob");
+    }
+
+    #[tokio::test]
+    async fn missing_project_file_falls_back_to_global_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/auth/me"))
+            .and(header("authorization", "Bearer global-tok"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "success": true, "data": { "id": "u" }})),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PlanflowState::for_test_with_dir(
+            server.uri(),
+            Some("global-tok".to_string()),
+            tmp.path().to_path_buf(),
+        );
+        // Project id with no keychain file should fall through.
+        let (tx, mut rx) = channel();
+        handle_get_me(&state, &tx, None, Some("unknown-project".to_string())).await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_result");
+    }
+
+    #[tokio::test]
+    async fn token_set_empty_string_clears_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PlanflowState::for_test_with_dir(
+            "http://127.0.0.1:1",
+            None,
+            tmp.path().to_path_buf(),
+        );
+        let (tx, mut rx) = channel();
+        handle_token_set(&state, &tx, None, "p".to_string(), "tok".to_string()).await;
+        let _ = collect_one(&mut rx).await;
+        assert_eq!(
+            read_project_token(&tokens_dir_path(tmp.path()), "p")
+                .unwrap()
+                .as_deref(),
+            Some("tok")
+        );
+
+        let (tx, mut rx) = channel();
+        handle_token_set(&state, &tx, None, "p".to_string(), String::new()).await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_result");
+        assert!(read_project_token(&tokens_dir_path(tmp.path()), "p")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn token_set_rejects_unsafe_project_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PlanflowState::for_test_with_dir(
+            "http://127.0.0.1:1",
+            None,
+            tmp.path().to_path_buf(),
+        );
+        let (tx, mut rx) = channel();
+        handle_token_set(
+            &state,
+            &tx,
+            None,
+            "../escape".to_string(),
+            "tok".to_string(),
+        )
+        .await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_error");
+        assert_eq!(frame["kind"], "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn token_set_without_tokens_dir_errors_credential() {
+        // for_test omits the tokens_dir so the handler must surface a
+        // typed error instead of touching the filesystem.
+        let state = PlanflowState::for_test("http://127.0.0.1:1", token_loader(None));
+        let (tx, mut rx) = channel();
+        handle_token_set(&state, &tx, None, "p".to_string(), "tok".to_string()).await;
+        let frame = collect_one(&mut rx).await;
+        assert_eq!(frame["type"], "planflow_error");
+        assert_eq!(frame["kind"], "credential");
     }
 }

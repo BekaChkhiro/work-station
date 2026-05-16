@@ -349,8 +349,8 @@ async fn handle_text(
         | "fs_list" | "fs_read" | "fs_write" | "fs_delete" | "planflow_get_me"
         | "planflow_list_projects" | "planflow_list_tasks" | "planflow_list_active_work"
         | "planflow_list_comments" | "planflow_create_comment" | "planflow_start_work"
-        | "planflow_stop_work" | "planflow_update_task_status" | "project_link_list"
-        | "project_link_set" | "project_link_delete" => {
+        | "planflow_stop_work" | "planflow_update_task_status" | "planflow_token_set"
+        | "project_link_list" | "project_link_set" | "project_link_delete" => {
             match serde_json::from_value::<ClientMessage>(value) {
                 Ok(msg) => msg,
                 Err(error) => {
@@ -557,38 +557,78 @@ async fn dispatch_typed(
         // REST API and ships back a `planflow_result` / `planflow_error`
         // frame with the same kind taxonomy the desktop bridge uses, so
         // the PWA client doesn't need a per-backend branch.
-        ClientMessage::PlanflowGetMe { id } => {
-            planflow_proxy::handle_get_me(planflow, &conn.out_tx, id).await;
+        ClientMessage::PlanflowGetMe {
+            id,
+            cloud_project_id,
+        } => {
+            planflow_proxy::handle_get_me(planflow, &conn.out_tx, id, cloud_project_id).await;
         }
         ClientMessage::PlanflowListProjects {
             id,
             organization_id,
+            cloud_project_id,
         } => {
-            planflow_proxy::handle_list_projects(planflow, &conn.out_tx, id, organization_id).await;
+            planflow_proxy::handle_list_projects(
+                planflow,
+                &conn.out_tx,
+                id,
+                organization_id,
+                cloud_project_id,
+            )
+            .await;
         }
         ClientMessage::PlanflowListTasks {
             id,
             project_id,
             status,
+            cloud_project_id,
         } => {
-            planflow_proxy::handle_list_tasks(planflow, &conn.out_tx, id, project_id, status).await;
+            planflow_proxy::handle_list_tasks(
+                planflow,
+                &conn.out_tx,
+                id,
+                project_id,
+                status,
+                cloud_project_id,
+            )
+            .await;
         }
-        ClientMessage::PlanflowListActiveWork { id, project_id } => {
-            planflow_proxy::handle_list_active_work(planflow, &conn.out_tx, id, project_id).await;
+        ClientMessage::PlanflowListActiveWork {
+            id,
+            project_id,
+            cloud_project_id,
+        } => {
+            planflow_proxy::handle_list_active_work(
+                planflow,
+                &conn.out_tx,
+                id,
+                project_id,
+                cloud_project_id,
+            )
+            .await;
         }
         ClientMessage::PlanflowListComments {
             id,
             project_id,
             task_id,
+            cloud_project_id,
         } => {
-            planflow_proxy::handle_list_comments(planflow, &conn.out_tx, id, project_id, task_id)
-                .await;
+            planflow_proxy::handle_list_comments(
+                planflow,
+                &conn.out_tx,
+                id,
+                project_id,
+                task_id,
+                cloud_project_id,
+            )
+            .await;
         }
         ClientMessage::PlanflowCreateComment {
             id,
             project_id,
             task_id,
             body,
+            cloud_project_id,
         } => {
             planflow_proxy::handle_create_comment(
                 planflow,
@@ -597,6 +637,7 @@ async fn dispatch_typed(
                 project_id,
                 task_id,
                 body,
+                cloud_project_id,
             )
             .await;
         }
@@ -604,18 +645,38 @@ async fn dispatch_typed(
             id,
             project_id,
             task_id,
+            cloud_project_id,
         } => {
-            planflow_proxy::handle_start_work(planflow, &conn.out_tx, id, project_id, task_id)
-                .await;
+            planflow_proxy::handle_start_work(
+                planflow,
+                &conn.out_tx,
+                id,
+                project_id,
+                task_id,
+                cloud_project_id,
+            )
+            .await;
         }
-        ClientMessage::PlanflowStopWork { id, project_id } => {
-            planflow_proxy::handle_stop_work(planflow, &conn.out_tx, id, project_id).await;
+        ClientMessage::PlanflowStopWork {
+            id,
+            project_id,
+            cloud_project_id,
+        } => {
+            planflow_proxy::handle_stop_work(
+                planflow,
+                &conn.out_tx,
+                id,
+                project_id,
+                cloud_project_id,
+            )
+            .await;
         }
         ClientMessage::PlanflowUpdateTaskStatus {
             id,
             project_id,
             task_id,
             status,
+            cloud_project_id,
         } => {
             planflow_proxy::handle_update_task_status(
                 planflow,
@@ -624,6 +685,21 @@ async fn dispatch_typed(
                 project_id,
                 task_id,
                 status,
+                cloud_project_id,
+            )
+            .await;
+        }
+        ClientMessage::PlanflowTokenSet {
+            id,
+            cloud_project_id,
+            token,
+        } => {
+            planflow_proxy::handle_token_set(
+                planflow,
+                &conn.out_tx,
+                id,
+                cloud_project_id,
+                token,
             )
             .await;
         }
@@ -1672,7 +1748,7 @@ mod tests {
     /// real DNS lookup. Tests that actually exercise the proxy live in
     /// `planflow_proxy::tests` against a `wiremock` server.
     fn offline_planflow_state() -> PlanflowState {
-        PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|| Ok(None)))
+        PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|_pid| Ok(None)))
     }
 
     /// Materialize a fresh `ProjectsRoot` under a tempdir. Tests that
