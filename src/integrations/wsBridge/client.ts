@@ -58,6 +58,13 @@ export type ServerMessage =
   | { type: "project_void_result"; id?: string }
   | { type: "pty_list_result"; id?: string; sessions: WsBridgePtySession[] }
   | { type: "settings_result"; id?: string; settings: WsBridgeSettings }
+  // T19.33 — project_link bridge reply frames. `links` / `link` are the
+  // camelCase-shaped rows the cloud-agent emits; the renderer re-validates
+  // them through Zod in `src/db/projectLinks.ts` so a wire drift surfaces
+  // at the schema boundary, not here.
+  | { type: "project_links_result"; id?: string; links: WsBridgeProjectLink[] }
+  | { type: "project_link_result"; id?: string; link: WsBridgeProjectLink }
+  | { type: "project_link_deleted"; id?: string; removed: boolean }
   | { type: "active_project_changed"; project_id?: string | null }
   // T19.14 — live host stats. The cloud-agent broadcasts these every
   // ~4 s to every authenticated socket (no subscribe handshake); a
@@ -164,6 +171,30 @@ export interface WsBridgeProjectUpdateArgs {
 export interface WsBridgeSettings {
   theme: string;
   lastActiveProject: string | null;
+}
+
+/** T19.33 — wire shape for a `project_links` row. Mirrors the
+ *  cloud-agent's `ProjectLink` struct (camelCase serde rename) and the
+ *  desktop's `commands::project_links::ProjectLinkView`. Kept loose
+ *  (`metadata` as `unknown`) because each integration narrows it to its
+ *  own Zod schema at the call site. */
+export interface WsBridgeProjectLink {
+  projectId: string;
+  service: string;
+  externalId: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+}
+
+/** Args shape for [`WsBridgeClient.projectLinkSet`]. Unlike
+ *  `project_create` (which nests args in `{args: {...}}`), the
+ *  cloud-agent's `project_link_set` carries fields flat on the frame —
+ *  the client maps camelCase here to snake_case on the wire. */
+export interface WsBridgeProjectLinkSetArgs {
+  projectId: string;
+  service: string;
+  externalId: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface PtySpawnPayload {
@@ -550,6 +581,56 @@ export class WsBridgeClient {
     }
   }
 
+  // ---- T19.33: project_link bridge -------------------------------------
+  //
+  // Each method maps 1:1 to a `project_link_*` `ClientMessage` variant in
+  // `crates/workstation-core/src/ws/protocol.rs`. Wire payload is flat
+  // (no `args` wrapper) so the camelCase fields are mapped to snake_case
+  // here before send. Returns are typed via [`WsBridgeProjectLink`] but
+  // the renderer re-validates through Zod in `src/db/projectLinks.ts`.
+
+  async projectLinkList(projectId: string): Promise<WsBridgeProjectLink[]> {
+    const reply = await this.request({
+      type: "project_link_list",
+      project_id: projectId,
+    });
+    if (reply.type !== "project_links_result") {
+      throw new WsBridgeError("protocol", `expected project_links_result, got ${reply.type}`);
+    }
+    return reply.links;
+  }
+
+  async projectLinkSet(args: WsBridgeProjectLinkSetArgs): Promise<WsBridgeProjectLink> {
+    const reply = await this.request({
+      type: "project_link_set",
+      project_id: args.projectId,
+      service: args.service,
+      external_id: args.externalId,
+      metadata: args.metadata,
+    });
+    if (reply.type !== "project_link_result") {
+      throw new WsBridgeError("protocol", `expected project_link_result, got ${reply.type}`);
+    }
+    return reply.link;
+  }
+
+  async projectLinkDelete(
+    projectId: string,
+    service: string,
+    externalId: string,
+  ): Promise<boolean> {
+    const reply = await this.request({
+      type: "project_link_delete",
+      project_id: projectId,
+      service,
+      external_id: externalId,
+    });
+    if (reply.type !== "project_link_deleted") {
+      throw new WsBridgeError("protocol", `expected project_link_deleted, got ${reply.type}`);
+    }
+    return reply.removed;
+  }
+
   async settingsGet(): Promise<WsBridgeSettings> {
     const reply = await this.request({ type: "settings_get" });
     if (reply.type !== "settings_result") {
@@ -843,6 +924,9 @@ export class WsBridgeClient {
       case "project_void_result":
       case "pty_list_result":
       case "settings_result":
+      case "project_links_result":
+      case "project_link_result":
+      case "project_link_deleted":
       case "planflow_result": {
         const id = parsed.id;
         if (id !== undefined) {
