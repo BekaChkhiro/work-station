@@ -169,7 +169,12 @@ StateDirectoryMode=0750
 # reads one config file — everything else can be locked down.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+# ProtectHome is intentionally NOT set. The agent spawns user CLI
+# sessions (Claude Code, Codex, login bash) that read/write their HOME
+# dir for config + auth tokens (~/.claude/, ~/.bashrc, ~/.config/).
+# Enabling ProtectHome hid /home entirely from the agent's mount
+# namespace and the spawned bash failed with "Permission denied" on
+# .bashrc, Claude's interactive TUI never rendered.
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
