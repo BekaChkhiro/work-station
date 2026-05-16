@@ -2265,6 +2265,59 @@ The agent is a separate Rust binary (`crates/cloud-agent`) that links the same `
   - Sync this `PROJECT_PLAN.md` so Phase 19 is documented in the source of truth, not only in PlanFlow.
 - **Acceptance**: This section exists; T19.2 and T19.3 carry a dated "re-validated" note; the stretch list no longer claims cloud sync / SSH host / mobile companion as out-of-scope.
 
+#### T19.32: cloud-agent — `project_links` schema + WS handlers
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T19.25, T19.29
+- **Description**:
+  - Mirror `src-tauri/migrations/000?_project_links.sql` into a cloud-agent migration so each cloud project can record which PlanFlow / GitHub / Vercel / Neon / Railway entity it's bound to. Same row shape as the desktop's so a row written by either side decodes from the other.
+  - Add `project_link_list` / `project_link_set` / `project_link_delete` WS handlers. They share the same camelCase wire shape the desktop currently uses for `routeIpc` so the renderer can target either backend with one `client.projectLink*` call.
+  - Update `KNOWN_CLIENT_TYPES` + the typed-parse allow-list in `dispatch.rs`.
+- **Acceptance**: `cargo test -p cloud-agent` covers list/set/delete; a row inserted via `project_link_set` survives a daemon restart and is returned by `project_link_list`.
+
+#### T19.33: desktop — route `project_link_*` writes through cloud transport
+
+- [ ] **Status**: TODO
+- **Complexity**: S
+- **Dependencies**: T19.32
+- **Description**:
+  - `src/db/projectLinks.ts` currently invokes Tauri directly (or `routeIpcLocalOnly`). Replace each write with `routeIpc(localFn, cloudFn)` so cloud mode hits the new WS handlers from T19.32.
+  - Add `projectLinkList`/`Set`/`Delete` methods to `WsBridgeClient` + reply-frame parsing in the type union.
+  - Tests in `src/db/projectLinks.test.ts` mirror the patterns from `src/db/projects.test.ts` (one suite per mode, asserting the right transport fired).
+- **Acceptance**: `pnpm vitest run src/db/projectLinks.test.ts` passes; manually linking a PlanFlow project to a cloud-mode Work Station project writes via WS and re-reads via WS.
+
+#### T19.34: cloud-agent — per-project PlanFlow token resolver
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T19.32, T19.29
+- **Description**:
+  - Today's `planflow_proxy` uses a single daemon-wide token (config field / env var). With multi-project PlanFlow linking the token might be per-link (different user, different account). Extend the proxy state to resolve the token per `project_id`: keychain-style file under `<state_dir>/planflow_tokens/<project_id>` (mode 0600, owner `wsagent`).
+  - WS handlers learn an optional `project_id` arg; the proxy looks up the per-project token and falls back to the global token when none is set.
+  - Frontend "Connect" flow in the Integrations panel uses `project_link_set` (T19.32) + a new `planflow_token_set` WS call to drop the token on the agent's disk.
+- **Acceptance**: Two projects linked to two different PlanFlow accounts coexist on the same cloud-agent; each `planflow_list_tasks` returns the right account's tasks.
+
+#### T19.35: desktop — Start-task flow works in cloud mode
+
+- [ ] **Status**: TODO
+- **Complexity**: M
+- **Dependencies**: T19.33, T19.34
+- **Description**:
+  - `handleStartTask` in `AppRoot` currently assumes the project row + project_links row + PlanFlow token all live in the same local SQLite + keychain. In cloud mode all three live on the cloud-agent. Refactor the resolver so each lookup goes through the existing `routeIpc` wrappers; no special-casing inside the Start orchestrator.
+  - The PTY spawn is already cloud-aware (T19.26); only the lookup chain needs the cloud-mode branch.
+- **Acceptance**: With Cloud mode on, clicking Start on a PlanFlow task spawns a cloud PTY in the linked project, runs the task's CLI, and the `lockedBy.id === me` round-trip works end-to-end.
+
+#### T19.36: docs + smoke — PlanFlow cloud integration
+
+- [ ] **Status**: TODO
+- **Complexity**: S
+- **Dependencies**: T19.32, T19.33, T19.34, T19.35
+- **Description**:
+  - Update `docs/cloud-agent-vps.md` with the per-project token layout and the `project_link_set` flow.
+  - Add a `qa/planflow-cloud-start.md` runbook walking through: pair agent → push project → link PlanFlow → Start task → confirm PTY + lock.
+- **Acceptance**: A fresh contributor can follow the runbook on a clean VPS and finish with a green Start.
+
 ---
 
 ## 10. Stretch — Post-v0.1.0
