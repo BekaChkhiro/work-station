@@ -690,4 +690,37 @@ describe("WsBridgeClient — PlanFlow Tasks bridge (T19.13)", () => {
     expect(frame.body).toBe("hello");
     expect(frame).not.toHaveProperty("content");
   });
+
+  // T19.35 — `cloud_project_id` selects the cloud-agent's per-project
+  // PlanFlow token (T19.34). It only appears on the wire when the caller
+  // supplies it; omitting it keeps the cloud-agent on its global token.
+  it("planflowStartWork ships cloud_project_id when set, omits it otherwise", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    void client.planflowStartWork("p1", "T1.1", "ws-proj-1");
+    const withCloud = MockWebSocket.at(0).parseSent<
+      FrameWithId & { project_id?: string; task_id?: string; cloud_project_id?: string }
+    >(0);
+    expect(withCloud.type).toBe("planflow_start_work");
+    expect(withCloud.cloud_project_id).toBe("ws-proj-1");
+
+    void client.planflowStartWork("p1", "T1.2");
+    const withoutCloud = MockWebSocket.at(0).parseSent<FrameWithId>(1);
+    expect(withoutCloud).not.toHaveProperty("cloud_project_id");
+  });
+
+  it("planflowListTasks ships cloud_project_id alongside the status filter", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    void client.planflowListTasks("p1", "TODO", "ws-proj-1");
+    const frame = MockWebSocket.at(0).parseSent<
+      FrameWithId & { status?: string; cloud_project_id?: string }
+    >(0);
+    expect(frame.status).toBe("TODO");
+    expect(frame.cloud_project_id).toBe("ws-proj-1");
+  });
 });

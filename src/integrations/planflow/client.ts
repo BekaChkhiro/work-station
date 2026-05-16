@@ -69,6 +69,14 @@ export interface PlanFlowClientOptions {
    *  verifier and Settings panel keep it `false` so a credential-test or
    *  account-config call always hits the desktop's own PlanFlow token. */
   routeViaCloudAgent?: boolean;
+  /** T19.35 — Work Station project UUID this client is scoped to. When
+   *  set, every routed `planflow_*` WS call ships `cloud_project_id`
+   *  alongside the PlanFlow `project_id`, letting the cloud-agent's
+   *  per-project token resolver (T19.34) pick the correct PlanFlow API
+   *  token for the linked account. Omitted in local mode and in
+   *  unscoped contexts (NotificationsBell), where the cloud-agent falls
+   *  back to its global token. */
+  cloudProjectId?: string;
 }
 
 export interface ListTasksOptions {
@@ -137,10 +145,12 @@ export class PlanFlowClient {
   readonly #http: IntegrationHttpClient;
   readonly #reauthIntegration: IntegrationId | null;
   readonly #routeViaCloudAgent: boolean;
+  readonly #cloudProjectId: string | undefined;
 
   constructor(options: PlanFlowClientOptions) {
     this.#reauthIntegration = options.reauthIntegration ?? null;
     this.#routeViaCloudAgent = options.routeViaCloudAgent ?? false;
+    this.#cloudProjectId = options.cloudProjectId;
     const reauthIntegration = this.#reauthIntegration;
     this.#http = createIntegrationHttpClient({
       service: "planflow",
@@ -167,7 +177,7 @@ export class PlanFlowClient {
         return payload.user;
       },
       async (client) => {
-        const raw = await client.planflowGetMe();
+        const raw = await client.planflowGetMe(this.#cloudProjectId);
         return meSchema.parse(raw).user;
       },
     );
@@ -224,7 +234,7 @@ export class PlanFlowClient {
             : Array.isArray(options.status)
               ? options.status.join(",")
               : options.status;
-        const raw = await client.planflowListTasks(projectId, status);
+        const raw = await client.planflowListTasks(projectId, status, this.#cloudProjectId);
         return taskListSchema.parse(raw).tasks;
       },
     );
@@ -273,7 +283,12 @@ export class PlanFlowClient {
       // human-id → UUID resolution server-side, so we forward the caller's
       // input verbatim.
       async (client) => {
-        const raw = await client.planflowUpdateTaskStatus(projectId, taskIdOrUuid, status);
+        const raw = await client.planflowUpdateTaskStatus(
+          projectId,
+          taskIdOrUuid,
+          status,
+          this.#cloudProjectId,
+        );
         return taskListSchema.parse(raw).tasks[0] ?? null;
       },
     );
@@ -294,7 +309,7 @@ export class PlanFlowClient {
         );
       },
       async (client) => {
-        await client.planflowStartWork(projectId, taskId);
+        await client.planflowStartWork(projectId, taskId, this.#cloudProjectId);
       },
     );
   }
@@ -316,7 +331,7 @@ export class PlanFlowClient {
         );
       },
       async (client) => {
-        await client.planflowStopWork(projectId);
+        await client.planflowStopWork(projectId, this.#cloudProjectId);
       },
     );
   }
@@ -397,7 +412,7 @@ export class PlanFlowClient {
         return adapt(payload.activeWork);
       },
       async (client) => {
-        const raw = await client.planflowListActiveWork(projectId);
+        const raw = await client.planflowListActiveWork(projectId, this.#cloudProjectId);
         return adapt(activeWorkResponseSchema.parse(raw).activeWork);
       },
     );
@@ -413,7 +428,7 @@ export class PlanFlowClient {
         return payload.comments;
       },
       async (client) => {
-        const raw = await client.planflowListComments(projectId, taskId);
+        const raw = await client.planflowListComments(projectId, taskId, this.#cloudProjectId);
         return commentListSchema.parse(raw).comments;
       },
     );
@@ -439,7 +454,12 @@ export class PlanFlowClient {
       // The cloud-agent's `handle_create_comment` performs the same
       // body→content translation; we forward the body verbatim.
       async (client) => {
-        const raw = await client.planflowCreateComment(projectId, taskId, payload.body);
+        const raw = await client.planflowCreateComment(
+          projectId,
+          taskId,
+          payload.body,
+          this.#cloudProjectId,
+        );
         return commentDetailSchema.parse(raw).comment;
       },
     );

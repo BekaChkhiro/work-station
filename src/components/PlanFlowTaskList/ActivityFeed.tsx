@@ -38,11 +38,20 @@ const MAX_ENTRIES = 100;
 
 export interface ActivityFeedProps {
   externalId: string;
+  /** T19.35 — Work Station projectId for the linked workspace project.
+   *  Forwarded into the renderer PlanFlow client so any routed
+   *  `planflow_*` WS call carries `cloud_project_id` for per-project
+   *  token resolution. `listChanges` itself stays on HTTP — it has no
+   *  cloud-agent counterpart — so the value is benign when unset. */
+  workspaceProjectId?: string;
   onJumpToTask?: (taskId: string) => void;
 }
 
 export function ActivityFeed(props: ActivityFeedProps): JSX.Element {
-  const client = createRendererPlanFlowClient();
+  // T19.35 — see PlanFlowTaskList for the cloudProjectId rationale. The
+  // parent `<Show>` block remounts this view on workspace project change.
+  // eslint-disable-next-line solid/reactivity
+  const client = createRendererPlanFlowClient({ cloudProjectId: props.workspaceProjectId });
   const [reloadKey, setReloadKey] = createSignal(0);
   const [now, setNow] = createSignal(Date.now());
   const [entries, setEntries] = createSignal<readonly Change[]>([]);

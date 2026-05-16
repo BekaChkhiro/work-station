@@ -122,7 +122,7 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
     const client = makeRoutedClient(fetchImpl);
     const result = await client.listTasks("p1", { status: "TODO" });
 
-    expect(planflowListTasks).toHaveBeenCalledWith("p1", "TODO");
+    expect(planflowListTasks).toHaveBeenCalledWith("p1", "TODO", undefined);
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(result).toHaveLength(1);
     expect(result[0]?.taskId).toBe("T1.1");
@@ -136,7 +136,7 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
 
     const client = makeRoutedClient();
     await client.listTasks("p1", { status: ["TODO", "IN_PROGRESS"] });
-    expect(planflowListTasks).toHaveBeenCalledWith("p1", "TODO,IN_PROGRESS");
+    expect(planflowListTasks).toHaveBeenCalledWith("p1", "TODO,IN_PROGRESS", undefined);
   });
 
   it("getMe routes to planflowGetMe and unwraps the user", async () => {
@@ -172,7 +172,7 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
 
     const client = makeRoutedClient();
     const result = await client.listActiveWork("p1");
-    expect(planflowListActiveWork).toHaveBeenCalledWith("p1");
+    expect(planflowListActiveWork).toHaveBeenCalledWith("p1", undefined);
     expect(result).toEqual([
       {
         user: { id: "u-1", email: "a@b.c", name: "Alice" },
@@ -192,7 +192,7 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
 
     const client = makeRoutedClient();
     const result = await client.listComments("p1", "T1.1");
-    expect(planflowListComments).toHaveBeenCalledWith("p1", "T1.1");
+    expect(planflowListComments).toHaveBeenCalledWith("p1", "T1.1", undefined);
     expect(result[0]?.body).toBe("hi");
   });
 
@@ -206,7 +206,7 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
 
     const client = makeRoutedClient();
     const result = await client.createComment("p1", "T1.1", { body: "hello" });
-    expect(planflowCreateComment).toHaveBeenCalledWith("p1", "T1.1", "hello");
+    expect(planflowCreateComment).toHaveBeenCalledWith("p1", "T1.1", "hello", undefined);
     expect(result.body).toBe("hello");
   });
 
@@ -218,7 +218,7 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
 
     const client = makeRoutedClient();
     await client.startWorking("p1", "T1.1");
-    expect(planflowStartWork).toHaveBeenCalledWith("p1", "T1.1");
+    expect(planflowStartWork).toHaveBeenCalledWith("p1", "T1.1", undefined);
   });
 
   it("stopWorking routes to planflowStopWork", async () => {
@@ -229,7 +229,7 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
 
     const client = makeRoutedClient();
     await client.stopWorking("p1");
-    expect(planflowStopWork).toHaveBeenCalledWith("p1");
+    expect(planflowStopWork).toHaveBeenCalledWith("p1", undefined);
   });
 
   it("updateTaskStatus forwards the human-readable taskId to the cloud-agent (which resolves to UUID server-side)", async () => {
@@ -246,9 +246,69 @@ describe("PlanFlow Tasks routing — cloud mode", () => {
 
     const client = makeRoutedClient();
     const result = await client.updateTaskStatus("p1", "T1.1", "IN_PROGRESS");
-    expect(planflowUpdateTaskStatus).toHaveBeenCalledWith("p1", "T1.1", "IN_PROGRESS");
+    expect(planflowUpdateTaskStatus).toHaveBeenCalledWith("p1", "T1.1", "IN_PROGRESS", undefined);
     expect(planflowListTasks).not.toHaveBeenCalled();
     expect(result?.status).toBe("IN_PROGRESS");
+  });
+});
+
+// T19.35 — When the renderer scopes a client to a workspace projectId,
+// every routed planflow_* call must ship it as `cloud_project_id` so the
+// cloud-agent's per-project token resolver (T19.34) picks the right
+// PlanFlow account.
+describe("PlanFlow Tasks routing — cloud_project_id passthrough (T19.35)", () => {
+  beforeEach(async () => {
+    await setCloudMode(true);
+  });
+
+  function makeScopedClient(bridge: Partial<WsBridgeClient>, cloudProjectId = "ws-proj-1") {
+    _setCloudAgentManagerForTests(makeStubManager(bridge as unknown as WsBridgeClient));
+    return createPlanFlowClient({
+      getAuthToken: () => "tok",
+      fetchImpl: vi.fn(
+        async () => new Response("nope", { status: 500 }),
+      ) as unknown as typeof fetch,
+      routeViaCloudAgent: true,
+      cloudProjectId,
+      defaultRetry: { attempts: 0 },
+    });
+  }
+
+  it("listTasks forwards cloud_project_id", async () => {
+    const planflowListTasks = vi.fn(async () => ({ tasks: [] }));
+    const client = makeScopedClient({ planflowListTasks });
+    await client.listTasks("plan-proj-1", { status: "TODO" });
+    expect(planflowListTasks).toHaveBeenCalledWith("plan-proj-1", "TODO", "ws-proj-1");
+  });
+
+  it("startWorking forwards cloud_project_id", async () => {
+    const planflowStartWork = vi.fn(async () => undefined);
+    const client = makeScopedClient({ planflowStartWork });
+    await client.startWorking("plan-proj-1", "T1.1");
+    expect(planflowStartWork).toHaveBeenCalledWith("plan-proj-1", "T1.1", "ws-proj-1");
+  });
+
+  it("updateTaskStatus forwards cloud_project_id", async () => {
+    const planflowUpdateTaskStatus = vi.fn(async () => ({
+      tasks: [{ id: "u-1", taskId: "T1.1", name: "x", status: "IN_PROGRESS" }],
+    }));
+    const client = makeScopedClient({ planflowUpdateTaskStatus });
+    await client.updateTaskStatus("plan-proj-1", "T1.1", "IN_PROGRESS");
+    expect(planflowUpdateTaskStatus).toHaveBeenCalledWith(
+      "plan-proj-1",
+      "T1.1",
+      "IN_PROGRESS",
+      "ws-proj-1",
+    );
+  });
+
+  it("getMe forwards cloud_project_id", async () => {
+    const planflowGetMe = vi.fn(async () => ({
+      user: { id: "u1", email: "a@b.c", name: "Alice" },
+    }));
+    const client = makeScopedClient({ planflowGetMe });
+    await client.getMe();
+    expect(planflowGetMe).toHaveBeenCalledWith("ws-proj-1");
   });
 });
 

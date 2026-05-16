@@ -654,20 +654,9 @@ export class WsBridgeClient {
   // upstream PlanFlow API's, which is captured by the Zod schemas — not
   // by a discriminated union here.
 
-  async planflowGetMe(): Promise<unknown> {
-    const reply = await this.request({ type: "planflow_get_me" });
-    if (reply.type !== "planflow_result") {
-      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
-    }
-    return reply.data;
-  }
-
-  async planflowListTasks(projectId: string, status?: string): Promise<unknown> {
-    const payload: Record<string, unknown> = {
-      type: "planflow_list_tasks",
-      project_id: projectId,
-    };
-    if (status !== undefined) payload["status"] = status;
+  async planflowGetMe(cloudProjectId?: string): Promise<unknown> {
+    const payload: Record<string, unknown> = { type: "planflow_get_me" };
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
     const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
       throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
@@ -675,58 +664,99 @@ export class WsBridgeClient {
     return reply.data;
   }
 
-  async planflowListActiveWork(projectId: string): Promise<unknown> {
-    const reply = await this.request({
-      type: "planflow_list_active_work",
+  async planflowListTasks(
+    projectId: string,
+    status?: string,
+    cloudProjectId?: string,
+  ): Promise<unknown> {
+    const payload: Record<string, unknown> = {
+      type: "planflow_list_tasks",
       project_id: projectId,
-    });
+    };
+    if (status !== undefined) payload["status"] = status;
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
+    const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
       throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
     }
     return reply.data;
   }
 
-  async planflowListComments(projectId: string, taskId: string): Promise<unknown> {
-    const reply = await this.request({
+  async planflowListActiveWork(projectId: string, cloudProjectId?: string): Promise<unknown> {
+    const payload: Record<string, unknown> = {
+      type: "planflow_list_active_work",
+      project_id: projectId,
+    };
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
+    const reply = await this.request(payload);
+    if (reply.type !== "planflow_result") {
+      throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  async planflowListComments(
+    projectId: string,
+    taskId: string,
+    cloudProjectId?: string,
+  ): Promise<unknown> {
+    const payload: Record<string, unknown> = {
       type: "planflow_list_comments",
       project_id: projectId,
       task_id: taskId,
-    });
+    };
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
+    const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
       throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
     }
     return reply.data;
   }
 
-  async planflowCreateComment(projectId: string, taskId: string, body: string): Promise<unknown> {
-    const reply = await this.request({
+  async planflowCreateComment(
+    projectId: string,
+    taskId: string,
+    body: string,
+    cloudProjectId?: string,
+  ): Promise<unknown> {
+    const payload: Record<string, unknown> = {
       type: "planflow_create_comment",
       project_id: projectId,
       task_id: taskId,
       body,
-    });
+    };
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
+    const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
       throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
     }
     return reply.data;
   }
 
-  async planflowStartWork(projectId: string, taskId: string): Promise<void> {
-    const reply = await this.request({
+  async planflowStartWork(
+    projectId: string,
+    taskId: string,
+    cloudProjectId?: string,
+  ): Promise<void> {
+    const payload: Record<string, unknown> = {
       type: "planflow_start_work",
       project_id: projectId,
       task_id: taskId,
-    });
+    };
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
+    const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
       throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
     }
   }
 
-  async planflowStopWork(projectId: string): Promise<void> {
-    const reply = await this.request({
+  async planflowStopWork(projectId: string, cloudProjectId?: string): Promise<void> {
+    const payload: Record<string, unknown> = {
       type: "planflow_stop_work",
       project_id: projectId,
-    });
+    };
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
+    const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
       throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
     }
@@ -736,13 +766,16 @@ export class WsBridgeClient {
     projectId: string,
     taskId: string,
     status: string,
+    cloudProjectId?: string,
   ): Promise<unknown> {
-    const reply = await this.request({
+    const payload: Record<string, unknown> = {
       type: "planflow_update_task_status",
       project_id: projectId,
       task_id: taskId,
       status,
-    });
+    };
+    if (cloudProjectId !== undefined) payload["cloud_project_id"] = cloudProjectId;
+    const reply = await this.request(payload);
     if (reply.type !== "planflow_result") {
       throw new WsBridgeError("protocol", `expected planflow_result, got ${reply.type}`);
     }
