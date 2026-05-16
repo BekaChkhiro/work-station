@@ -346,7 +346,11 @@ async fn handle_text(
         | ClientMessage::ProjectDelete { id, .. }
         | ClientMessage::ProjectReorder { id, .. }
         | ClientMessage::ProjectUpdateWorkspaceTabs { id, .. }
-        | ClientMessage::PtyList { id, .. } => {
+        | ClientMessage::PtyList { id, .. }
+        | ClientMessage::ProjectLinkList { id, .. }
+        | ClientMessage::ProjectLinkSet { id, .. }
+        | ClientMessage::ProjectLinkDelete { id, .. }
+        | ClientMessage::PlanflowTokenSet { id, .. } => {
             send(
                 &conn.out_tx,
                 &ServerMessage::Error {
@@ -364,7 +368,10 @@ async fn handle_text(
         // a sibling-module handler which proxies the REST call through
         // `http::Client` (retries + cache) using the OS-keychain-stored
         // PlanFlow API token.
-        ClientMessage::PlanflowGetMe { id } => {
+        ClientMessage::PlanflowGetMe {
+            id,
+            cloud_project_id: _,
+        } => {
             dispatch_planflow(&conn.out_tx, planflow, id, |state, tx, id| async move {
                 planflow_bridge::handle_get_me(&state, &tx, id).await;
             })
@@ -373,6 +380,7 @@ async fn handle_text(
         ClientMessage::PlanflowListProjects {
             id,
             organization_id,
+            cloud_project_id: _,
         } => {
             dispatch_planflow(
                 &conn.out_tx,
@@ -388,6 +396,7 @@ async fn handle_text(
             id,
             project_id,
             status,
+            cloud_project_id: _,
         } => {
             dispatch_planflow(
                 &conn.out_tx,
@@ -399,7 +408,11 @@ async fn handle_text(
             )
             .await;
         }
-        ClientMessage::PlanflowListActiveWork { id, project_id } => {
+        ClientMessage::PlanflowListActiveWork {
+            id,
+            project_id,
+            cloud_project_id: _,
+        } => {
             dispatch_planflow(
                 &conn.out_tx,
                 planflow,
@@ -414,6 +427,7 @@ async fn handle_text(
             id,
             project_id,
             task_id,
+            cloud_project_id: _,
         } => {
             dispatch_planflow(
                 &conn.out_tx,
@@ -431,6 +445,7 @@ async fn handle_text(
             project_id,
             task_id,
             body,
+            cloud_project_id: _,
         } => {
             dispatch_planflow(
                 &conn.out_tx,
@@ -449,6 +464,7 @@ async fn handle_text(
             id,
             project_id,
             task_id,
+            cloud_project_id: _,
         } => {
             dispatch_planflow(
                 &conn.out_tx,
@@ -460,7 +476,11 @@ async fn handle_text(
             )
             .await;
         }
-        ClientMessage::PlanflowStopWork { id, project_id } => {
+        ClientMessage::PlanflowStopWork {
+            id,
+            project_id,
+            cloud_project_id: _,
+        } => {
             dispatch_planflow(
                 &conn.out_tx,
                 planflow,
@@ -476,6 +496,7 @@ async fn handle_text(
             project_id,
             task_id,
             status,
+            cloud_project_id: _,
         } => {
             dispatch_planflow(
                 &conn.out_tx,
