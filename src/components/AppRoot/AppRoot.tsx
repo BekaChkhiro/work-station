@@ -509,27 +509,37 @@ export function AppRoot(): JSX.Element {
           // T2.12 / T19.17: load or create the mode-scoped session row,
           // then wire its debounced persister so future layout changes
           // are saved into the right (Local vs Cloud) row.
-          const { id: dbSessionId, layout: savedLayout } = await getOrCreateProjectSession(
-            p.id,
-            p.defaultCli,
-            p.path,
-            bootMode,
-          );
-          dbSessionByProject[p.id] = dbSessionId;
-          persisterByProject[p.id] = createLayoutPersister(dbSessionId, {
-            onError: (err) => console.error("[T2.12] layout persist failed:", err),
-          });
+          //
+          // Cloud mode skips the session row because the project's `id`
+          // lives in the cloud-agent's SQLite, not this desktop's —
+          // inserting into the local sessions table would trip the
+          // `sessions.project_id REFERENCES projects(id)` FK. PTYs in
+          // cloud mode are also tied to a live WS connection, so the
+          // layout is inherently transient and not worth persisting
+          // locally.
+          if (bootMode === "local") {
+            const { id: dbSessionId, layout: savedLayout } = await getOrCreateProjectSession(
+              p.id,
+              p.defaultCli,
+              p.path,
+              bootMode,
+            );
+            dbSessionByProject[p.id] = dbSessionId;
+            persisterByProject[p.id] = createLayoutPersister(dbSessionId, {
+              onError: (err) => console.error("[T2.12] layout persist failed:", err),
+            });
 
-          // Restore any non-empty layout from the previous session.
-          if (!isEmptyLayout(savedLayout)) {
-            const cli = resolveDefaultCli(p.id);
-            const missing = missingDefaultCli(p.id);
-            if (missing && !cli) {
-              setCliNotFoundWarnings((prev) => ({ ...prev, [p.id]: missing }));
+            // Restore any non-empty layout from the previous session.
+            if (!isEmptyLayout(savedLayout)) {
+              const cli = resolveDefaultCli(p.id);
+              const missing = missingDefaultCli(p.id);
+              if (missing && !cli) {
+                setCliNotFoundWarnings((prev) => ({ ...prev, [p.id]: missing }));
+              }
+              await restoreProjectLayout(p.id, savedLayout, cli);
+              // Prevent auto-launch (T7.4) from spawning a duplicate first pane.
+              autoLaunchedProjects.add(p.id);
             }
-            await restoreProjectLayout(p.id, savedLayout, cli);
-            // Prevent auto-launch (T7.4) from spawning a duplicate first pane.
-            autoLaunchedProjects.add(p.id);
           }
         }
         // T19.17 — record the mode the persister/session maps now point at.
@@ -628,18 +638,21 @@ export function AppRoot(): JSX.Element {
     });
     registerProject(created);
     // T2.12 / T19.17: create the session row + persister for the freshly
-    // added project, scoped to whichever mode is active right now. The
-    // other mode's row is created lazily on the first cloud_mode flip.
-    const { id: dbSessionId } = await getOrCreateProjectSession(
-      created.id,
-      created.defaultCli,
-      created.path,
-      currentMode(),
-    );
-    dbSessionByProject[created.id] = dbSessionId;
-    persisterByProject[created.id] = createLayoutPersister(dbSessionId, {
-      onError: (err) => console.error("[T2.12] layout persist failed:", err),
-    });
+    // added project. Local-only — see the boot-path comment for why
+    // cloud-mode projects skip this (FK references the local projects
+    // table, which the cloud project's id isn't in).
+    if (currentMode() === "local") {
+      const { id: dbSessionId } = await getOrCreateProjectSession(
+        created.id,
+        created.defaultCli,
+        created.path,
+        currentMode(),
+      );
+      dbSessionByProject[created.id] = dbSessionId;
+      persisterByProject[created.id] = createLayoutPersister(dbSessionId, {
+        onError: (err) => console.error("[T2.12] layout persist failed:", err),
+      });
+    }
     setActiveProject(created.id);
   };
 
@@ -1183,29 +1196,35 @@ export function AppRoot(): JSX.Element {
     // layout in parallel. Projects are independent — there's no shared
     // state between their PTY spawns — so serialising the loop just
     // added latency proportional to N projects.
-    await Promise.all(
-      // eslint-disable-next-line solid/reactivity -- one-shot async restore, not a reactive subscription
-      nextProjects.map(async (project) => {
-        const projectPath = projectPaths[project.id] ?? null;
-        const projectCli = projectClis[project.id] ?? null;
-        const { id: nextSessionId, layout: savedLayout } = await getOrCreateProjectSession(
-          project.id,
-          projectCli,
-          projectPath,
-          next,
-        );
-        dbSessionByProject[project.id] = nextSessionId;
-        persisterByProject[project.id] = createLayoutPersister(nextSessionId, {
-          onError: (err) => console.error("[T19.17] layout persist failed:", err),
-        });
+    //
+    // Cloud mode skips both the session row (the project lives in the
+    // cloud-agent's DB, not this desktop's) and the layout restore
+    // (cloud PTYs die with the WS link — there's nothing to bring back).
+    if (next === "local") {
+      await Promise.all(
+        // eslint-disable-next-line solid/reactivity -- one-shot async restore, not a reactive subscription
+        nextProjects.map(async (project) => {
+          const projectPath = projectPaths[project.id] ?? null;
+          const projectCli = projectClis[project.id] ?? null;
+          const { id: nextSessionId, layout: savedLayout } = await getOrCreateProjectSession(
+            project.id,
+            projectCli,
+            projectPath,
+            next,
+          );
+          dbSessionByProject[project.id] = nextSessionId;
+          persisterByProject[project.id] = createLayoutPersister(nextSessionId, {
+            onError: (err) => console.error("[T19.17] layout persist failed:", err),
+          });
 
-        if (!isEmptyLayout(savedLayout)) {
-          const cli = resolveDefaultCli(project.id);
-          await restoreProjectLayout(project.id, savedLayout, cli);
-          autoLaunchedProjects.add(project.id);
-        }
-      }),
-    );
+          if (!isEmptyLayout(savedLayout)) {
+            const cli = resolveDefaultCli(project.id);
+            await restoreProjectLayout(project.id, savedLayout, cli);
+            autoLaunchedProjects.add(project.id);
+          }
+        }),
+      );
+    }
   };
 
   // T5.9 — persist the active project id on every change so the next launch
