@@ -268,6 +268,7 @@ pub fn run() {
             commands::watch::start_file_watch,
             commands::watch::stop_file_watch,
             commands::cli::cli_list_available,
+            commands::cloud_sync::cloud_sync_files,
             commands::clipboard::save_clipboard_image,
             commands::credentials::credentials_set,
             commands::credentials::credentials_get,

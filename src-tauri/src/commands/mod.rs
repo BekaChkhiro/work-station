@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod clipboard;
+pub mod cloud_sync;
 pub mod credentials;
 pub mod files;
 pub mod fs;

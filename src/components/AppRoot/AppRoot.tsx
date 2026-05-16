@@ -88,8 +88,11 @@ import {
 } from "../../types/layout";
 import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "../../db/sessions";
 import type { LayoutPersister, SessionMode } from "../../db/sessions";
+import { invoke } from "@tauri-apps/api/core";
 import { cloudAgentUrl, cloudMode } from "../../stores/cloudMode";
-import { awaitCloudClient } from "../../ipc/transport";
+import { WsBridgeClient } from "../../integrations/wsBridge";
+import { CLOUD_AGENT_WS_PATH } from "../../integrations/cloudAgent";
+import { DEFAULT_ACCOUNT, getCredential } from "../../integrations/credentials";
 import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
 import { eventMatchesBinding, getBinding, loadPersistedBindings } from "../../hotkeys";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
@@ -850,12 +853,89 @@ export function AppRoot(): JSX.Element {
   // terminal. We deliberately don't copy file contents — that's a
   // separate flow (rsync over WS would need its own protocol and
   // is out of scope for the one-click promise).
+  //
+  // Uses a one-shot ephemeral `WsBridgeClient` rather than the
+  // singleton `awaitCloudClient`: the singleton is gated on
+  // `cloudMode()` and refuses to connect while the user is in Local
+  // mode (which is exactly the only situation this menu is offered
+  // from). Bypassing the gate lets the user push a local row to
+  // cloud without first flipping the workspace toggle.
   const handlePushToCloud = async (projectId: string): Promise<void> => {
     const meta = projects().find((p) => p.id === projectId);
     if (!meta) return;
     setActionError(null);
+    const rawUrl = cloudAgentUrl();
+    if (!rawUrl) {
+      setActionError("Cloud agent isn't paired yet — pair one in Settings first.");
+      return;
+    }
+    let token: string | null;
     try {
-      const client = await awaitCloudClient();
+      token = await getCredential(Integration.CloudAgent, DEFAULT_ACCOUNT);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setActionError(`Cloud agent token load failed: ${msg}`);
+      return;
+    }
+    if (!token) {
+      setActionError("Cloud agent pairing token missing — re-pair in Settings.");
+      return;
+    }
+    const trimmed = rawUrl.replace(/\/+$/, "");
+    const url = trimmed.endsWith(CLOUD_AGENT_WS_PATH)
+      ? trimmed
+      : `${trimmed}${CLOUD_AGENT_WS_PATH}`;
+
+    const client = await new Promise<WsBridgeClient | null>((resolve) => {
+      let settled = false;
+      const c = new WsBridgeClient({
+        url,
+        token: token as string,
+        autoReconnect: false,
+        onOpen: () => {
+          if (!settled) {
+            settled = true;
+            resolve(c);
+          }
+        },
+        onClose: () => {
+          if (!settled) {
+            settled = true;
+            resolve(null);
+          }
+        },
+        onError: () => {
+          if (!settled) {
+            settled = true;
+            try {
+              c.close();
+            } catch {
+              // best-effort; client will GC on its own.
+            }
+            resolve(null);
+          }
+        },
+      });
+      c.connect();
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try {
+            c.close();
+          } catch {
+            // best-effort
+          }
+          resolve(null);
+        }
+      }, 8000);
+    });
+
+    if (!client) {
+      setActionError("Couldn't reach the cloud agent. Check the connection and try again.");
+      return;
+    }
+
+    try {
       const created = await client.projectCreate({
         name: meta.name,
         // Empty path → cloud-agent slugifies the name + mkdir_p under
@@ -868,12 +948,66 @@ export function AppRoot(): JSX.Element {
         env: projectEnvs[projectId] ?? {},
         startupCommands: projectStartupCommands[projectId] ?? [],
       });
-      setActionError(
-        `"${created.name}" pushed to cloud at ${created.path}. Switch to Cloud to use it.`,
-      );
+
+      // Second half of the push: rsync the local files into the
+      // cloud-agent's filesystem so the user lands on a populated
+      // project, not an empty mkdir. Skipped silently when the user
+      // hasn't configured an SSH endpoint yet — the cloud agent's
+      // WS URL is typically a Cloudflare hostname, which doesn't
+      // accept SSH, so we keep the two endpoints as separate
+      // settings.
+      const sshEndpoint = (await getSetting("cloud_ssh_endpoint")).trim();
+      const localPath = projectPaths[projectId] ?? "";
+      if (!sshEndpoint) {
+        setActionError(
+          `"${created.name}" pushed (metadata only) to ${created.path}. ` +
+            `Set Settings → Cloud → SSH endpoint to also sync files.`,
+        );
+      } else if (!localPath) {
+        setActionError(
+          `"${created.name}" pushed (metadata only) — no local folder path ` +
+            "on record for this project, so file sync was skipped.",
+        );
+      } else {
+        try {
+          const result = await invoke<{
+            code: number;
+            stdout: string;
+            stderr: string;
+            durationMs: number;
+          }>("cloud_sync_files", {
+            args: {
+              localPath,
+              sshEndpoint,
+              remotePath: created.path,
+              delete: false,
+            },
+          });
+          if (result.code === 0) {
+            const secs = Math.round(result.durationMs / 1000);
+            setActionError(
+              `"${created.name}" pushed + synced in ${secs}s. Switch to Cloud to use it.`,
+            );
+          } else {
+            setActionError(
+              `"${created.name}" metadata pushed but rsync exited ${result.code}: ` +
+                `${result.stderr.trim().slice(0, 200) || "no stderr captured"}`,
+            );
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setActionError(`"${created.name}" metadata pushed but file sync failed: ${msg}`);
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setActionError(`Push to cloud failed: ${msg}`);
+    } finally {
+      try {
+        client.close();
+      } catch {
+        // best-effort teardown
+      }
     }
   };
 

@@ -2063,6 +2063,8 @@ function probeCloudAgent(
 function CloudSection(): JSX.Element {
   const [urlDraft, setUrlDraft] = createSignal<string>("");
   const [tokenDraft, setTokenDraft] = createSignal<string>("");
+  const [sshDraft, setSshDraft] = createSignal<string>("");
+  const [sshSavedMessage, setSshSavedMessage] = createSignal<string | null>(null);
   const [hasToken, setHasToken] = createSignal<boolean>(false);
   const [showToken, setShowToken] = createSignal<boolean>(false);
   const [busy, setBusy] = createSignal<CloudBusy>(null);
@@ -2081,7 +2083,23 @@ function CloudSection(): JSX.Element {
       .catch((err: unknown) => {
         console.warn("[cloud-settings] token probe failed", err);
       });
+    void getSetting("cloud_ssh_endpoint")
+      .then((value) => setSshDraft(value))
+      .catch((err: unknown) => {
+        console.warn("[cloud-settings] ssh endpoint load failed", err);
+      });
   });
+
+  async function onSaveSsh(): Promise<void> {
+    setSshSavedMessage(null);
+    try {
+      await setSetting("cloud_ssh_endpoint", sshDraft().trim());
+      setSshSavedMessage("Saved.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setSshSavedMessage(`Save failed: ${msg}`);
+    }
+  }
 
   async function onPair(): Promise<void> {
     setFeedback(null);
@@ -2389,6 +2407,37 @@ function CloudSection(): JSX.Element {
             );
           }}
         </Show>
+
+        <div class="ws-settings-page__row col">
+          <div class="ws-settings-page__lbl">SSH endpoint (for file sync)</div>
+          <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+            <input
+              class="ws-settings-page__input"
+              type="text"
+              spellcheck={false}
+              autocapitalize="none"
+              autocomplete="off"
+              placeholder="root@116.203.92.40"
+              value={sshDraft()}
+              onInput={(e) => setSshDraft(e.currentTarget.value)}
+              style={{ "font-family": "var(--font-mono)", flex: 1 }}
+            />
+            <button
+              type="button"
+              class="ws-settings-page__btn ws-settings-page__btn--ghost"
+              onClick={() => void onSaveSsh()}
+            >
+              Save
+            </button>
+          </div>
+          <div class="ws-settings-page__hint">
+            Used by "Push to cloud" on the local sidebar to rsync project files. Leave empty to push
+            metadata only — the user populates the cloud folder by other means.
+          </div>
+          <Show when={sshSavedMessage()}>
+            <div class="ws-settings-page__hint">{sshSavedMessage()}</div>
+          </Show>
+        </div>
       </div>
     </>
   );

@@ -134,6 +134,11 @@ export const SETTINGS = {
   cloud_mode: def(CloudModeSchema, false),
   cloud_agent_url: def(CloudAgentUrlSchema, null as z.infer<typeof CloudAgentUrlSchema>),
   cloud_agent_status: def(CloudAgentStatusSchema, null as z.infer<typeof CloudAgentStatusSchema>),
+  // user@host the desktop uses to rsync project files to the
+  // cloud-agent (the WS bridge URL is typically a Cloudflare Tunnel
+  // hostname, which isn't an SSH endpoint). Empty string disables the
+  // file-sync step — Push-to-cloud falls back to metadata-only.
+  cloud_ssh_endpoint: def(z.string(), ""),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;
