@@ -32,6 +32,7 @@ import {
 import type { SplitDirection } from "../types/layout";
 import { dispatchMenuAction } from "../menu";
 import { eventMatchesBinding, getBinding } from "./registry";
+import { cloudMode } from "../stores/cloudMode";
 
 export interface PaneHotkeyDefaultCli {
   /** Stable CLI id (e.g. "claude", "zsh"). Echoed into `WS_CLI_NAME`. */
@@ -89,9 +90,23 @@ const handleSplit = async (
   const env = handlers.resolveEnv?.(projectId) ?? {};
   const startupCommands = handlers.resolveStartupCommands?.(projectId) ?? [];
   const defaultCli = handlers.resolveDefaultCli?.(projectId) ?? null;
+  // Local mode hands the spawn an absolute path resolved on this Mac
+  // (`cliListAvailable` + `defaultShell()`). The cloud-agent's
+  // filesystem doesn't have those paths, so cloud mode falls back to
+  // a bare command name and lets the remote host's PATH resolve it.
+  // The shell fallback also swaps zsh for bash in cloud mode — Ubuntu
+  // doesn't ship zsh by default and `/bin/zsh` would 404 on the VPS.
+  const inCloud = cloudMode();
+  const cliCommand = defaultCli
+    ? inCloud
+      ? defaultCli.name
+      : defaultCli.path
+    : inCloud
+      ? "bash"
+      : handlers.shellCommand();
   try {
     const resp = await ptySpawn({
-      command: defaultCli ? defaultCli.path : handlers.shellCommand(),
+      command: cliCommand,
       args: defaultCli ? [] : (handlers.shellArgs?.() ?? []),
       cwd: cwd ?? undefined,
       env: defaultCli
