@@ -139,6 +139,12 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "fs_read",
     "fs_write",
     "fs_delete",
+    // T19.32 — cloud-agent project ↔ external-service links. Mirrors
+    // the desktop's `project_link_*` Tauri commands so the renderer can
+    // target either backend with one `routeIpc(...)` call.
+    "project_link_list",
+    "project_link_set",
+    "project_link_delete",
 ];
 
 /// Client → server frame.
@@ -420,6 +426,46 @@ pub enum ClientMessage {
         project_id: String,
         relative_path: String,
     },
+
+    // ---- T19.32: cloud-agent project_links bridge ----
+    //
+    // Mirrors the desktop's `project_link_list` / `project_link_set` /
+    // `project_link_delete` Tauri commands so the same camelCase
+    // payload the renderer builds for Tauri can target the cloud
+    // backend verbatim. The metadata payload is free-form JSON; the
+    // server only enforces "must be a JSON object" (rejected with
+    // `invalid_args` otherwise). Default of `{}` matches the desktop
+    // `default_metadata` helper.
+    /// List every link for one project.
+    ProjectLinkList {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    /// Upsert a (`project_id`, `service`, `external_id`) link.
+    /// `metadata` defaults to `{}` when omitted.
+    ProjectLinkSet {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        service: String,
+        external_id: String,
+        #[serde(default = "default_link_metadata")]
+        metadata: Value,
+    },
+    /// Remove one specific link. Idempotent — re-deleting a gone row
+    /// replies `removed: false` rather than erroring.
+    ProjectLinkDelete {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+        service: String,
+        external_id: String,
+    },
+}
+
+fn default_link_metadata() -> Value {
+    serde_json::json!({})
 }
 
 /// Server → client frame.
@@ -628,6 +674,36 @@ pub enum ServerMessage {
     FsAck {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+    },
+
+    // ---- T19.32: cloud-agent project_links replies ----
+    //
+    // Failures share the generic `Error` envelope (kinds: `not_found`
+    // for an unknown `project_id`, `invalid_args` for empty fields or
+    // non-object metadata, `internal` for SQLite failures) — same
+    // pattern projects + settings use.
+    /// Response to `project_link_list`. `links` is the typed list
+    /// serialized to JSON by the cloud-agent before frame construction
+    /// (mirrors the [`ServerMessage::ProjectsListResult`] pattern that
+    /// keeps this crate Tauri-free).
+    ProjectLinksResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        links: Value,
+    },
+    /// Response to `project_link_set`. The full upserted row, including
+    /// `createdAt` (preserved on conflict).
+    ProjectLinkResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        link: Value,
+    },
+    /// Response to `project_link_delete`. `removed` is `true` when a
+    /// row was deleted, `false` when the triple was already gone.
+    ProjectLinkDeleted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        removed: bool,
     },
 }
 

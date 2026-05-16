@@ -27,6 +27,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{Executor, Row};
 
 pub mod app_settings;
+pub mod project_links;
 pub mod projects;
 
 /// Filename for the cloud-agent's SQLite database, placed under
@@ -50,6 +51,7 @@ const PRAGMAS: &[&str] = &[
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_projects.sql")),
     (2, include_str!("../../migrations/0002_app_settings.sql")),
+    (3, include_str!("../../migrations/0003_project_links.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -169,7 +171,12 @@ mod tests {
         let pool = open(dir.path()).await.expect("open pool");
 
         // Both tables exist after open.
-        for table in ["projects", "app_settings", "schema_migrations"] {
+        for table in [
+            "projects",
+            "app_settings",
+            "project_links",
+            "schema_migrations",
+        ] {
             let exists: Option<String> = sqlx::query_scalar(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
             )

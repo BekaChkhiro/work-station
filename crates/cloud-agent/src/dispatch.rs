@@ -76,7 +76,7 @@ use workstation_core::ws::protocol::{
 };
 use workstation_core::ws::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
-use crate::db::{app_settings, projects};
+use crate::db::{app_settings, project_links, projects};
 use crate::fs::{self as cfs, FsError};
 use crate::planflow_proxy::{self, PlanflowState};
 
@@ -349,7 +349,8 @@ async fn handle_text(
         | "fs_list" | "fs_read" | "fs_write" | "fs_delete" | "planflow_get_me"
         | "planflow_list_projects" | "planflow_list_tasks" | "planflow_list_active_work"
         | "planflow_list_comments" | "planflow_create_comment" | "planflow_start_work"
-        | "planflow_stop_work" | "planflow_update_task_status" => {
+        | "planflow_stop_work" | "planflow_update_task_status" | "project_link_list"
+        | "project_link_set" | "project_link_delete" => {
             match serde_json::from_value::<ClientMessage>(value) {
                 Ok(msg) => msg,
                 Err(error) => {
@@ -625,6 +626,39 @@ async fn dispatch_typed(
                 status,
             )
             .await;
+        }
+        // T19.32 — project ↔ external-service links. Same camelCase
+        // wire shape the desktop's `commands/project_links.rs` exposes,
+        // so the renderer can `routeIpc(...)` either backend.
+        ClientMessage::ProjectLinkList { id, project_id } => {
+            handle_project_link_list(&conn.out_tx, pool, id, project_id).await;
+        }
+        ClientMessage::ProjectLinkSet {
+            id,
+            project_id,
+            service,
+            external_id,
+            metadata,
+        } => {
+            handle_project_link_set(
+                &conn.out_tx,
+                pool,
+                id,
+                project_id,
+                service,
+                external_id,
+                metadata,
+            )
+            .await;
+        }
+        ClientMessage::ProjectLinkDelete {
+            id,
+            project_id,
+            service,
+            external_id,
+        } => {
+            handle_project_link_delete(&conn.out_tx, pool, id, project_id, service, external_id)
+                .await;
         }
         // Variants not in the typed-allowlist filter inside
         // [`handle_text`] are routed to `unimplemented` before reaching
@@ -902,6 +936,80 @@ fn project_error_to_frame(id: Option<String>, error: &projects::ProjectError) ->
         | projects::ProjectError::ReorderMismatch { .. }
         | projects::ProjectError::ReorderDuplicate(_) => "invalid_args",
         projects::ProjectError::EnvSerialize(_) | projects::ProjectError::Sqlx(_) => "internal",
+    };
+    ServerMessage::Error {
+        id,
+        kind: kind.into(),
+        message: error.to_string(),
+    }
+}
+
+async fn handle_project_link_list(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+) {
+    match project_links::list(pool, &project_id).await {
+        Ok(rows) => {
+            let links =
+                serde_json::to_value(rows).expect("ProjectLink list always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectLinksResult { id, links }).await;
+        }
+        Err(error) => send(out_tx, &project_link_error_to_frame(id, &error)).await,
+    }
+}
+
+async fn handle_project_link_set(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    service: String,
+    external_id: String,
+    metadata: serde_json::Value,
+) {
+    let input = project_links::NewProjectLink {
+        project_id,
+        service,
+        external_id,
+        metadata,
+    };
+    match project_links::set(pool, input).await {
+        Ok(link) => {
+            let link = serde_json::to_value(link).expect("ProjectLink always serializes to JSON");
+            send(out_tx, &ServerMessage::ProjectLinkResult { id, link }).await;
+        }
+        Err(error) => send(out_tx, &project_link_error_to_frame(id, &error)).await,
+    }
+}
+
+async fn handle_project_link_delete(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    service: String,
+    external_id: String,
+) {
+    match project_links::delete(pool, &project_id, &service, &external_id).await {
+        Ok(removed) => send(out_tx, &ServerMessage::ProjectLinkDeleted { id, removed }).await,
+        Err(error) => send(out_tx, &project_link_error_to_frame(id, &error)).await,
+    }
+}
+
+fn project_link_error_to_frame(
+    id: Option<String>,
+    error: &project_links::ProjectLinkError,
+) -> ServerMessage {
+    let kind = match error {
+        project_links::ProjectLinkError::ProjectNotFound(_) => "not_found",
+        project_links::ProjectLinkError::EmptyProjectId
+        | project_links::ProjectLinkError::EmptyService
+        | project_links::ProjectLinkError::EmptyExternalId
+        | project_links::ProjectLinkError::MetadataNotObject => "invalid_args",
+        project_links::ProjectLinkError::MetadataSerialize(_)
+        | project_links::ProjectLinkError::Sqlx(_) => "internal",
     };
     ServerMessage::Error {
         id,
@@ -2309,6 +2417,161 @@ mod tests {
             r#"{"type":"fs_write","id":"x","project_id":"p","content":"x"}"#,
         )
         .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "invalid_json");
+    }
+
+    // ---- T19.32: project_link_* dispatch ----
+
+    #[tokio::test]
+    async fn project_link_set_then_list_round_trips_camel_case() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-1", "alpha").await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_set","id":"s","project_id":"p-1","service":"github","external_id":"acme/web","metadata":{"htmlUrl":"https://github.com/acme/web"}}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "project_link_result");
+        assert_eq!(frame["id"], "s");
+        assert_eq!(frame["link"]["projectId"], "p-1");
+        assert_eq!(frame["link"]["service"], "github");
+        assert_eq!(frame["link"]["externalId"], "acme/web");
+        assert_eq!(
+            frame["link"]["metadata"]["htmlUrl"],
+            "https://github.com/acme/web"
+        );
+        assert!(
+            frame["link"]["createdAt"].is_i64(),
+            "createdAt should be an integer, got {frame}",
+        );
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_list","id":"l","project_id":"p-1"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "project_links_result");
+        assert_eq!(frame["id"], "l");
+        let links = frame["links"].as_array().expect("links array");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0]["service"], "github");
+    }
+
+    #[tokio::test]
+    async fn project_link_set_defaults_metadata_to_empty_object() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-2", "beta").await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_set","id":"s","project_id":"p-2","service":"planflow","external_id":"00000000-0000-0000-0000-000000000001"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "project_link_result");
+        assert!(
+            frame["link"]["metadata"].is_object(),
+            "metadata defaults to {{}}, got {frame}",
+        );
+    }
+
+    #[tokio::test]
+    async fn project_link_set_unknown_project_replies_not_found() {
+        let pool = fresh_pool().await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_set","id":"s","project_id":"ghost","service":"github","external_id":"x/y"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "not_found");
+        assert_eq!(frame["id"], "s");
+    }
+
+    #[tokio::test]
+    async fn project_link_set_non_object_metadata_replies_invalid_args() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-3", "gamma").await;
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_set","id":"s","project_id":"p-3","service":"github","external_id":"x/y","metadata":"oops"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["kind"], "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn project_link_delete_reports_removed_then_idempotent() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-4", "delta").await;
+        let _ = drive(
+            &pool,
+            r#"{"type":"project_link_set","project_id":"p-4","service":"neon","external_id":"br_main"}"#,
+        )
+        .await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_delete","id":"d","project_id":"p-4","service":"neon","external_id":"br_main"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "project_link_deleted");
+        assert_eq!(frame["id"], "d");
+        assert_eq!(frame["removed"], true);
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_delete","id":"d2","project_id":"p-4","service":"neon","external_id":"br_main"}"#,
+        )
+        .await;
+        assert_eq!(frames[0]["type"], "project_link_deleted");
+        assert_eq!(frames[0]["removed"], false);
+    }
+
+    #[tokio::test]
+    async fn project_link_list_survives_restart() {
+        // Acceptance: a row inserted via `project_link_set` survives a
+        // daemon restart and is returned by `project_link_list`. We
+        // simulate the restart by writing into a tempdir, dropping the
+        // pool, then re-opening it.
+        let dir = tempdir().expect("tempdir");
+        let pool = crate::db::open(dir.path()).await.expect("open #1");
+        seed_project(&pool, "p-r", "rho").await;
+        let _ = drive(
+            &pool,
+            r#"{"type":"project_link_set","project_id":"p-r","service":"vercel","external_id":"prj_rho","metadata":{"slug":"rho"}}"#,
+        )
+        .await;
+        drop(pool);
+
+        let pool = crate::db::open(dir.path()).await.expect("open #2");
+        let frames = drive(
+            &pool,
+            r#"{"type":"project_link_list","id":"l","project_id":"p-r"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "project_links_result");
+        let links = frame["links"].as_array().expect("links array");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0]["service"], "vercel");
+        assert_eq!(links[0]["externalId"], "prj_rho");
+        assert_eq!(links[0]["metadata"]["slug"], "rho");
+    }
+
+    #[tokio::test]
+    async fn project_link_list_missing_project_id_replies_invalid_json() {
+        let pool = fresh_pool().await;
+        let frames = drive(&pool, r#"{"type":"project_link_list","id":"x"}"#).await;
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "invalid_json");
