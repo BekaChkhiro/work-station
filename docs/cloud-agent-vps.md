@@ -154,6 +154,79 @@ sudo -u wsagent /opt/cloud-agent/cloud-agent pair show
 
 Paste the printed URL + token block into **Settings → Cloud → Pair** in the desktop app (T19.15).
 
-## 8. Tear-down
+## 8. Per-project PlanFlow tokens (T19.34)
+
+The cloud-agent's PlanFlow proxy (T19.29) defaults to a single daemon-wide credential — `PLANFLOW_API_TOKEN` in the environment, or `auth_token` in `/etc/cloud-agent/config.toml`. With T19.34 this is the **fallback**; each Work Station project linked to PlanFlow can carry its own bearer so two PlanFlow accounts can coexist on one agent.
+
+### Storage layout
+
+Per-project tokens live in a flat keychain dir under the agent's `state_dir`:
+
+```
+/var/lib/cloud-agent/
+└── planflow_tokens/
+    ├── <work-station project_id>     # 0600, owner wsagent
+    └── …
+```
+
+Resolution order at request time, per WS frame's `cloud_project_id`:
+
+1. `<state_dir>/planflow_tokens/<cloud_project_id>` — if the file exists and is non-empty.
+2. `PLANFLOW_API_TOKEN` env var (e.g. `systemctl set-environment PLANFLOW_API_TOKEN=…`).
+3. `auth_token` from `/etc/cloud-agent/config.toml`.
+
+`cloud_project_id` is the **Work Station** `projects.id` (not the PlanFlow workspace UUID). The proxy path-jails it to `[A-Za-z0-9_-]{1,128}` and rejects everything else with `invalid_args` — a malicious frame can't escape the keychain dir.
+
+A frame without `cloud_project_id` (e.g. NotificationsBell, unscoped surfaces) skips step 1 and goes straight to env → config.
+
+### Provisioning a token from the desktop
+
+The renderer never writes to the keychain dir directly. Two WS calls do the work:
+
+1. **`project_link_set`** (T19.32) — records the PlanFlow workspace this Work Station project is bound to. Wire shape:
+
+   ```json
+   {
+     "type": "project_link_set",
+     "id": "<request id>",
+     "project_id": "<work-station project_id>",
+     "service": "planflow",
+     "external_id": "<planflow workspace UUID>",
+     "metadata": {}
+   }
+   ```
+
+   Reply: `project_link_result` with the upserted row (created_at preserved on re-upsert).
+
+2. **`planflow_token_set`** (T19.34) — drops the bearer on the agent's disk. Wire shape:
+
+   ```json
+   {
+     "type": "planflow_token_set",
+     "id": "<request id>",
+     "cloud_project_id": "<work-station project_id>",
+     "token": "<planflow bearer>"
+   }
+   ```
+
+   Reply: `planflow_result { id, data: null }` on success. An empty `token` field **deletes** the file (the next `planflow_*` call for this project falls back to env/config). Errors come back as `planflow_error` with kind `invalid_args` (bad project_id) or `credential` (write failed / store not configured).
+
+The desktop's **Integrations → Connect to PlanFlow** dialog wires both calls — the renderer doesn't need to know the path layout.
+
+### Verifying on the VPS
+
+```bash
+sudo -u wsagent ls -l /var/lib/cloud-agent/planflow_tokens/
+# expect 0600 files, one per linked project
+sudo -u wsagent cat /var/lib/cloud-agent/planflow_tokens/<project_id>
+# expect the trimmed bearer token (no trailing newline matters; whitespace is stripped on read)
+```
+
+If a project's PlanFlow calls return `credential` errors:
+
+- `sudo journalctl -u cloud-agent -n 100 | grep planflow` — the proxy logs the resolution step it tried.
+- Re-run **Connect to PlanFlow** in the desktop, or set the daemon-wide `PLANFLOW_API_TOKEN` as a fallback while you debug.
+
+## 9. Tear-down
 
 When you're done with this dev box: Hetzner console → server → Delete. Billing is hourly — leaving a CX22 running 24/7 ≈ €4.50/mo; killing it after each session saves money but costs a fresh bootstrap each time. Snapshot before deleting if you want to skip §4 next time (Hetzner snapshots are €0.012/GB-mo).
