@@ -63,6 +63,7 @@ import {
   reorderProjects as reorderProjectsLocal,
   replacePane,
   setActiveProject,
+  setActiveTab,
   setFocusedSession,
   setLayout,
   splitPane,
@@ -1131,6 +1132,13 @@ export function AppRoot(): JSX.Element {
         ? (availableClis().find((c) => c.name === cliName) ?? resolveTaskCli(projectId))
         : resolveTaskCli(projectId);
     if (!cli) return;
+
+    // Surface the Terminal tab before spawning so the new pane is
+    // actually visible — otherwise the spawned CLI lives in a hidden
+    // workspace whose xterm is paused (T4.12 IntersectionObserver),
+    // the user sees nothing happen, and the Start prompt only renders
+    // after they manually switch tabs.
+    setActiveTab(projectId, "terminal");
 
     // Spawn without startup commands — write the prompt once the REPL is
     // idle (see writePromptWhenReady below).
