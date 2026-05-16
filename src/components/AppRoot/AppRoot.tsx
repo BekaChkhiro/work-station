@@ -88,7 +88,8 @@ import {
 } from "../../types/layout";
 import { EMPTY_LAYOUT, createLayoutPersister, getOrCreateProjectSession } from "../../db/sessions";
 import type { LayoutPersister, SessionMode } from "../../db/sessions";
-import { cloudMode } from "../../stores/cloudMode";
+import { cloudAgentUrl, cloudMode } from "../../stores/cloudMode";
+import { awaitCloudClient } from "../../ipc/transport";
 import { usePaneHotkeys } from "../../hotkeys/paneHotkeys";
 import { eventMatchesBinding, getBinding, loadPersistedBindings } from "../../hotkeys";
 import { addMenuActionListener, dispatchMenuAction } from "../../menu";
@@ -842,6 +843,40 @@ export function AppRoot(): JSX.Element {
     }
   };
 
+  // One-click clone of a local project's metadata to the paired
+  // cloud-agent. The agent auto-creates the folder under its
+  // projects-root (slugified name), so the user just needs to
+  // populate it afterwards (`git clone`, etc.) inside a cloud
+  // terminal. We deliberately don't copy file contents — that's a
+  // separate flow (rsync over WS would need its own protocol and
+  // is out of scope for the one-click promise).
+  const handlePushToCloud = async (projectId: string): Promise<void> => {
+    const meta = projects().find((p) => p.id === projectId);
+    if (!meta) return;
+    setActionError(null);
+    try {
+      const client = await awaitCloudClient();
+      const created = await client.projectCreate({
+        name: meta.name,
+        // Empty path → cloud-agent slugifies the name + mkdir_p under
+        // `<projects_root>/<slug>` (see resolve_create_path in
+        // crates/cloud-agent/src/dispatch.rs).
+        path: "",
+        color: meta.color,
+        icon: meta.glyph,
+        defaultCli: projectClis[projectId] ?? null,
+        env: projectEnvs[projectId] ?? {},
+        startupCommands: projectStartupCommands[projectId] ?? [],
+      });
+      setActionError(
+        `"${created.name}" pushed to cloud at ${created.path}. Switch to Cloud to use it.`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setActionError(`Push to cloud failed: ${msg}`);
+    }
+  };
+
   const spawnCli = async (
     projectId: string,
     cli: PaneCliOption,
@@ -1409,6 +1444,7 @@ export function AppRoot(): JSX.Element {
       <ProjectContextMenu
         position={contextTarget()?.position ?? null}
         onClose={() => setContextTarget(null)}
+        canPushToCloud={!cloudMode() && cloudAgentUrl() != null}
         onSwitch={() => {
           const t = contextTarget();
           if (t) setActiveProject(t.projectId);
@@ -1420,6 +1456,10 @@ export function AppRoot(): JSX.Element {
         onReveal={() => {
           const t = contextTarget();
           if (t) void handleReveal(t.projectId);
+        }}
+        onPushToCloud={() => {
+          const t = contextTarget();
+          if (t) void handlePushToCloud(t.projectId);
         }}
         onDelete={() => {
           const t = contextTarget();

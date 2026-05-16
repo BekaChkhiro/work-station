@@ -25,9 +25,17 @@ export interface ProjectContextMenuProps {
   onEdit: () => void;
   onReveal: () => void;
   onDelete: () => void;
+  /** Clone the row's metadata (name, default CLI, env, startup commands)
+   *  to the paired cloud-agent. Path is left empty so the agent
+   *  auto-creates `<projects_root>/<slug>`. */
+  onPushToCloud?: () => void;
   /** Optional — when false, the "Reveal in Finder/Explorer" item is
    *  hidden. Useful in harnesses that don't have a real path. */
   canReveal?: boolean;
+  /** When true, surface the "Push to cloud" item. The parent gates
+   *  this on Local mode + a paired cloud agent so the row only
+   *  appears when the action can actually succeed. */
+  canPushToCloud?: boolean;
 }
 
 const MENU_W = 200;
@@ -37,16 +45,19 @@ const MENU_W = 200;
 const ROW_H = 28;
 const PADDING = 8;
 
-type ItemKey = "switch" | "edit" | "reveal" | "delete";
+type ItemKey = "switch" | "edit" | "reveal" | "push-to-cloud" | "delete";
 
 export function ProjectContextMenu(props: ProjectContextMenuProps): JSX.Element {
   const [highlight, setHighlight] = createSignal<ItemKey>("switch");
   let menuEl: HTMLDivElement | undefined;
 
   const visibleItems = (): ItemKey[] => {
-    const all: ItemKey[] = ["switch", "edit", "reveal", "delete"];
-    if (props.canReveal === false) return all.filter((k) => k !== "reveal");
-    return all;
+    const all: ItemKey[] = ["switch", "edit", "reveal", "push-to-cloud", "delete"];
+    return all.filter((k) => {
+      if (k === "reveal" && props.canReveal === false) return false;
+      if (k === "push-to-cloud" && props.canPushToCloud !== true) return false;
+      return true;
+    });
   };
 
   // Reset highlight every time the menu re-opens. Otherwise an old
@@ -108,6 +119,9 @@ export function ProjectContextMenu(props: ProjectContextMenuProps): JSX.Element 
       case "reveal":
         props.onReveal();
         break;
+      case "push-to-cloud":
+        props.onPushToCloud?.();
+        break;
       case "delete":
         props.onDelete();
         break;
@@ -158,6 +172,14 @@ export function ProjectContextMenu(props: ProjectContextMenuProps): JSX.Element 
             highlighted={highlight() === "reveal"}
             onActivate={() => activate("reveal")}
             onHover={() => setHighlight("reveal")}
+          />
+        </Show>
+        <Show when={props.canPushToCloud === true}>
+          <ContextItem
+            label="Push to cloud"
+            highlighted={highlight() === "push-to-cloud"}
+            onActivate={() => activate("push-to-cloud")}
+            onHover={() => setHighlight("push-to-cloud")}
           />
         </Show>
         <div class="ws-pcm__sep" aria-hidden="true" />
