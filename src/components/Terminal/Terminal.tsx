@@ -106,14 +106,20 @@ export function Terminal(props: TerminalProps) {
   // from the start of scrollback — same path used when the session id
   // changes — to recover whatever streamed during the hidden window.
   let isDocVisible = typeof document === "undefined" ? true : !document.hidden;
-  // Start "not intersecting" when an IntersectionObserver will be wired up
-  // — the observer's first callback (synchronously dispatched after
-  // observe() in modern browsers) sets the real value. This avoids a
-  // wasteful subscribe → immediate cancel cycle when the terminal mounts
-  // inside a hidden parent (display:none ancestor, off-screen tab, etc.).
-  // Older browsers without IntersectionObserver fall back to the
-  // optimistic default so the terminal still subscribes at mount.
-  let isHostIntersecting = typeof IntersectionObserver === "undefined";
+  // Optimistically assume the host is on-screen at mount. The
+  // IntersectionObserver wired up later will correct this asynchronously
+  // if the host is actually hidden (display:none ancestor, off-screen
+  // tab, etc.), and `evaluateVisibility` will stop the subscription on
+  // the next tick. Starting `false` and waiting for the observer was the
+  // old behavior, but IntersectionObserver callbacks are *always* async
+  // (despite the prior comment claiming otherwise) — for panes spawned
+  // into a newly-mounted layout (e.g. PlanFlow "Start" pressing from the
+  // PlanFlow tab), that left the Terminal in `isPaused = true` past the
+  // window where the launcher writes the prompt, so the echoed prompt
+  // bytes streamed in via pty_output but never reached this xterm. The
+  // user then saw nothing in the new pane until they switched tabs /
+  // projects, which forced a remount + scrollback replay.
+  let isHostIntersecting = true;
   let isPaused = false;
   let intersectionObserver: IntersectionObserver | null = null;
   let docVisibilityHandler: (() => void) | null = null;
