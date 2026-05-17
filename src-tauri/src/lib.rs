@@ -174,6 +174,7 @@ pub fn run() {
             commands::fs::fs_list_dir,
             commands::files::read_text_file,
             commands::files::write_text_file,
+            commands::search::search_in_project,
             commands::cli::cli_list_available,
             commands::clipboard::save_clipboard_image,
             commands::credentials::credentials_set,

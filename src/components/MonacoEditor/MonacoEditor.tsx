@@ -56,6 +56,13 @@ export interface MonacoEditorProps {
   class?: string;
   /** Fires when the editor's content changes from user input. */
   onChange?: (value: string) => void;
+  /** T13.9 — when a 1-based line number is provided, the editor reveals
+   *  that line (centered) and parks the cursor at the given column (also
+   *  1-based, defaulting to 1). The reveal re-runs whenever any field on
+   *  this object changes — including the file `path` — so jumping to the
+   *  same line twice still scrolls/positions even if the user has since
+   *  scrolled away. */
+  reveal?: { line: number; column?: number };
 }
 
 export function MonacoEditor(props: MonacoEditorProps): JSX.Element {
@@ -173,6 +180,28 @@ export function MonacoEditor(props: MonacoEditorProps): JSX.Element {
         editor?.updateOptions({ readOnly: ro === true });
       },
       { defer: true },
+    ),
+  );
+
+  // T13.9 — reveal & position when project-wide search opens a file at a
+  // specific line. The effect tracks both `reveal` and `value` so it fires
+  // after a `setValue` from a file-load too: when search opens a brand-new
+  // file, the value updates *and* the reveal request arrives together, and
+  // we want to wait until the model actually has the text before jumping.
+  // Run the reveal on a microtask so monaco has applied the new value
+  // before we ask it to scroll.
+  createEffect(
+    on(
+      () => [props.reveal?.line, props.reveal?.column, props.value] as const,
+      ([line, column]) => {
+        if (!editor || line === undefined || line <= 0) return;
+        queueMicrotask(() => {
+          if (!editor) return;
+          const safeColumn = column && column > 0 ? column : 1;
+          editor.revealLineInCenter(line);
+          editor.setPosition({ lineNumber: line, column: safeColumn });
+        });
+      },
     ),
   );
 

@@ -13,6 +13,7 @@ export type MenuActionId =
   | "copy"
   | "paste"
   | "find-in-pane"
+  | "find-in-files"
   | "toggle-sidebar"
   | "quick-switcher"
   | "switch-project-1"
@@ -61,6 +62,12 @@ export const APP_MENU: readonly MenuSection[] = [
       { id: "copy", label: "Copy", shortcut: "⌘C" },
       { id: "paste", label: "Paste", shortcut: "⌘V" },
       { id: "find-in-pane", label: "Find in pane", hotkeyId: "find-in-terminal" },
+      // T13.9 — shares the Cmd/Ctrl+Shift+F binding registered as
+      // `find-cross-session` (the terminal cross-session search). The
+      // App-level dispatcher routes the keystroke to whichever surface
+      // the active workspace tab calls for, so a single binding serves
+      // both menu entries.
+      { id: "find-in-files", label: "Find in files", hotkeyId: "find-cross-session" },
     ],
   },
   {

@@ -28,7 +28,8 @@ import {
   installAutoReplay,
   installOfflineListeners,
 } from "./integrations";
-import { addMenuActionListener, bridgeNativeMenuActions } from "./menu";
+import { addMenuActionListener, bridgeNativeMenuActions, dispatchMenuAction } from "./menu";
+import { activeProjectId, activeTab } from "./stores/workspace";
 import { isEditableTarget } from "./utils/platform";
 import "./styles/globals.css";
 
@@ -132,7 +133,18 @@ export default function App() {
       const crossFind = getBinding("find-cross-session");
       if (crossFind && eventMatchesBinding(e, crossFind)) {
         e.preventDefault();
-        setCrossSearchOpen(true);
+        // T13.9 — same shortcut serves two surfaces: project-wide
+        // find-in-files when the Editor tab is up front, cross-session
+        // terminal search otherwise. The Editor tab listens for the
+        // `find-in-files` menu action and toggles its left-side search
+        // panel; we route via the menu bus rather than a direct signal
+        // to keep AppShell self-contained.
+        const projectId = activeProjectId();
+        if (projectId !== null && activeTab(projectId) === "editor") {
+          dispatchMenuAction("find-in-files");
+        } else {
+          setCrossSearchOpen(true);
+        }
         return;
       }
       const switcher = getBinding("quick-switcher");

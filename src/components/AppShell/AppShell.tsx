@@ -22,6 +22,7 @@ import type { JSX } from "solid-js";
 import { FileTree } from "../FileTree";
 import { LayoutTree } from "../LayoutTree";
 import { MonacoEditor } from "../MonacoEditor";
+import { ProjectSearch } from "../ProjectSearch";
 import {
   readTextFile,
   writeTextFile,
@@ -547,6 +548,26 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
     | { kind: "error"; path: string; message: string };
 
   const [opened, setOpened] = createSignal<OpenedFile | null>(null);
+  // T13.9 — left-side panel mode. The file tree is the default; the
+  // project-wide search panel takes the same column when the user opens
+  // it via Cmd/Ctrl+Shift+F (AppShell dispatches `find-in-files`). The
+  // tree state in FileTree is preserved across toggles by leaving it
+  // mounted off-screen via Solid's <Show fallback> pattern.
+  const [sidePanel, setSidePanel] = createSignal<"tree" | "search">("tree");
+  // Reveal target for the editor — set whenever the user clicks a
+  // search result so MonacoEditor scrolls to that line after the file
+  // loads. We pair it with a `version` so re-clicking the same line
+  // re-fires the reveal effect even when the line number is unchanged.
+  const [revealTarget, setRevealTarget] = createSignal<{
+    path: string;
+    line: number;
+    column: number;
+    version: number;
+  } | null>(null);
+  // Bumped when Cmd+Shift+F is pressed while the panel is already open,
+  // so ProjectSearch re-focuses its input instead of silently doing
+  // nothing.
+  const [searchFocusVersion, setSearchFocusVersion] = createSignal(0);
 
   // Token-based race guard. A slow read on /big.txt followed by a fast
   // read on /readme.md should land readme's content in the editor — not
@@ -569,12 +590,29 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
     return absPath;
   };
 
-  const handleSelect = async (absPath: string): Promise<void> => {
+  const handleSelect = async (
+    absPath: string,
+    reveal?: { line: number; column: number },
+  ): Promise<void> => {
     const root = props.projectPath;
     if (root === null) return;
     const relative = toRelative(root, absPath);
     const myToken = ++openSeq;
     clearAutosaveTimer();
+    // Stage the reveal target before the read so MonacoEditor's reveal
+    // effect picks up the new line as soon as the content lands. Without
+    // this ordering the file would load at line 1 and only scroll once a
+    // second click fires.
+    if (reveal) {
+      setRevealTarget((prev) => ({
+        path: absPath,
+        line: reveal.line,
+        column: reveal.column,
+        version: (prev?.version ?? 0) + 1,
+      }));
+    } else {
+      setRevealTarget(null);
+    }
     setOpened({ kind: "loading", path: absPath });
     try {
       const result: ReadFileResult = await readTextFile(root, relative);
@@ -703,10 +741,25 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
   // doesn't try to save while focus is on, say, a Terminal pane.
   onMount(() => {
     const dispose = addMenuActionListener((id) => {
-      if (id !== "save-file") return;
-      if (activeTab(props.projectId) !== "editor") return;
+      // Both save and find-in-files are scoped to the project + tab
+      // combo currently in front of the user — otherwise Cmd+Shift+F in
+      // a Terminal tab would silently toggle the editor's search panel.
       if (activeProjectId() !== props.projectId) return;
-      void performSave();
+      if (activeTab(props.projectId) !== "editor") return;
+      if (id === "save-file") {
+        void performSave();
+        return;
+      }
+      if (id === "find-in-files") {
+        if (sidePanel() === "search") {
+          // Already open — re-focus the input so a second press of the
+          // accelerator behaves like every other "summon the search"
+          // shortcut in macOS/VSCode.
+          setSearchFocusVersion((v) => v + 1);
+        } else {
+          setSidePanel("search");
+        }
+      }
     });
     onCleanup(() => {
       clearAutosaveTimer();
@@ -719,11 +772,23 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
       <Show when={props.projectPath}>
         {(root) => (
           <aside class="ws-editor-tab__tree" aria-label="Project files">
-            <FileTree
-              root={root()}
-              onSelectFile={(p) => void handleSelect(p)}
-              selectedPath={opened()?.path ?? null}
-            />
+            <Show
+              when={sidePanel() === "search"}
+              fallback={
+                <FileTree
+                  root={root()}
+                  onSelectFile={(p) => void handleSelect(p)}
+                  selectedPath={opened()?.path ?? null}
+                />
+              }
+            >
+              <ProjectSearch
+                projectRoot={root()}
+                focusVersion={searchFocusVersion()}
+                onOpenMatch={(path, line, column) => void handleSelect(path, { line, column })}
+                onClose={() => setSidePanel("tree")}
+              />
+            </Show>
           </aside>
         )}
       </Show>
@@ -746,15 +811,14 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
                 <span class="ws-editor-tab__header-status">Saving…</span>
               </Show>
               <Show when={saveStatus() === "error"}>
-                {(_) => {
-                  const o = opened();
-                  const err = o?.kind === "text" ? o.lastError : null;
-                  return (
-                    <span class="ws-editor-tab__header-status ws-editor-tab__header-status--error">
-                      Save failed{err ? `: ${err}` : ""}
-                    </span>
-                  );
-                }}
+                <span class="ws-editor-tab__header-status ws-editor-tab__header-status--error">
+                  Save failed
+                  {(() => {
+                    const o = opened();
+                    const err = o?.kind === "text" ? o.lastError : null;
+                    return err ? `: ${err}` : "";
+                  })()}
+                </span>
               </Show>
             </div>
           )}
@@ -765,6 +829,13 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
             path={opened()?.path ?? undefined}
             readOnly={isReadOnly()}
             onChange={handleEditorChange}
+            reveal={(() => {
+              const r = revealTarget();
+              if (!r) return undefined;
+              const o = opened();
+              if (o === null || o.path !== r.path) return undefined;
+              return { line: r.line, column: r.column };
+            })()}
           />
         </div>
       </div>
