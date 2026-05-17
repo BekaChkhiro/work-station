@@ -117,6 +117,31 @@ const defaultShell = (): string => {
   return isMac ? "/bin/zsh" : "/bin/bash";
 };
 
+/// Estimate the cols/rows a freshly-spawned pane will end up at, before
+/// the ResizeObserver-driven SIGWINCH gets a chance to send the real
+/// numbers. Errs on the wide side so a TUI's initial render (claude's
+/// welcome banner, codex's intro line) fills the visible area on a
+/// modern monitor; SIGWINCH will narrow it back if the actual host is
+/// smaller. Off-window environments (vite preview, jsdom) fall back to
+/// the classic 80x24.
+const guessInitialPaneSize = (): { cols: number; rows: number } => {
+  if (typeof window === "undefined") return { cols: 80, rows: 24 };
+  // Character cell estimates calibrated to the JetBrains Mono / Geist
+  // 13px stack the design system ships — close enough for the brief
+  // window between spawn and the real fit.
+  const CHAR_W = 9;
+  const ROW_H = 18;
+  // The terminal pane never quite fills the whole window (sidebar +
+  // chrome). Trim ~30% conservatively so we don't overshoot a narrow
+  // sidebar-collapsed layout into 240-col absurdity.
+  const usableWidth = Math.max(640, window.innerWidth * 0.7);
+  const usableHeight = Math.max(360, window.innerHeight * 0.8);
+  return {
+    cols: Math.min(220, Math.max(80, Math.floor(usableWidth / CHAR_W))),
+    rows: Math.min(60, Math.max(24, Math.floor(usableHeight / ROW_H))),
+  };
+};
+
 // Build a PaneCliOption for "system default shell". Local mode hands
 // the spawn an absolute path on this Mac; cloud mode sends a bare
 // command name that resolves on the remote host's PATH. The remote
@@ -1028,14 +1053,22 @@ export function AppRoot(): JSX.Element {
     // resolve it. Names match what the user actually installed there
     // (`claude`, `codex`, `bash`, `zsh`, …).
     const command = cloudMode() ? cli.name : cli.path;
+    // Spawn cols/rows are a guess until the pane mounts and the
+    // ResizeObserver sends the real geometry via SIGWINCH. The classic
+    // 80x24 default was fine on a local PTY where the resize lands
+    // before claude prints its welcome banner; over cloud WS the banner
+    // arrives first and stays at 80 cols in scrollback forever. Use a
+    // realistic full-window guess so the initial render fills modern
+    // monitors comfortably; SIGWINCH will narrow it later if needed.
+    const { cols, rows } = guessInitialPaneSize();
     const resp = await ptySpawn({
       command,
       args: [],
       cwd: cwd && cwd.length > 0 ? cwd : undefined,
       env: { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: cli.name },
       startupCommands: combined.length > 0 ? combined : undefined,
-      cols: 80,
-      rows: 24,
+      cols,
+      rows,
     });
     // T7.7 — capture the CLI id at spawn so Pane's badge tracks what was
     // launched, not what's currently running. `cli.name` matches the

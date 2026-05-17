@@ -34,6 +34,30 @@ import { dispatchMenuAction } from "../menu";
 import { eventMatchesBinding, getBinding } from "./registry";
 import { cloudMode } from "../stores/cloudMode";
 
+/// Rough cols/rows guess for a freshly-split pane. Splits halve the
+/// host along `direction`, so we shrink the corresponding axis by 0.5.
+/// Same calibration as AppRoot's `guessInitialPaneSize` — the goal is
+/// just to keep claude / codex's welcome banner from clamping to the
+/// classic 80x24 default in the window between spawn and the
+/// Terminal's first ResizeObserver fire (which sends SIGWINCH with the
+/// real geometry).
+const guessInitialSplitSize = (direction: SplitDirection): { cols: number; rows: number } => {
+  if (typeof window === "undefined") return { cols: 80, rows: 24 };
+  const CHAR_W = 9;
+  const ROW_H = 18;
+  // A horizontal split halves cols (panes side-by-side); a vertical
+  // split halves rows (panes stacked). Match `splitPane`'s direction
+  // semantics in `src/types/layout.ts`.
+  const widthFactor = direction === "h" ? 0.35 : 0.7;
+  const heightFactor = direction === "v" ? 0.4 : 0.8;
+  const usableWidth = Math.max(480, window.innerWidth * widthFactor);
+  const usableHeight = Math.max(240, window.innerHeight * heightFactor);
+  return {
+    cols: Math.min(220, Math.max(80, Math.floor(usableWidth / CHAR_W))),
+    rows: Math.min(60, Math.max(24, Math.floor(usableHeight / ROW_H))),
+  };
+};
+
 export interface PaneHotkeyDefaultCli {
   /** Stable CLI id (e.g. "claude", "zsh"). Echoed into `WS_CLI_NAME`. */
   name: string;
@@ -104,6 +128,11 @@ const handleSplit = async (
     : inCloud
       ? "bash"
       : handlers.shellCommand();
+  // Splits halve the parent pane, so guess at roughly half the window
+  // — the ResizeObserver in the freshly-mounted Terminal will send the
+  // real geometry via SIGWINCH shortly after. See guessInitialSplitSize
+  // for the rationale.
+  const { cols, rows } = guessInitialSplitSize(direction);
   try {
     const resp = await ptySpawn({
       command: cliCommand,
@@ -113,8 +142,8 @@ const handleSplit = async (
         ? { ...env, WS_PROJECT_ID: projectId, WS_CLI_NAME: defaultCli.name }
         : { ...env, WS_PROJECT_ID: projectId },
       startupCommands: startupCommands.length > 0 ? Array.from(startupCommands) : undefined,
-      cols: 80,
-      rows: 24,
+      cols,
+      rows,
     });
     handlers.onSessionSpawned?.(resp.sessionId, defaultCli ? defaultCli.name : null);
     splitPane(projectId, target, direction, resp.sessionId);
