@@ -309,6 +309,16 @@ async function localPtySubscribe(
   };
 }
 
+/// Per-session reference count of local subscribers. The cloud-agent's
+/// `pty_subscribe` is connection-scoped — sending `pty_unsubscribe`
+/// drops the agent's per-connection forwarder for the session, killing
+/// frames for every local subscriber, not just the one that asked to
+/// stop. PlanFlow Start writes a Terminal subscription *and* a private
+/// idle-detection subscription against the same session; without
+/// refcounting, the launcher's cleanup would yank the wire out from
+/// under xterm and the user would see a blank pane until a remount.
+const cloudSubscribeRefs = new Map<string, number>();
+
 async function cloudPtySubscribe(
   sessionId: string,
   onChunk: PtyChunkHandler,
@@ -321,6 +331,7 @@ async function cloudPtySubscribe(
 
   let alive = true;
   let handler: PtyChunkHandler | null = onChunk;
+  let counted = false;
 
   const detach = client.onPtyOutput((bytes, frameSessionId) => {
     if (!alive || !handler) return;
@@ -333,6 +344,8 @@ async function cloudPtySubscribe(
 
   try {
     await client.ptySubscribe(sessionId);
+    cloudSubscribeRefs.set(sessionId, (cloudSubscribeRefs.get(sessionId) ?? 0) + 1);
+    counted = true;
   } catch (err) {
     alive = false;
     handler = null;
@@ -342,14 +355,25 @@ async function cloudPtySubscribe(
 
   return {
     unsubscribe: () => {
+      if (!alive) return;
       alive = false;
       handler = null;
       detach();
-      // Best-effort unsubscribe on the wire — failures are logged by
-      // the bridge's onError hook but must not throw from a disposer.
-      void client.ptyUnsubscribe(sessionId).catch(() => {
-        /* swallowed — see comment above */
-      });
+      if (!counted) return;
+      counted = false;
+      const next = (cloudSubscribeRefs.get(sessionId) ?? 1) - 1;
+      if (next <= 0) {
+        cloudSubscribeRefs.delete(sessionId);
+        // Last local subscriber for this session — safe to ask the
+        // cloud-agent to drop its forwarder. Best-effort: failures
+        // log via the bridge's onError hook but must not throw
+        // from a disposer.
+        void client.ptyUnsubscribe(sessionId).catch(() => {
+          /* swallowed — see comment above */
+        });
+      } else {
+        cloudSubscribeRefs.set(sessionId, next);
+      }
     },
   };
 }
