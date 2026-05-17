@@ -123,6 +123,22 @@ export function Terminal(props: TerminalProps) {
   let isPaused = false;
   let intersectionObserver: IntersectionObserver | null = null;
   let docVisibilityHandler: (() => void) | null = null;
+  // T4.12 was originally about pausing terminals in hidden workspaces to
+  // save GPU. In practice the IntersectionObserver's first callback
+  // fires after the host is in the DOM but before layout has settled —
+  // when a pane is freshly spawned (e.g. PlanFlow "Start" creating a
+  // brand-new claude pane), the observer reports `isIntersecting: false`
+  // for the first tick and the subscription is killed before any frames
+  // arrive. The user then sees a blank pane until they switch tabs +
+  // come back, which forces a remount + replay.
+  //
+  // Skip the pause-on-IO-false transition for a short grace window so
+  // mount-time false-negatives don't kill subscriptions. After the
+  // window, the observer's verdict is treated as authoritative again
+  // (a user manually backgrounding the workspace tab still triggers
+  // the pause).
+  const VISIBILITY_GRACE_MS = 2_000;
+  let mountedAt = 0;
   // T4.13: handle returned from sessions registry — must be invoked on
   // cleanup so the cross-session search doesn't query a dead xterm.
   let unregisterSession: (() => void) | null = null;
@@ -272,6 +288,12 @@ export function Terminal(props: TerminalProps) {
     if (props.autoSubscribe === false) return;
     const visible = isDocVisible && isHostIntersecting;
     if (!visible && !isPaused) {
+      // Mount-time grace: an IntersectionObserver "false" within the
+      // first VISIBILITY_GRACE_MS is almost always a layout race, not
+      // a real "user navigated away" signal. Suppress the pause and
+      // let the observer re-fire after layout settles.
+      const sinceMount = mountedAt === 0 ? 0 : performance.now() - mountedAt;
+      if (sinceMount < VISIBILITY_GRACE_MS) return;
       isPaused = true;
       stopSubscription();
       return;
@@ -514,6 +536,7 @@ export function Terminal(props: TerminalProps) {
   };
 
   onMount(() => {
+    mountedAt = performance.now();
     const theme = props.theme ?? themeFromTokens(hostEl);
     const fontFamily = props.fontFamily ?? fontFromTokens(hostEl);
 
