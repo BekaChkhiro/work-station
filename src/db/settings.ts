@@ -14,6 +14,7 @@
 // entry. The `SettingKey`/`SettingValue<K>` types flow through automatically.
 import { z } from "zod";
 
+import { autoRunQueuesByProjectSchema } from "../types/autoRunQueue";
 import { db } from "./index";
 
 const ThemeSchema = z.enum(["light", "dark", "system"]);
@@ -146,6 +147,15 @@ export const SETTINGS = {
   planflow_last_start_mode: def(
     z.enum(["manual", "pr", "merge-master", "none"]),
     "manual" as "manual" | "pr" | "merge-master" | "none",
+  ),
+  // Per-workspace-project auto-run queue. One queue per project keeps
+  // the model simple (no parallel dispatchers competing for the same
+  // claude pane). A finished queue stays in the record so the UI can
+  // display "Last run: …" until the user dismisses it; the next
+  // dialog open writes over the same slot.
+  planflow_auto_run_queues: def(
+    autoRunQueuesByProjectSchema,
+    {} as z.infer<typeof autoRunQueuesByProjectSchema>,
   ),
 } as const satisfies Record<string, SettingDef<unknown>>;
 

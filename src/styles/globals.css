@@ -4217,8 +4217,39 @@ button {
   outline-offset: 1px;
 }
 
-.ws-pf-tasks__refresh {
+.ws-pf-tasks__autorun {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm, 6px);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.ws-pf-tasks__autorun:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ws-pf-tasks__autorun:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.ws-pf-tasks__autorun:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ws-pf-tasks__refresh {
   width: 28px;
   height: 28px;
   display: inline-flex;
@@ -4918,6 +4949,274 @@ button {
   line-height: 1.25;
   color: var(--text-secondary, rgba(255, 255, 255, 0.6));
   white-space: normal;
+}
+
+/* ─── Auto-run queue (dialog + bar) ────────────────────────────────── */
+
+.ws-aar__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1300;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 80px 16px 16px;
+  overflow-y: auto;
+}
+
+.ws-aar {
+  width: min(520px, 100%);
+  background: var(--bg-elevated, #1e1e2e);
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-md, 8px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  color: var(--text-primary);
+}
+
+.ws-aar__head {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+}
+
+.ws-aar__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+
+.ws-aar__close {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--r-xs, 4px);
+}
+
+.ws-aar__close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ws-aar__body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ws-aar__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ws-aar__label {
+  flex: 0 0 150px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ws-aar__select,
+.ws-aar__time {
+  background: var(--bg-surface, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-xs, 4px);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 4px 8px;
+  font-family: inherit;
+  min-height: 26px;
+}
+
+.ws-aar__select:focus-visible,
+.ws-aar__time:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.ws-aar__group {
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-aar__legend {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 0;
+  margin-bottom: 2px;
+}
+
+.ws-aar__radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.ws-aar__radio input[type="radio"] {
+  accent-color: var(--accent, #7dd3fc);
+}
+
+.ws-aar__hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.ws-aar__preview {
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+  padding-top: 10px;
+}
+
+.ws-aar__preview-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  margin-bottom: 6px;
+}
+
+.ws-aar__preview-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 130px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.ws-aar__preview-num {
+  color: var(--text-tertiary);
+  margin-right: 2px;
+}
+
+.ws-aar__preview-id {
+  color: var(--accent, #7dd3fc);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.ws-aar__preview-name {
+  color: var(--text-primary);
+}
+
+.ws-aar__empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.ws-aar__error {
+  font-size: 12px;
+  color: var(--color-danger, #f38ba8);
+  margin: 0;
+}
+
+.ws-aar__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+}
+
+/* Auto-run status bar above the task list */
+
+.ws-aar-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  margin: 6px 8px;
+  background: var(--bg-surface, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-sm, 6px);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.ws-aar-bar[data-state="paused"] {
+  border-color: rgba(214, 160, 86, 0.5);
+}
+
+.ws-aar-bar[data-state="failed"] {
+  border-color: rgba(196, 106, 79, 0.5);
+}
+
+.ws-aar-bar[data-state="done"] {
+  border-color: rgba(106, 170, 100, 0.4);
+}
+
+.ws-aar-bar__lead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ws-aar-bar__icon {
+  font-size: 13px;
+}
+
+.ws-aar-bar__label {
+  font-weight: 600;
+}
+
+.ws-aar-bar__progress {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-aar-bar__state,
+.ws-aar-bar__current {
+  color: var(--text-tertiary);
+}
+
+.ws-aar-bar__actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ws-aar-bar__btn {
+  background: transparent;
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-xs, 4px);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.ws-aar-bar__btn:hover {
+  background: var(--bg-hover);
+}
+
+.ws-aar-bar__btn--danger {
+  color: var(--color-danger, #f38ba8);
+  border-color: rgba(243, 139, 168, 0.3);
+}
+
+.ws-aar-bar__btn--danger:hover {
+  background: rgba(243, 139, 168, 0.1);
 }
 
 /* ─── T12.5 Progress / Done row buttons + dialog ─────────────────────── */

@@ -77,6 +77,9 @@ import { ActivityFeed } from "./ActivityFeed";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { Portal } from "solid-js/web";
 import { PlanFlowChat } from "../PlanFlowChat";
+import { AutoRunDialog } from "./AutoRunDialog";
+import { AutoRunBar } from "./AutoRunBar";
+import { isAutoRunActive } from "../../stores/autoRunQueue";
 import { getSetting, setSetting } from "../../db/settings";
 import {
   DEFAULT_PLANFLOW_START_MODE,
@@ -535,6 +538,21 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
     return ready;
   });
 
+  // Same predicate as readyIds but returns the Task objects in
+  // canonical phase/index order — AutoRunDialog uses this to preview
+  // the first N tasks that the queue will dispatch. We sort here so
+  // the queue selection is deterministic regardless of the rendered
+  // view's grouping.
+  const readyTasksOrdered = createMemo<readonly Task[]>(() => {
+    const ready = readyIds();
+    return [...props.tasks]
+      .filter((t) => ready.has(t.taskId))
+      .sort((a, b) => compareTaskIds(a.taskId, b.taskId));
+  });
+
+  const [autoRunOpen, setAutoRunOpen] = createSignal(false);
+  const autoRunBusy = (): boolean => isAutoRunActive(props.workspaceProjectId);
+
   const totalShown = createMemo(() => filtered().length);
   const empty = (): boolean => totalShown() === 0;
   const noTasksAtAll = (): boolean => props.tasks.length === 0;
@@ -590,6 +608,20 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
         </div>
         <button
           type="button"
+          class="ws-pf-tasks__autorun"
+          onClick={() => setAutoRunOpen(true)}
+          disabled={autoRunBusy()}
+          aria-label="Auto run multiple tasks"
+          title={
+            autoRunBusy()
+              ? "An auto-run queue is already active in this project"
+              : "Auto-run the next N ready tasks"
+          }
+        >
+          <span aria-hidden="true">⚡</span> Auto run
+        </button>
+        <button
+          type="button"
           class="ws-pf-tasks__refresh"
           onClick={() => props.onRetry()}
           aria-label="Refresh task list"
@@ -598,6 +630,16 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
           <span aria-hidden="true">↻</span>
         </button>
       </div>
+
+      <AutoRunBar workspaceProjectId={props.workspaceProjectId} />
+      <AutoRunDialog
+        open={autoRunOpen()}
+        workspaceProjectId={props.workspaceProjectId}
+        externalId={props.externalId}
+        readyTasks={readyTasksOrdered()}
+        onCancel={() => setAutoRunOpen(false)}
+        onStarted={() => setAutoRunOpen(false)}
+      />
 
       <Show
         when={!empty()}
