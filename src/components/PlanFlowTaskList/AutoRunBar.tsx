@@ -106,7 +106,10 @@ function stateLabelFor(queue: AutoRunQueue): string {
 
 export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
   const queue = createMemo<AutoRunQueue | null>(() => autoRunQueue(props.workspaceProjectId));
-  const [expanded, setExpanded] = createSignal(false);
+  // Default to expanded so the user sees metadata + history without
+  // having to click. The chevron still works to collapse for users
+  // who want a quieter strip.
+  const [expanded, setExpanded] = createSignal(true);
 
   const currentTaskId = createMemo((): string | null => {
     const q = queue();
