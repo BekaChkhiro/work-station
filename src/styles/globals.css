@@ -5141,6 +5141,7 @@ button {
 .ws-aar-bar {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   margin: 6px 8px;
   background: var(--bg-surface, rgba(255, 255, 255, 0.03));
   border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
