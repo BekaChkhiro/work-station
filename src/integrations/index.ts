@@ -118,6 +118,34 @@ export { IntegrationVerifyError, verifyIntegration } from "./verifiers";
 export type { VerifyFailureReason, VerifyOptions, VerifyResult } from "./verifiers";
 
 export {
+  createGitHubClient,
+  createRendererGitHubClient,
+  GITHUB_DEFAULT_BASE_URL,
+  GitHubApiError,
+  GitHubAuthError,
+  GitHubClient,
+  GitHubNotFoundError,
+  GitHubParseError,
+  MissingGitHubTokenError,
+} from "./github";
+export type {
+  GitHubBranch,
+  GitHubClientOptions,
+  GitHubCommit,
+  GitHubPullRequest,
+  GitHubPullRequestState,
+  GitHubRepo,
+  GitHubUser,
+  GitHubWorkflowRun,
+  ListBranchesOptions,
+  ListCommitsOptions,
+  ListPullRequestsOptions,
+  ListWorkflowRunsOptions,
+  RendererGitHubClientOptions,
+  RepoRef,
+} from "./github";
+
+export {
   WsBridgeClient,
   WsBridgeClosedError,
   WsBridgeServerError,
