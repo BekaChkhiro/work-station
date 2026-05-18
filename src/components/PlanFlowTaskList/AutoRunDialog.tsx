@@ -12,11 +12,7 @@ import type { JSX } from "solid-js";
 import { startAutoRun } from "../../stores/autoRunQueue";
 import type { AutoRunFailureMode } from "../../types/autoRunQueue";
 import type { Task } from "../../integrations/planflow/schemas";
-import {
-  DEFAULT_PLANFLOW_START_MODE,
-  PLANFLOW_START_MODES,
-  type PlanFlowStartMode,
-} from "../../types/planflowStartMode";
+import { PLANFLOW_START_MODES, type PlanFlowStartMode } from "../../types/planflowStartMode";
 
 export interface AutoRunDialogProps {
   open: boolean;
@@ -77,7 +73,10 @@ function combineDateAndTime(date: Date, time: string): number | null {
 
 export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
   const [count, setCount] = createSignal<number>(3);
-  const [mode, setMode] = createSignal<PlanFlowStartMode>("pr");
+  // Auto-run is specifically built for unattended overnight queues —
+  // auto-merge is the right default. The user can downgrade to plain
+  // PR (manual review) or merge-master (no CI) per project.
+  const [mode, setMode] = createSignal<PlanFlowStartMode>("auto-merge");
   const [startWhen, setStartWhen] = createSignal<StartWhen>("now");
   const [startTime, setStartTime] = createSignal<string>(defaultStartTime());
   const [pacing, setPacing] = createSignal<number>(0);
@@ -93,7 +92,8 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
     if (!props.open) return;
     batch(() => {
       setCount(3);
-      setMode(DEFAULT_PLANFLOW_START_MODE === "manual" ? "pr" : DEFAULT_PLANFLOW_START_MODE);
+      // Auto-merge default — see signal declaration for rationale.
+      setMode("auto-merge");
       setStartWhen("now");
       setStartTime(defaultStartTime());
       setPacing(0);

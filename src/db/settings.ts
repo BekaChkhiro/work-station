@@ -145,8 +145,8 @@ export const SETTINGS = {
   // last (manual / pr / merge-master / none). See
   // `src/types/planflowStartMode.ts` for the literal set.
   planflow_last_start_mode: def(
-    z.enum(["manual", "pr", "merge-master", "none"]),
-    "manual" as "manual" | "pr" | "merge-master" | "none",
+    z.enum(["manual", "auto-merge", "pr", "merge-master", "none"]),
+    "manual" as "manual" | "auto-merge" | "pr" | "merge-master" | "none",
   ),
   // Per-workspace-project auto-run queue. One queue per project keeps
   // the model simple (no parallel dispatchers competing for the same

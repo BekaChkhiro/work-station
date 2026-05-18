@@ -112,7 +112,7 @@ export const autoRunQueueSchema = z.object({
   targetCount: z.number().int().min(1),
   completedCount: z.number().int().min(0),
   currentTaskId: z.string().nullable(),
-  mode: z.enum(["manual", "pr", "merge-master", "none"]),
+  mode: z.enum(["manual", "auto-merge", "pr", "merge-master", "none"]),
   startAt: z.number().nullable(),
   pacingMinutes: z
     .number()

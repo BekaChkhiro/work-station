@@ -5,10 +5,11 @@
 // CLI. Stored as the literal mode id (see `app_settings.planflow_last_start_mode`)
 // so a relaunch lands on whichever flow the user last picked.
 
-export type PlanFlowStartMode = "manual" | "pr" | "merge-master" | "none";
+export type PlanFlowStartMode = "manual" | "auto-merge" | "pr" | "merge-master" | "none";
 
 export const PLANFLOW_START_MODE_IDS: readonly PlanFlowStartMode[] = [
   "manual",
+  "auto-merge",
   "pr",
   "merge-master",
   "none",
@@ -31,9 +32,14 @@ export const PLANFLOW_START_MODES: readonly PlanFlowStartModeOption[] = [
     hint: "Load context, no autoExecute — type your own follow-up",
   },
   {
+    id: "auto-merge",
+    label: "Auto · Auto-merge ⭐",
+    hint: "implement → test → push → open PR → GitHub merges when CI is green → DONE",
+  },
+  {
     id: "pr",
     label: "Auto · PR strategy",
-    hint: "implement → test → push → open PR → DONE",
+    hint: "implement → test → push → open PR → DONE (manual review + merge)",
   },
   {
     id: "merge-master",
@@ -63,6 +69,7 @@ export function formatPlanFlowStartPromptForMode(taskId: string, mode: PlanFlowS
   if (mode === "manual") {
     return `planflow_task_start(taskId: "${escaped}")`;
   }
-  const merge: string = mode === "merge-master" ? "merge-master" : mode;
-  return `planflow_task_start(taskId: "${escaped}", autoExecute: true, mergeStrategy: "${merge}")`;
+  // `mode` is already the wire-level mergeStrategy literal for every
+  // non-manual case (pr / auto-merge / merge-master / none).
+  return `planflow_task_start(taskId: "${escaped}", autoExecute: true, mergeStrategy: "${mode}")`;
 }
