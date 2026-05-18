@@ -37,6 +37,10 @@ export type AutoRunState =
   | "idle"
   | "scheduled"
   | "running"
+  /** auto-merge only: PlanFlow flipped DONE, agent enabled GitHub auto-merge.
+   *  We're polling the PR for an actual `merged_at` before dispatching the
+   *  next task, so the next agent works against an updated master. */
+  | "verifying_merge"
   | "waiting"
   | "paused"
   | "stopped"
@@ -72,6 +76,14 @@ export interface AutoRunQueue {
   /** The task we're currently polling. Null when state ∈ {scheduled,
    *  waiting, paused, stopped, done, failed}. */
   currentTaskId: string | null;
+  /** Branch name returned by `startTask` for the current task — needed
+   *  to look up the PR during verifying_merge. Null until the dispatch
+   *  succeeds. */
+  currentBranchName: string | null;
+  /** When we entered the verifying_merge state. Lets us time the wait
+   *  out so a stuck PR (CI failure, branch protection still pending)
+   *  doesn't pin the queue forever. */
+  verifyStartedAt: number | null;
   /** Shared mode for every task in this queue. */
   mode: PlanFlowStartMode;
   /** Epoch ms to begin the first dispatch. Null = start immediately. */
@@ -112,6 +124,8 @@ export const autoRunQueueSchema = z.object({
   targetCount: z.number().int().min(1),
   completedCount: z.number().int().min(0),
   currentTaskId: z.string().nullable(),
+  currentBranchName: z.string().nullable(),
+  verifyStartedAt: z.number().nullable(),
   mode: z.enum(["manual", "auto-merge", "pr", "merge-master", "none"]),
   startAt: z.number().nullable(),
   pacingMinutes: z
@@ -120,7 +134,17 @@ export const autoRunQueueSchema = z.object({
     .max(24 * 60),
   deadlineAt: z.number().nullable(),
   onFailure: z.enum(["stop", "continue"]),
-  state: z.enum(["idle", "scheduled", "running", "waiting", "paused", "stopped", "done", "failed"]),
+  state: z.enum([
+    "idle",
+    "scheduled",
+    "running",
+    "verifying_merge",
+    "waiting",
+    "paused",
+    "stopped",
+    "done",
+    "failed",
+  ]),
   currentTaskStartedAt: z.number().nullable(),
   nextDispatchAt: z.number().nullable(),
   history: z.array(autoRunHistoryEntrySchema),
@@ -145,6 +169,13 @@ export const AUTO_RUN_TASK_TIMEOUT_MS = 90 * 60 * 1000;
  *  the bar without hammering the server. */
 export const AUTO_RUN_POLL_INTERVAL_MS = 20 * 1000;
 
+/** How long we wait for a GitHub PR to flip to `merged_at != null`
+ *  before giving up and advancing the queue anyway. CI runs can be
+ *  slow but 60 minutes is the practical ceiling — anything longer
+ *  means a stuck check / failing CI / pending review, and the user
+ *  should investigate manually. */
+export const AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS = 60 * 60 * 1000;
+
 /** Make a typed empty queue for `idle` slots — used by the store when
  *  it needs a baseline before the user opens the dialog. */
 export function createAutoRunQueueId(): string {
@@ -156,6 +187,7 @@ export function isAutoRunQueueActive(queue: AutoRunQueue | null | undefined): bo
   return (
     queue.state === "scheduled" ||
     queue.state === "running" ||
+    queue.state === "verifying_merge" ||
     queue.state === "waiting" ||
     queue.state === "paused"
   );

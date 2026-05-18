@@ -89,6 +89,8 @@ function stateLabelFor(queue: AutoRunQueue): string {
       return `Scheduled ${formatRemaining(queue.nextDispatchAt)} (${formatTime(queue.nextDispatchAt)})`;
     case "running":
       return "Running";
+    case "verifying_merge":
+      return "Verifying PR merge…";
     case "waiting":
       return `Next ${formatRemaining(queue.nextDispatchAt)}`;
     case "paused":
@@ -114,7 +116,9 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
   const currentTaskId = createMemo((): string | null => {
     const q = queue();
     if (!q) return null;
-    if (q.state !== "running" && q.state !== "paused") return null;
+    if (q.state !== "running" && q.state !== "paused" && q.state !== "verifying_merge") {
+      return null;
+    }
     return q.currentTaskId ?? null;
   });
 
@@ -172,7 +176,11 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
                   ⤴ Terminal
                 </button>
               </Show>
-              <Show when={q.state === "running" || q.state === "waiting"}>
+              <Show
+                when={
+                  q.state === "running" || q.state === "waiting" || q.state === "verifying_merge"
+                }
+              >
                 <button
                   type="button"
                   class="ws-aar-bar__btn"

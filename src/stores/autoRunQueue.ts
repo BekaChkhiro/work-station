@@ -15,13 +15,17 @@
 
 import { createMemo, createSignal } from "solid-js";
 
+import { listProjects } from "../db/projects";
 import { getSetting, setSetting } from "../db/settings";
+import { createRendererGitHubClient } from "../integrations/github";
 import { createRendererPlanFlowClient } from "../integrations/planflow";
 import { startTask } from "../integrations/planflow/startTask";
 import type { Task } from "../integrations/planflow/schemas";
+import { readTextFile } from "../ipc/files";
 import {
   AUTO_RUN_POLL_INTERVAL_MS,
   AUTO_RUN_TASK_TIMEOUT_MS,
+  AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS,
   createAutoRunQueueId,
   isAutoRunQueueActive,
   type AutoRunFailureMode,
@@ -184,6 +188,8 @@ export function startAutoRun(input: StartAutoRunInput): AutoRunQueue {
     targetCount: input.targetCount,
     completedCount: 0,
     currentTaskId: null,
+    currentBranchName: null,
+    verifyStartedAt: null,
     mode: input.mode,
     startAt: input.startAt,
     pacingMinutes: input.pacingMinutes,
@@ -287,6 +293,11 @@ async function advance(projectId: string, queue: AutoRunQueue): Promise<void> {
     await pollRunning(projectId, queue);
     return;
   }
+
+  if (queue.state === "verifying_merge") {
+    await pollMergeStatus(projectId, queue);
+    return;
+  }
 }
 
 async function pollRunning(projectId: string, queue: AutoRunQueue): Promise<void> {
@@ -340,11 +351,38 @@ function completeCurrent(
         state: "paused",
         nextDispatchAt: null,
         currentTaskId: null,
+        currentBranchName: null,
+        currentTaskStartedAt: null,
+        verifyStartedAt: null,
+      };
+    }
+
+    // For auto-merge mode: PlanFlow flipped DONE the moment the agent
+    // enabled GitHub auto-merge, but the PR itself hasn't merged yet
+    // (CI is still running). Hold here in `verifying_merge` until the
+    // PR's `merged_at` shows up — the next task's agent needs an
+    // updated master to checkout from.
+    if (
+      status === "done" &&
+      q.mode === "auto-merge" &&
+      q.currentBranchName !== null &&
+      // No point verifying when we're already at the target — last task
+      // just count it done.
+      q.completedCount + 1 < q.targetCount
+    ) {
+      return {
+        ...q,
+        history,
+        // Don't bump completedCount until the merge is confirmed; the
+        // history entry stands either way so the bar shows "X done + 1 verifying".
+        state: "verifying_merge",
+        verifyStartedAt: finishedAt,
+        nextDispatchAt: null,
         currentTaskStartedAt: null,
       };
     }
 
-    const completedCount = status === "done" ? q.completedCount + 1 : q.completedCount + 1;
+    const completedCount = q.completedCount + 1;
     const allDone = completedCount >= q.targetCount;
 
     if (allDone) {
@@ -355,7 +393,9 @@ function completeCurrent(
         state: "done",
         nextDispatchAt: null,
         currentTaskId: null,
+        currentBranchName: null,
         currentTaskStartedAt: null,
+        verifyStartedAt: null,
       };
     }
 
@@ -367,7 +407,9 @@ function completeCurrent(
       state: pacingMs > 0 ? "waiting" : "running",
       nextDispatchAt: pacingMs > 0 ? finishedAt + pacingMs : null,
       currentTaskId: null,
+      currentBranchName: null,
       currentTaskStartedAt: null,
+      verifyStartedAt: null,
     };
   });
 
@@ -437,7 +479,7 @@ async function pickAndDispatch(projectId: string): Promise<void> {
 
   try {
     const client = createRendererPlanFlowClient({ cloudProjectId: queue.projectId });
-    await startTask({
+    const result = await startTask({
       client,
       externalId: queue.externalId,
       workspaceProjectId: queue.projectId,
@@ -445,9 +487,162 @@ async function pickAndDispatch(projectId: string): Promise<void> {
       cliName: "claude",
       mode: queue.mode,
     });
+    // Stash the branch name so the verify_merge step can look up the
+    // PR by head. `null` is fine — that path just skips verification.
+    mutate(projectId, (q) => {
+      if (!q) return q;
+      return { ...q, currentBranchName: result.branchName };
+    });
   } catch (err) {
     console.warn(`[autoRun:${projectId}] dispatch failed for ${taskId}:`, err);
     completeCurrent(projectId, taskId, "failed", Date.now());
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// verifying_merge — wait for the auto-merge PR to actually merge before
+// dispatching the next task, so the follow-up agent works against a
+// master that includes the just-finished work.
+
+/** Cache project root → "owner/repo" so we don't re-read `.git/config`
+ *  on every poll tick. Cleared on app restart (module-level Map). */
+const repoCache = new Map<string, string | null>();
+
+async function resolveRepoForProject(workspaceProjectId: string): Promise<string | null> {
+  if (repoCache.has(workspaceProjectId)) {
+    return repoCache.get(workspaceProjectId) ?? null;
+  }
+  let repo: string | null = null;
+  try {
+    const all = await listProjects();
+    const project = all.find((p) => p.id === workspaceProjectId);
+    if (!project) {
+      repoCache.set(workspaceProjectId, null);
+      return null;
+    }
+    const config = await readTextFile(project.path, ".git/config");
+    if (config.kind === "text") {
+      repo = parseOriginRepo(config.content);
+    }
+  } catch (err) {
+    // No git repo, no permission, or cloud mode — fall back to skipping.
+    console.warn(`[autoRun:${workspaceProjectId}] repo detect failed:`, err);
+  }
+  repoCache.set(workspaceProjectId, repo);
+  return repo;
+}
+
+/** Parse `url = ...` from a `.git/config` and return "owner/repo" for
+ *  the GitHub `origin` remote. Handles both SSH and HTTPS forms. */
+function parseOriginRepo(config: string): string | null {
+  // Walk sections; pick the `[remote "origin"]` block's `url = ...`.
+  const lines = config.split(/\r?\n/);
+  let inOrigin = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith("[")) {
+      inOrigin = /^\[remote\s+"origin"\]$/.test(line);
+      continue;
+    }
+    if (!inOrigin) continue;
+    const match = /^url\s*=\s*(.+)$/.exec(line);
+    if (!match) continue;
+    const url = match[1]?.trim() ?? "";
+    // git@github.com:owner/repo.git
+    const ssh = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/.exec(url);
+    if (ssh) return `${ssh[1]}/${ssh[2]}`;
+    // https://github.com/owner/repo(.git)?
+    const https = /^https?:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?$/.exec(url);
+    if (https) return `${https[1]}/${https[2]}`;
+  }
+  return null;
+}
+
+async function pollMergeStatus(projectId: string, queue: AutoRunQueue): Promise<void> {
+  const verifyStartedAt = queue.verifyStartedAt ?? Date.now();
+  const branch = queue.currentBranchName;
+  // Without a branch name we can't look the PR up at all — short-circuit
+  // to "merged" so the queue keeps moving. Same when the project doesn't
+  // resolve to a GitHub repo. Verification is best-effort.
+  if (!branch) {
+    finishVerifyAdvance(projectId);
+    return;
+  }
+  if (Date.now() - verifyStartedAt > AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS) {
+    // Don't pin the queue forever — let the next task try, and the
+    // user can pause/stop if it goes sideways.
+    console.warn(`[autoRun:${projectId}] verify_merge timed out for ${branch}`);
+    finishVerifyAdvance(projectId);
+    return;
+  }
+
+  const repo = await resolveRepoForProject(queue.projectId);
+  if (!repo) {
+    // No way to query — advance optimistically.
+    finishVerifyAdvance(projectId);
+    return;
+  }
+  const [owner, name] = repo.split("/");
+  if (!owner || !name) {
+    finishVerifyAdvance(projectId);
+    return;
+  }
+
+  try {
+    const gh = createRendererGitHubClient();
+    const prs = await gh.listPullRequests(
+      { owner, repo: name },
+      { state: "all", head: `${owner}:${branch}`, perPage: 5 },
+    );
+    // Most recent PR for this head branch wins. auto-merge --squash
+    // leaves merged_at non-null after the merge completes.
+    const merged = prs.find((pr) => pr.merged_at != null);
+    if (merged) {
+      finishVerifyAdvance(projectId);
+    }
+    // else: keep polling, next tick will retry.
+  } catch (err) {
+    // GitHub token missing / 401 / 403 / network blip — skip verification
+    // rather than pin the queue.
+    console.warn(`[autoRun:${projectId}] verify_merge poll failed:`, err);
+    finishVerifyAdvance(projectId);
+  }
+}
+
+/** Move out of verifying_merge: bump completedCount, decide whether
+ *  to enter pacing or dispatch the next task immediately. */
+function finishVerifyAdvance(projectId: string): void {
+  mutate(projectId, (q) => {
+    if (!q || q.state !== "verifying_merge") return q;
+    const completedCount = q.completedCount + 1;
+    const allDone = completedCount >= q.targetCount;
+    if (allDone) {
+      return {
+        ...q,
+        completedCount,
+        state: "done",
+        nextDispatchAt: null,
+        currentTaskId: null,
+        currentBranchName: null,
+        currentTaskStartedAt: null,
+        verifyStartedAt: null,
+      };
+    }
+    const pacingMs = q.pacingMinutes * 60 * 1000;
+    return {
+      ...q,
+      completedCount,
+      state: pacingMs > 0 ? "waiting" : "running",
+      nextDispatchAt: pacingMs > 0 ? Date.now() + pacingMs : null,
+      currentTaskId: null,
+      currentBranchName: null,
+      currentTaskStartedAt: null,
+      verifyStartedAt: null,
+    };
+  });
+  const updated = queuesSignal()[projectId];
+  if (updated && updated.state === "running") {
+    void pickAndDispatch(projectId);
   }
 }
 
