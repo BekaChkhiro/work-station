@@ -3,11 +3,16 @@
 // landing zone for the "Last run: …" pill after a queue finishes —
 // the user can dismiss it explicitly.
 //
+// The strip is expandable: a ▾ chevron flips it open to a details
+// panel with metadata (start time, mode, pacing, deadline), the
+// current task with an "Open in Terminal" shortcut, and the full
+// dispatch history. Collapsed by default so the bar stays calm.
+//
 // All transitions are driven by the autoRunQueue store; this
 // component only renders + dispatches user intent (pause/resume/stop/
 // dismiss). No timers live here.
 
-import { Show, createMemo } from "solid-js";
+import { For, Show, createMemo, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 
 import {
@@ -17,7 +22,13 @@ import {
   resumeAutoRun,
   stopAutoRun,
 } from "../../stores/autoRunQueue";
-import { autoRunQueueProgressLabel, isAutoRunQueueActive } from "../../types/autoRunQueue";
+import { setActiveTab } from "../../stores/workspace";
+import {
+  autoRunQueueProgressLabel,
+  isAutoRunQueueActive,
+  type AutoRunQueue,
+} from "../../types/autoRunQueue";
+import { PLANFLOW_START_MODES } from "../../types/planflowStartMode";
 
 export interface AutoRunBarProps {
   workspaceProjectId: string;
@@ -42,14 +53,43 @@ function formatRemaining(stamp: number | null): string {
   return `in ${hours}h ${minutes}m`;
 }
 
+function formatDuration(startedAt: number, finishedAt: number | null): string {
+  const end = finishedAt ?? Date.now();
+  const ms = Math.max(0, end - startedAt);
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`;
+}
+
+function modeLabel(modeId: AutoRunQueue["mode"]): string {
+  return PLANFLOW_START_MODES.find((m) => m.id === modeId)?.label ?? modeId;
+}
+
+function historyIcon(status: "done" | "failed" | "skipped" | "timeout"): string {
+  switch (status) {
+    case "done":
+      return "✓";
+    case "failed":
+      return "✕";
+    case "timeout":
+      return "⏱";
+    case "skipped":
+      return "⤼";
+  }
+}
+
 export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
   const queue = createMemo(() => autoRunQueue(props.workspaceProjectId));
+  const [expanded, setExpanded] = createSignal(false);
 
   const visible = createMemo(() => {
     const q = queue();
     if (!q) return false;
-    // Active queues always show. Finished ones (done/failed/stopped)
-    // remain until the user dismisses them.
     return true;
   });
 
@@ -83,67 +123,169 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
     return q.currentTaskId ?? null;
   });
 
+  const openInTerminal = (projectId: string): void => {
+    setActiveTab(projectId, "terminal");
+  };
+
   return (
     <Show when={visible() && queue()}>
       {(q) => (
-        <div class="ws-aar-bar" role="status" aria-live="polite" data-state={q().state}>
-          <div class="ws-aar-bar__lead">
-            <span class="ws-aar-bar__icon" aria-hidden="true">
-              ⚡
-            </span>
-            <span class="ws-aar-bar__label">Auto run</span>
-            <span class="ws-aar-bar__progress">{autoRunQueueProgressLabel(q())}</span>
-            <span class="ws-aar-bar__state">· {stateLabel()}</span>
-            <Show when={currentTaskId()}>
-              {(id) => <span class="ws-aar-bar__current">· current: {id()}</span>}
-            </Show>
+        <div
+          class="ws-aar-bar"
+          role="status"
+          aria-live="polite"
+          data-state={q().state}
+          data-expanded={expanded() ? "true" : undefined}
+        >
+          <div class="ws-aar-bar__row">
+            <button
+              type="button"
+              class="ws-aar-bar__toggle"
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded()}
+              aria-label={expanded() ? "Collapse auto-run details" : "Expand auto-run details"}
+              title={expanded() ? "Hide details" : "Show details"}
+            >
+              <span class="ws-aar-bar__icon" aria-hidden="true">
+                ⚡
+              </span>
+              <span class="ws-aar-bar__label">Auto run</span>
+              <span class="ws-aar-bar__progress">{autoRunQueueProgressLabel(q())}</span>
+              <span class="ws-aar-bar__state">· {stateLabel()}</span>
+              <Show when={currentTaskId()}>
+                {(id) => <span class="ws-aar-bar__current">· current: {id()}</span>}
+              </Show>
+              <span class="ws-aar-bar__chevron" aria-hidden="true">
+                {expanded() ? "▴" : "▾"}
+              </span>
+            </button>
+            <div class="ws-aar-bar__actions">
+              <Show when={currentTaskId()}>
+                <button
+                  type="button"
+                  class="ws-aar-bar__btn"
+                  onClick={() => openInTerminal(q().projectId)}
+                  aria-label="Open terminal pane"
+                  title="Jump to the terminal tab to watch the agent"
+                >
+                  ⤴ Terminal
+                </button>
+              </Show>
+              <Show when={q().state === "running" || q().state === "waiting"}>
+                <button
+                  type="button"
+                  class="ws-aar-bar__btn"
+                  onClick={() => pauseAutoRun(q().projectId)}
+                  aria-label="Pause auto run"
+                  title="Finish current task, then stop dispatching"
+                >
+                  ⏸ Pause
+                </button>
+              </Show>
+              <Show when={q().state === "paused"}>
+                <button
+                  type="button"
+                  class="ws-aar-bar__btn"
+                  onClick={() => resumeAutoRun(q().projectId)}
+                  aria-label="Resume auto run"
+                  title="Continue from where the queue paused"
+                >
+                  ▶ Resume
+                </button>
+              </Show>
+              <Show when={isAutoRunQueueActive(q())}>
+                <button
+                  type="button"
+                  class="ws-aar-bar__btn ws-aar-bar__btn--danger"
+                  onClick={() => stopAutoRun(q().projectId)}
+                  aria-label="Stop auto run"
+                  title="Stop the queue entirely"
+                >
+                  ⏹ Stop
+                </button>
+              </Show>
+              <Show when={!isAutoRunQueueActive(q())}>
+                <button
+                  type="button"
+                  class="ws-aar-bar__btn"
+                  onClick={() => dismissAutoRun(q().projectId)}
+                  aria-label="Dismiss auto run summary"
+                  title="Hide this banner"
+                >
+                  Dismiss
+                </button>
+              </Show>
+            </div>
           </div>
-          <div class="ws-aar-bar__actions">
-            <Show when={q().state === "running" || q().state === "waiting"}>
-              <button
-                type="button"
-                class="ws-aar-bar__btn"
-                onClick={() => pauseAutoRun(q().projectId)}
-                aria-label="Pause auto run"
-                title="Finish current task, then stop dispatching"
-              >
-                ⏸ Pause
-              </button>
-            </Show>
-            <Show when={q().state === "paused"}>
-              <button
-                type="button"
-                class="ws-aar-bar__btn"
-                onClick={() => resumeAutoRun(q().projectId)}
-                aria-label="Resume auto run"
-                title="Continue from where the queue paused"
-              >
-                ▶ Resume
-              </button>
-            </Show>
-            <Show when={isAutoRunQueueActive(q())}>
-              <button
-                type="button"
-                class="ws-aar-bar__btn ws-aar-bar__btn--danger"
-                onClick={() => stopAutoRun(q().projectId)}
-                aria-label="Stop auto run"
-                title="Stop the queue entirely"
-              >
-                ⏹ Stop
-              </button>
-            </Show>
-            <Show when={!isAutoRunQueueActive(q())}>
-              <button
-                type="button"
-                class="ws-aar-bar__btn"
-                onClick={() => dismissAutoRun(q().projectId)}
-                aria-label="Dismiss auto run summary"
-                title="Hide this banner"
-              >
-                Dismiss
-              </button>
-            </Show>
-          </div>
+
+          <Show when={expanded()}>
+            <div class="ws-aar-bar__details">
+              <dl class="ws-aar-bar__meta">
+                <div class="ws-aar-bar__meta-cell">
+                  <dt>Started</dt>
+                  <dd>
+                    {formatTime(q().createdAt)} · {q().completedCount}/{q().targetCount} done
+                  </dd>
+                </div>
+                <div class="ws-aar-bar__meta-cell">
+                  <dt>Mode</dt>
+                  <dd>{modeLabel(q().mode)}</dd>
+                </div>
+                <div class="ws-aar-bar__meta-cell">
+                  <dt>Pacing</dt>
+                  <dd>
+                    {q().pacingMinutes === 0 ? "Back-to-back" : `${q().pacingMinutes} min between`}
+                  </dd>
+                </div>
+                <div class="ws-aar-bar__meta-cell">
+                  <dt>Deadline</dt>
+                  <dd>{q().deadlineAt === null ? "—" : formatTime(q().deadlineAt)}</dd>
+                </div>
+                <div class="ws-aar-bar__meta-cell">
+                  <dt>On failure</dt>
+                  <dd>{q().onFailure === "stop" ? "Stop queue" : "Continue"}</dd>
+                </div>
+                <Show when={currentTaskId() && q().currentTaskStartedAt !== null}>
+                  <div class="ws-aar-bar__meta-cell">
+                    <dt>Current</dt>
+                    <dd>
+                      {currentTaskId()} · running{" "}
+                      {formatDuration(q().currentTaskStartedAt ?? 0, null)}
+                    </dd>
+                  </div>
+                </Show>
+              </dl>
+
+              <div class="ws-aar-bar__history">
+                <div class="ws-aar-bar__history-title">History ({q().history.length})</div>
+                <Show
+                  when={q().history.length > 0}
+                  fallback={<p class="ws-aar-bar__history-empty">No tasks completed yet.</p>}
+                >
+                  <ol class="ws-aar-bar__history-list">
+                    <For each={q().history}>
+                      {(entry, i) => (
+                        <li class="ws-aar-bar__history-item" data-status={entry.status}>
+                          <span class="ws-aar-bar__history-num">{i() + 1}.</span>
+                          <span class="ws-aar-bar__history-icon" aria-hidden="true">
+                            {historyIcon(entry.status)}
+                          </span>
+                          <span class="ws-aar-bar__history-id">{entry.taskId}</span>
+                          <span class="ws-aar-bar__history-status">{entry.status}</span>
+                          <span class="ws-aar-bar__history-time">
+                            {formatTime(entry.startedAt)}
+                            {entry.finishedAt !== null
+                              ? ` → ${formatTime(entry.finishedAt)} · ${formatDuration(entry.startedAt, entry.finishedAt)}`
+                              : ""}
+                          </span>
+                        </li>
+                      )}
+                    </For>
+                  </ol>
+                </Show>
+              </div>
+            </div>
+          </Show>
         </div>
       )}
     </Show>
