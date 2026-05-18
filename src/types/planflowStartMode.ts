@@ -38,13 +38,13 @@ export const PLANFLOW_START_MODES: readonly PlanFlowStartModeOption[] = [
   {
     id: "merge-master",
     label: "Auto · Merge to master",
-    hint: "implement → test → merge & push master (no review)",
+    hint: "implement → test → merge & push master → DONE (no review)",
     danger: true,
   },
   {
     id: "none",
     label: "Auto · Push only",
-    hint: "implement → push branch, no PR / no merge",
+    hint: "implement → push branch → DONE (no PR / no merge)",
   },
 ];
 
