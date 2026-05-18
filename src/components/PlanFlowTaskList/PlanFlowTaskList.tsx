@@ -75,6 +75,7 @@ import { planflowChatRefetchTick } from "../../stores/planflowChatNotify";
 import { ActiveWorkPanel } from "./ActiveWorkPanel";
 import { ActivityFeed } from "./ActivityFeed";
 import { TaskDetailPanel } from "./TaskDetailPanel";
+import { Portal } from "solid-js/web";
 import { PlanFlowChat } from "../PlanFlowChat";
 import { getSetting, setSetting } from "../../db/settings";
 import {
@@ -1065,9 +1066,37 @@ function persistLastStartMode(mode: PlanFlowStartMode): void {
   });
 }
 
+interface PickerAnchor {
+  top: number;
+  left: number;
+  width: number;
+}
+
 function CliStartButton(props: CliStartButtonProps): JSX.Element {
   const [pickerOpen, setPickerOpen] = createSignal(false);
+  const [anchor, setAnchor] = createSignal<PickerAnchor | null>(null);
   let wrapRef: HTMLDivElement | undefined;
+  let pickerRef: HTMLUListElement | undefined;
+
+  // Anchor the picker to the chevron's bounding rect and render via a
+  // Portal so it escapes the kanban column's `overflow-y: auto` clip
+  // (the column is only ~220–320px wide, so the 240px-min picker would
+  // otherwise get cropped on the left). Right-align under the wrap by
+  // default; clamp into the viewport when there isn't room on the left.
+  const PICKER_WIDTH = 260;
+  const PICKER_GAP = 4;
+  const VIEWPORT_PAD = 8;
+
+  const recomputeAnchor = (): void => {
+    if (!wrapRef) return;
+    const rect = wrapRef.getBoundingClientRect();
+    const desiredLeft = rect.right - PICKER_WIDTH;
+    const left = Math.max(
+      VIEWPORT_PAD,
+      Math.min(desiredLeft, window.innerWidth - PICKER_WIDTH - VIEWPORT_PAD),
+    );
+    setAnchor({ top: rect.bottom + PICKER_GAP, left, width: PICKER_WIDTH });
+  };
 
   // Mode picker is always available on the row's chevron — that's the
   // whole point of this surface now that the user has more than one
@@ -1092,19 +1121,35 @@ function CliStartButton(props: CliStartButtonProps): JSX.Element {
 
   createEffect(() => {
     if (!pickerOpen()) return;
+    recomputeAnchor();
     const onDown = (event: MouseEvent): void => {
       const target = event.target as Node | null;
-      if (wrapRef && target && wrapRef.contains(target)) return;
+      if (!target) return;
+      if (wrapRef && wrapRef.contains(target)) return;
+      // Picker lives in a Portal — clicks inside it must NOT count as
+      // outside-clicks. Without this the menu would close on the same
+      // click that selects an item, racing the menuitem onClick.
+      if (pickerRef && pickerRef.contains(target)) return;
       setPickerOpen(false);
     };
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape") setPickerOpen(false);
     };
+    const onScrollOrResize = (): void => {
+      recomputeAnchor();
+    };
     document.addEventListener("mousedown", onDown, true);
     document.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", onScrollOrResize, true);
+    // Capture-phase scroll listener catches scrolls in any ancestor
+    // (the kanban list, the tab body) so the anchored picker tracks
+    // the chevron when the user scrolls underneath it.
+    window.addEventListener("scroll", onScrollOrResize, true);
     onCleanup(() => {
       document.removeEventListener("mousedown", onDown, true);
       document.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", onScrollOrResize, true);
+      window.removeEventListener("scroll", onScrollOrResize, true);
     });
   });
 
@@ -1153,36 +1198,48 @@ function CliStartButton(props: CliStartButtonProps): JSX.Element {
           ▾
         </button>
       </Show>
-      <Show when={pickerOpen()}>
-        <ul
-          class="ws-pf-tasks__clipicker ws-pf-tasks__modepicker"
-          role="menu"
-          aria-label="Choose Start mode"
-        >
-          <For each={PLANFLOW_START_MODES}>
-            {(option) => (
-              <li role="none">
-                <button
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={option.id === lastStartMode()}
-                  class="ws-pf-tasks__clipicker-item ws-pf-tasks__modepicker-item"
-                  data-mode={option.id}
-                  data-danger={option.danger ? "true" : undefined}
-                  data-selected={option.id === lastStartMode() ? "true" : undefined}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setPickerOpen(false);
-                    fire(option.id);
-                  }}
-                >
-                  <span class="ws-pf-tasks__modepicker-label">{option.label}</span>
-                  <span class="ws-pf-tasks__modepicker-hint">{option.hint}</span>
-                </button>
-              </li>
-            )}
-          </For>
-        </ul>
+      <Show when={pickerOpen() ? anchor() : null}>
+        {(anchorRect) => (
+          <Portal>
+            <ul
+              ref={(el) => (pickerRef = el)}
+              class="ws-pf-tasks__clipicker ws-pf-tasks__modepicker ws-pf-tasks__modepicker--portal"
+              role="menu"
+              aria-label="Choose Start mode"
+              style={{
+                position: "fixed",
+                top: `${anchorRect().top}px`,
+                left: `${anchorRect().left}px`,
+                width: `${anchorRect().width}px`,
+                "z-index": "1200",
+              }}
+            >
+              <For each={PLANFLOW_START_MODES}>
+                {(option) => (
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={option.id === lastStartMode()}
+                      class="ws-pf-tasks__clipicker-item ws-pf-tasks__modepicker-item"
+                      data-mode={option.id}
+                      data-danger={option.danger ? "true" : undefined}
+                      data-selected={option.id === lastStartMode() ? "true" : undefined}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPickerOpen(false);
+                        fire(option.id);
+                      }}
+                    >
+                      <span class="ws-pf-tasks__modepicker-label">{option.label}</span>
+                      <span class="ws-pf-tasks__modepicker-hint">{option.hint}</span>
+                    </button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Portal>
+        )}
       </Show>
     </div>
   );

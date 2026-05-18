@@ -4865,9 +4865,14 @@ button {
   background: var(--bg-hover);
 }
 
-/* Mode picker — wider menu with two-line items (label + hint). */
-.ws-pf-tasks__modepicker {
-  min-width: 240px;
+/* Mode picker — wider menu with two-line items (label + hint).
+ * Rendered via Portal with explicit fixed top/left so the kanban
+ * column's overflow-y can't clip it. Inline style sets width; the
+ * rule below just removes the `clipicker` absolute positioning. */
+.ws-pf-tasks__modepicker.ws-pf-tasks__modepicker--portal {
+  position: fixed;
+  top: auto;
+  right: auto;
   padding: 4px;
 }
 
@@ -4885,6 +4890,7 @@ button {
   cursor: pointer;
   border-radius: var(--r-xs, 4px);
   font-family: inherit;
+  white-space: normal;
 }
 
 .ws-pf-tasks__modepicker-item:hover {
@@ -4904,14 +4910,14 @@ button {
   font-size: 12px;
   font-weight: 600;
   line-height: 1.2;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .ws-pf-tasks__modepicker-hint {
   font-size: 10.5px;
   line-height: 1.25;
   color: var(--text-secondary, rgba(255, 255, 255, 0.6));
-  white-space: nowrap;
+  white-space: normal;
 }
 
 /* ─── T12.5 Progress / Done row buttons + dialog ─────────────────────── */
