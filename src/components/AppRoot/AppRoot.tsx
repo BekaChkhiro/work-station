@@ -248,6 +248,23 @@ export function AppRoot(): JSX.Element {
   const [mountedMode, setMountedMode] = createSignal<SessionMode | null>(null);
   const currentMode = (): SessionMode => (cloudMode() ? "cloud" : "local");
 
+  // Per-mode in-memory snapshot of each project's layout taken right
+  // before `swapWorkspaceMode` clears the visible store. Toggling
+  // Cloud ↔ Local doesn't actually kill the previous backend's PTYs
+  // (the kill loop routes through the *new* backend, which doesn't
+  // own them) — so when the user toggles back, the original sessions
+  // are still alive and reusable. Caching the layout lets us re-mount
+  // those exact panes by id instead of falling through to
+  // `restoreProjectLayout`, which spawns a fresh PTY per pane and
+  // orphans the live ones. Survives only within a single app run —
+  // app close goes through the boot path (DB-backed savedLayout +
+  // spawn fresh), which is correct because Mac PTYs don't survive an
+  // app quit.
+  const layoutCacheByMode: Record<SessionMode, Map<string, LayoutNode>> = {
+    local: new Map(),
+    cloud: new Map(),
+  };
+
   // T7.7 — sessionId → CLI id captured at spawn time. The badge derived
   // from this map is the canonical "what was launched in this pane",
   // independent of whatever the user has typed since (e.g. running
@@ -1407,26 +1424,33 @@ export function AppRoot(): JSX.Element {
     // Snapshot the project list once — `projects()` is reactive and the
     // mutations below (setLayout) would otherwise reorder the iteration.
     const snapshot = projects().map((p) => p);
+    const previousMode = mountedMode();
 
-    // Tear down PTYs and clear layouts for every currently-mounted
-    // project. The IPC transport has already flipped at this point
-    // (cloudMode() drove this effect), so ptyKill would route to the
-    // NEW backend — which doesn't own the PTY anyway. Fire-and-forget:
-    // the previous backend reaps orphans on disconnect, and awaiting
-    // every kill round-trip serially is what made the swap feel slow.
+    // Save the outgoing mode's layouts before we clear them so a
+    // round-trip toggle (Local → Cloud → Local, or vice versa) can
+    // restore the exact same panes the user was working in instead of
+    // spawning fresh shells over still-alive PTYs. We only cache when
+    // we actually know the previous mode (skips the boot path).
+    if (previousMode) {
+      const cache = layoutCacheByMode[previousMode];
+      for (const project of snapshot) {
+        const ws = getWorkspace(project.id);
+        if (ws?.layout) {
+          cache.set(project.id, ws.layout);
+        } else {
+          cache.delete(project.id);
+        }
+      }
+    }
+
+    // Don't kill PTYs on swap — the previous backend keeps them alive
+    // (Mac PtyManager + cloud-agent both persist their own sessions).
+    // The earlier "fire-and-forget ptyKill" loop was already a no-op
+    // since IPC routes through the new backend, which doesn't own
+    // these session ids; removing the call also stops the
+    // [cloud-reattach] handler from dropping a connection-level
+    // forwarder that other in-memory subscribers still depended on.
     for (const project of snapshot) {
-      const live = new Set<string>();
-      const ws = getWorkspace(project.id);
-      if (ws?.layout) {
-        for (const pane of collectPanes(ws.layout)) live.add(pane.sessionId);
-      }
-      for (const id of sessionsByProject[project.id] ?? []) live.add(id);
-      for (const sessionId of live) {
-        void ptyKill(sessionId).catch(() => {
-          // Best-effort — already gone or backend will reap on disconnect.
-        });
-        forgetSessionCli(sessionId);
-      }
       sessionsByProject[project.id] = [];
       persisterByProject[project.id]?.cancel();
       setLayout(project.id, null);
@@ -1502,6 +1526,23 @@ export function AppRoot(): JSX.Element {
             onError: (err) => console.error("[T19.17] layout persist failed:", err),
           });
 
+          // Cache hit: the user toggled away during this app run and the
+          // local PTYs from that earlier session are still alive in the
+          // Mac PtyManager. Drop the exact layout back in so Terminal
+          // reattaches by session id instead of spawning fresh shells
+          // over the still-running ones.
+          const cached = layoutCacheByMode.local.get(project.id);
+          if (cached) {
+            setLayout(project.id, cached);
+            for (const pane of collectPanes(cached)) {
+              trackSession(project.id, pane.sessionId);
+            }
+            const firstPane = collectPanes(cached)[0];
+            if (firstPane) setFocusedSession(project.id, firstPane.sessionId);
+            autoLaunchedProjects.add(project.id);
+            return;
+          }
+
           if (!isEmptyLayout(savedLayout)) {
             const cli = resolveDefaultCli(project.id);
             await restoreProjectLayout(project.id, savedLayout, cli);
@@ -1510,10 +1551,28 @@ export function AppRoot(): JSX.Element {
         }),
       );
     } else {
-      // Cloud mode: same reattach pass as boot — if the agent kept
-      // a PTY alive across the local→cloud toggle, surface it here
-      // instead of spawning a fresh CLI.
-      await Promise.all(nextProjects.map((project) => restoreCloudSessions(project.id)));
+      // Cloud mode: prefer the in-memory cache (same-run toggle) so a
+      // multi-pane cloud layout survives the round-trip intact. Fall
+      // back to `restoreCloudSessions`, which queries the agent's
+      // `pty_list` and reattaches whatever single newest session
+      // matches — the right behavior on first boot but coarser than
+      // the cache for a same-run toggle.
+      await Promise.all(
+        nextProjects.map(async (project) => {
+          const cached = layoutCacheByMode.cloud.get(project.id);
+          if (cached) {
+            setLayout(project.id, cached);
+            for (const pane of collectPanes(cached)) {
+              trackSession(project.id, pane.sessionId);
+            }
+            const firstPane = collectPanes(cached)[0];
+            if (firstPane) setFocusedSession(project.id, firstPane.sessionId);
+            autoLaunchedProjects.add(project.id);
+            return;
+          }
+          await restoreCloudSessions(project.id);
+        }),
+      );
     }
   };
 
