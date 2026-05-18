@@ -74,7 +74,15 @@ import {
 } from "../../stores/workspace";
 import { listProjectLinks } from "../../db/projectLinks";
 import { Integration } from "../../integrations";
-import { setFocusedSessionCliResolver, setTaskCliLauncher } from "../../stores/taskCliLauncher";
+import {
+  setFocusedSessionCliResolver,
+  setTaskCliLauncher,
+  type TaskCliLauncherOptions,
+} from "../../stores/taskCliLauncher";
+import {
+  formatPlanFlowStartPromptForMode,
+  type PlanFlowStartMode,
+} from "../../types/planflowStartMode";
 import { closeAllPlanflowChatRuntimes } from "../../stores/planflowChatSessions";
 import { installChatMobileListener } from "../../integrations/planflow/chatMobileListener";
 import type { WorkspaceTabKind } from "../../types/workspaceTab";
@@ -663,8 +671,8 @@ export function AppRoot(): JSX.Element {
         // `startTask` the focused pane's CLI so the orchestrator can
         // skip the `git checkout` pre-fill when the focused pane is a
         // REPL (Claude / Kimi / Codex).
-        setTaskCliLauncher((projectId, taskId, cliName) =>
-          startTaskCliLauncher(projectId, taskId, cliName),
+        setTaskCliLauncher((projectId, taskId, opts) =>
+          startTaskCliLauncher(projectId, taskId, opts),
         );
         setFocusedSessionCliResolver((projectId) => resolveFocusedSessionCli(projectId));
         // PlanFlow chat ships an embedded xterm.js mini-terminal now —
@@ -1141,10 +1149,12 @@ export function AppRoot(): JSX.Element {
   // Embedded double quotes in the task id are not expected (it's
   // `T<n>.<m>` shape), but we escape defensively in case the format
   // ever expands.
-  const formatPlanFlowStartPrompt = (taskId: string): string => {
-    const escaped = taskId.replace(/"/g, '\\"');
-    return `planflow_task_start(taskId: "${escaped}")`;
-  };
+  // formatPlanFlowStartPrompt is the inverse of the prompt shape the
+  // planflow-mcp tool documents (manual: bare call; auto: same call
+  // with autoExecute + mergeStrategy args). Mode plumbs in from the
+  // row's Mode picker (see PlanFlowTaskList.CliStartButton).
+  const formatPlanFlowStartPrompt = (taskId: string, mode: PlanFlowStartMode = "manual"): string =>
+    formatPlanFlowStartPromptForMode(taskId, mode);
 
   // CLIs that support the auto-start flow (idle detection + auto-submit).
   // kimi is excluded because its MCP init state interferes with stdin
@@ -1172,9 +1182,11 @@ export function AppRoot(): JSX.Element {
   const startTaskCliLauncher = async (
     projectId: string,
     taskId: string,
-    cliName?: string,
+    opts?: TaskCliLauncherOptions,
   ): Promise<void> => {
-    const prompt = formatPlanFlowStartPrompt(taskId);
+    const mode: PlanFlowStartMode = opts?.mode ?? "manual";
+    const cliName = opts?.cliName;
+    const prompt = formatPlanFlowStartPrompt(taskId, mode);
     const ws = getWorkspace(projectId);
     const focused = ws?.focusedSessionId ?? null;
     const cli =

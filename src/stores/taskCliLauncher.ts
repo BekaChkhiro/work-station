@@ -14,10 +14,24 @@
 // start flow itself still succeeds — the lock is held, the user can
 // open a CLI manually.
 
+import type { PlanFlowStartMode } from "../types/planflowStartMode";
+
+export interface TaskCliLauncherOptions {
+  /** Explicit CLI choice — overrides the project default / auto-resolved
+   *  CLI. PlanFlow Start currently always passes `"claude"`; we keep the
+   *  field around for a future codex / kimi expansion. */
+  cliName?: string;
+  /** Selected Start mode (`manual` / `pr` / `merge-master` / `none`).
+   *  Threaded all the way into the `planflow_task_start(...)` prompt
+   *  the launcher types into the spawned CLI. Defaults to `manual`
+   *  when omitted so legacy callers stay on the safe path. */
+  mode?: PlanFlowStartMode;
+}
+
 export type TaskCliLauncher = (
   projectId: string,
   taskId: string,
-  cliName?: string,
+  opts?: TaskCliLauncherOptions,
 ) => Promise<void> | void;
 
 /** Synchronous lookup: which CLI (if any) is currently running in the
@@ -70,12 +84,12 @@ export function getFocusedSessionCli(projectId: string): string | null {
 export async function launchTaskCli(
   projectId: string,
   taskId: string,
-  cliName?: string,
+  opts?: TaskCliLauncherOptions,
 ): Promise<void> {
   const fn = registeredLauncher;
   if (fn == null) return;
   try {
-    await fn(projectId, taskId, cliName);
+    await fn(projectId, taskId, opts);
   } catch (error) {
     console.warn("[planflow] task CLI launcher failed:", error);
   }

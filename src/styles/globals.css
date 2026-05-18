@@ -4865,6 +4865,55 @@ button {
   background: var(--bg-hover);
 }
 
+/* Mode picker — wider menu with two-line items (label + hint). */
+.ws-pf-tasks__modepicker {
+  min-width: 240px;
+  padding: 4px;
+}
+
+.ws-pf-tasks__modepicker-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: var(--r-xs, 4px);
+  font-family: inherit;
+}
+
+.ws-pf-tasks__modepicker-item:hover {
+  background: var(--bg-hover);
+}
+
+.ws-pf-tasks__modepicker-item[data-selected="true"] {
+  background: var(--bg-hover);
+  outline: 1px solid var(--border-hover, rgba(255, 255, 255, 0.18));
+}
+
+.ws-pf-tasks__modepicker-item[data-danger="true"] .ws-pf-tasks__modepicker-label {
+  color: var(--color-danger, #f38ba8);
+}
+
+.ws-pf-tasks__modepicker-label {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.ws-pf-tasks__modepicker-hint {
+  font-size: 10.5px;
+  line-height: 1.25;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+  white-space: nowrap;
+}
+
 /* ─── T12.5 Progress / Done row buttons + dialog ─────────────────────── */
 
 .ws-pf-tasks__progress,

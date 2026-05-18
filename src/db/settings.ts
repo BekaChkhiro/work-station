@@ -139,6 +139,14 @@ export const SETTINGS = {
   // hostname, which isn't an SSH endpoint). Empty string disables the
   // file-sync step — Push-to-cloud falls back to metadata-only.
   cloud_ssh_endpoint: def(z.string(), ""),
+  // Remembers the most recent PlanFlow Start mode so the next press of
+  // the row's main Start button defaults to whatever the user picked
+  // last (manual / pr / merge-master / none). See
+  // `src/types/planflowStartMode.ts` for the literal set.
+  planflow_last_start_mode: def(
+    z.enum(["manual", "pr", "merge-master", "none"]),
+    "manual" as "manual" | "pr" | "merge-master" | "none",
+  ),
 } as const satisfies Record<string, SettingDef<unknown>>;
 
 export type SettingKey = keyof typeof SETTINGS;

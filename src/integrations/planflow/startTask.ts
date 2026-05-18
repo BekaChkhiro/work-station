@@ -48,6 +48,7 @@
 import { setActiveTab, getWorkspace } from "../../stores/workspace";
 import { setActiveTaskId } from "../../stores/activeTask";
 import { getFocusedSessionCli, launchTaskCli } from "../../stores/taskCliLauncher";
+import type { PlanFlowStartMode } from "../../types/planflowStartMode";
 import { ptyWrite } from "../../ipc/pty";
 import type { PlanFlowClient } from "./client";
 import type { KnowledgeType, Task } from "./schemas";
@@ -69,6 +70,11 @@ export interface StartTaskInput {
    *  instead of the project default. Silently ignored when the named CLI
    *  is not on PATH — the launcher falls back to the auto-resolved CLI. */
   cliName?: string;
+  /** Selected Start mode (`manual` / `pr` / `merge-master` / `none`).
+   *  Threads down to the launcher and ends up baked into the
+   *  `planflow_task_start(...)` prompt that gets typed into the CLI.
+   *  Defaults to `manual` when omitted. */
+  mode?: PlanFlowStartMode;
 }
 
 export interface StartTaskResult {
@@ -226,7 +232,10 @@ export async function startTask(input: StartTaskInput): Promise<StartTaskResult>
   // new CLI pane is spawned next to the existing layout. Wired by
   // AppRoot via `setTaskCliLauncher`; failures are swallowed inside the
   // launcher so the lock we just claimed stays intact.
-  void launchTaskCli(input.workspaceProjectId, input.taskId, input.cliName);
+  void launchTaskCli(input.workspaceProjectId, input.taskId, {
+    cliName: input.cliName,
+    mode: input.mode,
+  });
 
   return { task, branchName, prefilled };
 }

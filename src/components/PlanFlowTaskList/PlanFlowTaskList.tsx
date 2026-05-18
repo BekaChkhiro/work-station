@@ -76,6 +76,13 @@ import { ActiveWorkPanel } from "./ActiveWorkPanel";
 import { ActivityFeed } from "./ActivityFeed";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { PlanFlowChat } from "../PlanFlowChat";
+import { getSetting, setSetting } from "../../db/settings";
+import {
+  DEFAULT_PLANFLOW_START_MODE,
+  PLANFLOW_START_MODES,
+  type PlanFlowStartMode,
+  type PlanFlowStartModeOption,
+} from "../../types/planflowStartMode";
 
 const ROW_FLASH_CLASS = "ws-pf-tasks__row--flash";
 const ROW_FLASH_DURATION_MS = 1400;
@@ -632,14 +639,14 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
               selectedTaskId={props.selectedTaskId}
               clis={props.clis ?? []}
               onSelect={(t) => props.onSelectTask(t.taskId)}
-              onStart={(t, cliName) =>
+              onStart={(t, mode) =>
                 void runStartTask(
                   props.client,
                   props.externalId,
                   props.workspaceProjectId,
                   t,
                   props.onRetry,
-                  cliName,
+                  mode,
                 )
               }
               onChangeStatus={(t, s) =>
@@ -705,14 +712,14 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
                                 selected={props.selectedTaskId === task.taskId}
                                 clis={props.clis ?? []}
                                 onSelect={() => props.onSelectTask(task.taskId)}
-                                onStart={(t, cliName) =>
+                                onStart={(t, mode) =>
                                   void runStartTask(
                                     props.client,
                                     props.externalId,
                                     props.workspaceProjectId,
                                     t,
                                     props.onRetry,
-                                    cliName,
+                                    mode,
                                   )
                                 }
                                 onMarkProgress={(t) =>
@@ -788,7 +795,7 @@ interface KanbanBoardProps {
   selectedTaskId: string | null;
   clis?: readonly PaneCliOption[];
   onSelect: (task: Task) => void;
-  onStart: (task: Task, cliName?: string) => void;
+  onStart: (task: Task, mode: PlanFlowStartMode) => void;
   onChangeStatus: (task: Task, status: TaskStatus) => void;
 }
 
@@ -846,7 +853,7 @@ function KanbanBoard(props: KanbanBoardProps): JSX.Element {
                       column={col}
                       clis={props.clis ?? []}
                       onSelect={() => props.onSelect(task)}
-                      onStart={(cliName) => props.onStart(task, cliName)}
+                      onStart={(mode) => props.onStart(task, mode)}
                       onChangeStatus={(s) => props.onChangeStatus(task, s)}
                     />
                   )}
@@ -873,7 +880,7 @@ interface KanbanCardProps {
   column: KanbanColumn;
   clis?: readonly PaneCliOption[];
   onSelect: () => void;
-  onStart: (cliName?: string) => void;
+  onStart: (mode: PlanFlowStartMode) => void;
   onChangeStatus: (status: TaskStatus) => void;
 }
 
@@ -971,9 +978,9 @@ function KanbanCard(props: KanbanCardProps): JSX.Element {
           clis={props.clis ?? []}
           active={isActive()}
           variant="kanban"
-          onStart={(cliName) => {
+          onStart={(mode) => {
             if (startDisabled()) return;
-            props.onStart(cliName);
+            props.onStart(mode);
           }}
         />
       </Show>
@@ -1021,8 +1028,6 @@ function KanbanCard(props: KanbanCardProps): JSX.Element {
   );
 }
 
-const TASK_CLI_NAMES: ReadonlySet<string> = new Set(["claude", "codex"]);
-
 /* ─── CliStartButton ────────────────────────────────────────────────── */
 
 interface CliStartButtonProps {
@@ -1036,23 +1041,53 @@ interface CliStartButtonProps {
   disabledTitle?: string;
   activeTitle?: string;
   defaultTitle?: string;
-  onStart: (cliName?: string) => void;
+  onStart: (mode: PlanFlowStartMode) => void;
+}
+
+// Last-picked Start mode is a single global — every row's chevron writes
+// here on selection and reads it on render. Persisted to
+// `app_settings.planflow_last_start_mode` so a relaunch lands on
+// whatever flow the user was using last.
+const [lastStartMode, setLastStartMode] = createSignal<PlanFlowStartMode>(
+  DEFAULT_PLANFLOW_START_MODE,
+);
+
+void getSetting("planflow_last_start_mode")
+  .then((value) => setLastStartMode(value))
+  .catch((err: unknown) => {
+    console.warn("[planflow] failed to read last Start mode:", err);
+  });
+
+function persistLastStartMode(mode: PlanFlowStartMode): void {
+  setLastStartMode(mode);
+  void setSetting("planflow_last_start_mode", mode).catch((err: unknown) => {
+    console.warn("[planflow] failed to persist Start mode:", err);
+  });
 }
 
 function CliStartButton(props: CliStartButtonProps): JSX.Element {
   const [pickerOpen, setPickerOpen] = createSignal(false);
   let wrapRef: HTMLDivElement | undefined;
 
-  const taskClis = (): readonly PaneCliOption[] =>
-    props.clis.filter((c) => TASK_CLI_NAMES.has(c.name));
-  const showChevron = (): boolean => taskClis().length > 1;
+  // Mode picker is always available on the row's chevron — that's the
+  // whole point of this surface now that the user has more than one
+  // automation pattern (manual, PR, merge-master, none). The CLI
+  // choice (claude vs codex) was removed at the same time per spec
+  // request: "let's keep Start claude-only for now".
+  const showChevron = (): boolean => true;
   const mainClass = (): string =>
     props.variant === "kanban" ? "ws-pf-kanban__card-start" : "ws-pf-tasks__start";
+
+  const modeOption = (mode: PlanFlowStartMode): PlanFlowStartModeOption | undefined =>
+    PLANFLOW_START_MODES.find((m) => m.id === mode);
 
   const titleAttr = (): string => {
     if (props.disabled) return props.disabledTitle ?? "";
     if (props.active) return props.activeTitle ?? "";
-    return props.defaultTitle ?? "";
+    const opt = modeOption(lastStartMode());
+    const base = props.defaultTitle ?? "";
+    if (!opt) return base;
+    return base ? `${base} · ${opt.label}: ${opt.hint}` : `${opt.label}: ${opt.hint}`;
   };
 
   createEffect(() => {
@@ -1073,6 +1108,11 @@ function CliStartButton(props: CliStartButtonProps): JSX.Element {
     });
   });
 
+  const fire = (mode: PlanFlowStartMode): void => {
+    persistLastStartMode(mode);
+    props.onStart(mode);
+  };
+
   return (
     <div
       class="ws-pf-tasks__start-wrap"
@@ -1083,16 +1123,17 @@ function CliStartButton(props: CliStartButtonProps): JSX.Element {
         type="button"
         class={`${mainClass()}${showChevron() ? " ws-pf-tasks__start--split" : ""}`}
         data-active={props.active ? "true" : undefined}
+        data-mode={lastStartMode()}
         disabled={props.disabled}
         aria-label={
           props.disabled
             ? `${props.label} on ${props.taskId} — ${props.disabledTitle ?? "locked"}`
-            : `${props.label} on ${props.taskId}`
+            : `${props.label} on ${props.taskId} (${modeOption(lastStartMode())?.label ?? "Manual"})`
         }
         title={titleAttr()}
         onClick={(e) => {
           e.stopPropagation();
-          props.onStart();
+          fire(lastStartMode());
         }}
       >
         {props.label}
@@ -1102,8 +1143,8 @@ function CliStartButton(props: CliStartButtonProps): JSX.Element {
           type="button"
           class="ws-pf-tasks__start-chevron"
           disabled={props.disabled}
-          aria-label={`Choose CLI for ${props.taskId}`}
-          title="Choose which CLI to launch"
+          aria-label={`Choose Start mode for ${props.taskId}`}
+          title="Choose Start mode"
           onClick={(e) => {
             e.stopPropagation();
             setPickerOpen((v) => !v);
@@ -1113,21 +1154,30 @@ function CliStartButton(props: CliStartButtonProps): JSX.Element {
         </button>
       </Show>
       <Show when={pickerOpen()}>
-        <ul class="ws-pf-tasks__clipicker" role="menu" aria-label="Choose CLI">
-          <For each={taskClis()}>
-            {(cli) => (
+        <ul
+          class="ws-pf-tasks__clipicker ws-pf-tasks__modepicker"
+          role="menu"
+          aria-label="Choose Start mode"
+        >
+          <For each={PLANFLOW_START_MODES}>
+            {(option) => (
               <li role="none">
                 <button
                   type="button"
-                  role="menuitem"
-                  class="ws-pf-tasks__clipicker-item"
+                  role="menuitemradio"
+                  aria-checked={option.id === lastStartMode()}
+                  class="ws-pf-tasks__clipicker-item ws-pf-tasks__modepicker-item"
+                  data-mode={option.id}
+                  data-danger={option.danger ? "true" : undefined}
+                  data-selected={option.id === lastStartMode() ? "true" : undefined}
                   onClick={(e) => {
                     e.stopPropagation();
                     setPickerOpen(false);
-                    props.onStart(cli.name);
+                    fire(option.id);
                   }}
                 >
-                  {cli.name}
+                  <span class="ws-pf-tasks__modepicker-label">{option.label}</span>
+                  <span class="ws-pf-tasks__modepicker-hint">{option.hint}</span>
                 </button>
               </li>
             )}
@@ -1176,7 +1226,7 @@ interface TaskRowProps {
   ready: boolean;
   clis?: readonly PaneCliOption[];
   onSelect: () => void;
-  onStart: (task: Task, cliName?: string) => void;
+  onStart: (task: Task, mode: PlanFlowStartMode) => void;
   /** T12.5 — open the Progress dialog for this task. Surfaced only when
    *  the row is the user's active in-progress task. */
   onMarkProgress: (task: Task) => void;
@@ -1334,9 +1384,9 @@ function TaskRow(props: TaskRowProps): JSX.Element {
           clis={props.clis ?? []}
           active={isActive()}
           variant="row"
-          onStart={(cliName) => {
+          onStart={(mode) => {
             if (startDisabled()) return;
-            props.onStart(props.task, cliName);
+            props.onStart(props.task, mode);
           }}
         />
       </Show>
@@ -1490,7 +1540,7 @@ async function runStartTask(
   workspaceProjectId: string,
   task: Task,
   onRetry: () => void,
-  cliName?: string,
+  mode: PlanFlowStartMode,
 ): Promise<void> {
   try {
     const result = await startTask({
@@ -1498,7 +1548,11 @@ async function runStartTask(
       externalId,
       workspaceProjectId,
       taskId: task.taskId,
-      cliName,
+      // Claude-only for now — the row's chevron picks a Start mode
+      // rather than a CLI. Codex / kimi support is parked until the
+      // mode picker grows a CLI dimension.
+      cliName: "claude",
+      mode,
     });
     if (result.branchName === null) {
       showToast({
