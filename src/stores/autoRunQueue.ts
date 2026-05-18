@@ -6,21 +6,12 @@
 // it, and even with both unmounted the loop keeps dispatching tasks
 // until the queue is done / stopped.
 //
-// Tick algorithm (every AUTO_RUN_POLL_INTERVAL_MS):
-//   1. For each persisted queue whose state is active, advance one
-//      step at most. We never recursively chain dispatches in a
-//      single tick — that would risk dispatching past a failure
-//      before the next poll could see it.
-//   2. Scheduled → if Date.now() >= startAt, dispatch task #cursor.
-//   3. Running   → call PlanFlowClient.getTask; if DONE move to
-//      waiting (with pacing nextDispatchAt). If still in flight but
-//      elapsed > AUTO_RUN_TASK_TIMEOUT_MS, record a timeout entry.
-//   4. Waiting   → if Date.now() >= nextDispatchAt, check the
-//      deadline; either dispatch the next task or mark the queue
-//      done with remaining tasks skipped.
-//
-// All transitions go through `mutate(projectId, fn)` so the persisted
-// settings record stays in lockstep with the in-memory signal.
+// Dispatch picks the next task DYNAMICALLY by re-querying PlanFlow
+// at every boundary: sort TODO tasks by canonical id ("T1.5", "T1.6",
+// "T1.7", …) and take the first one whose dependencies are all DONE
+// and that no other user holds. That way a chain T1.5 → T1.6 → T1.7
+// actually walks forward as each predecessor flips to DONE, instead
+// of being frozen to a snapshot of "what was ready at t=0".
 
 import { createMemo, createSignal } from "solid-js";
 
@@ -48,12 +39,72 @@ let tickInterval: ReturnType<typeof setInterval> | null = null;
 export interface StartAutoRunInput {
   workspaceProjectId: string;
   externalId: string;
-  taskIds: string[];
+  targetCount: number;
   mode: PlanFlowStartMode;
   startAt: number | null;
   pacingMinutes: number;
   deadlineAt: number | null;
   onFailure: AutoRunFailureMode;
+}
+
+/** Plan-id ordering — "T<phase>.<index>". Mirrors compareTaskIds in
+ *  PlanFlowTaskList so the queue picks the same order the row list
+ *  renders. Keep this in sync if the format ever changes. */
+function compareTaskIds(a: string, b: string): number {
+  const parse = (id: string): { phase: number; index: number } | null => {
+    const match = /^T(\d+)\.(\d+)$/.exec(id);
+    if (!match) return null;
+    const phase = Number.parseInt(match[1] ?? "", 10);
+    const index = Number.parseInt(match[2] ?? "", 10);
+    if (!Number.isFinite(phase) || !Number.isFinite(index)) return null;
+    return { phase, index };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (pa && pb) {
+    if (pa.phase !== pb.phase) return pa.phase - pb.phase;
+    return pa.index - pb.index;
+  }
+  if (pa) return -1;
+  if (pb) return 1;
+  return a.localeCompare(b);
+}
+
+/** Pick the next task to dispatch from a freshly-fetched task list.
+ *  Returns null when nothing is dispatchable yet (a queue in this
+ *  state finalises as `done`). */
+function pickNextTaskId(
+  tasks: readonly Task[],
+  history: readonly AutoRunHistoryEntry[],
+): string | null {
+  const done = new Set<string>();
+  for (const task of tasks) {
+    if (task.status === "DONE" || task.status === "DROPPED") {
+      done.add(task.taskId);
+    }
+  }
+  // Tasks already attempted in this run are excluded — a failed task
+  // shouldn't be picked again on the next tick if the user chose
+  // onFailure=continue, and a "done" task we already credited
+  // shouldn't slip back in if the listing lags behind the WS update.
+  const attempted = new Set<string>(history.map((h) => h.taskId));
+
+  const candidates: Task[] = [];
+  for (const task of tasks) {
+    if (attempted.has(task.taskId)) continue;
+    if (task.status !== "TODO") continue;
+    const deps = task.dependencies ?? [];
+    if (deps.length > 0 && !deps.every((d) => done.has(d))) continue;
+    const lockerId = task.lockedBy?.id ?? null;
+    // Locked by anybody at all blocks the pick — auto-run doesn't try
+    // to muscle through somebody else's session, and even our own
+    // lock means the dispatcher is racing the previous turn.
+    if (lockerId !== null) continue;
+    candidates.push(task);
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => compareTaskIds(a.taskId, b.taskId));
+  return candidates[0]?.taskId ?? null;
 }
 
 /** Read the queue for a workspace project (reactive). Returns null
@@ -101,8 +152,6 @@ export async function hydrateAutoRunQueues(): Promise<void> {
   hydrated = true;
   try {
     const stored = await getSetting("planflow_auto_run_queues");
-    // On boot we re-arm `scheduled` queues whose start time has
-    // already elapsed — they'll be picked up by the next tick.
     setQueuesSignal(stored ?? {});
   } catch (err) {
     console.warn("[autoRun] hydrate failed:", err);
@@ -116,13 +165,9 @@ export function ensureTickStarted(): void {
   tickInterval = setInterval(() => {
     void tick();
   }, AUTO_RUN_POLL_INTERVAL_MS);
-  // Fire a tick immediately on boot so a `scheduled` queue whose
-  // start time has already elapsed doesn't wait the full poll
-  // interval before its first dispatch.
   void tick();
 }
 
-/** Test-only — stop the interval so tests don't leak timers. */
 export function _stopTickForTests(): void {
   if (tickInterval !== null) {
     clearInterval(tickInterval);
@@ -130,21 +175,20 @@ export function _stopTickForTests(): void {
   }
 }
 
-/** Construct a queue and persist it. Returns the seeded queue so the
- *  caller can show "started" feedback immediately. */
 export function startAutoRun(input: StartAutoRunInput): AutoRunQueue {
   const now = Date.now();
   const queue: AutoRunQueue = {
     id: createAutoRunQueueId(),
     projectId: input.workspaceProjectId,
     externalId: input.externalId,
-    taskIds: [...input.taskIds],
+    targetCount: input.targetCount,
+    completedCount: 0,
+    currentTaskId: null,
     mode: input.mode,
     startAt: input.startAt,
     pacingMinutes: input.pacingMinutes,
     deadlineAt: input.deadlineAt,
     onFailure: input.onFailure,
-    cursor: 0,
     state: input.startAt && input.startAt > now ? "scheduled" : "running",
     currentTaskStartedAt: null,
     nextDispatchAt: input.startAt && input.startAt > now ? input.startAt : null,
@@ -153,11 +197,8 @@ export function startAutoRun(input: StartAutoRunInput): AutoRunQueue {
   };
   mutate(input.workspaceProjectId, () => queue);
   ensureTickStarted();
-  // If we land directly in "running", dispatch task #0 right away
-  // rather than waiting for the next tick — keeps the bar's
-  // "current: …" label honest from t=0.
   if (queue.state === "running") {
-    void dispatchCursor(queue.projectId);
+    void pickAndDispatch(queue.projectId);
   }
   return queue;
 }
@@ -174,10 +215,7 @@ export function resumeAutoRun(projectId: string): void {
   mutate(projectId, (current) => {
     if (!current) return current;
     if (current.state !== "paused") return current;
-    // If a task was in flight when we paused, leave the cursor on it
-    // and resume polling. Otherwise we resume from the pacing window
-    // (treat as if we just finished — next dispatch ASAP).
-    if (current.currentTaskStartedAt !== null) {
+    if (current.currentTaskId !== null && current.currentTaskStartedAt !== null) {
       return { ...current, state: "running" };
     }
     return { ...current, state: "waiting", nextDispatchAt: Date.now() };
@@ -195,9 +233,6 @@ export function stopAutoRun(projectId: string): void {
   });
 }
 
-/** Clear an inactive queue from the persisted record (after the user
- *  dismisses the "Last run: …" badge). No-op if a queue is still
- *  active — the UI should hide Dismiss while running. */
 export function dismissAutoRun(projectId: string): void {
   mutate(projectId, (current) => {
     if (!current) return current;
@@ -208,8 +243,6 @@ export function dismissAutoRun(projectId: string): void {
 
 async function tick(): Promise<void> {
   const all = queuesSignal();
-  // Snapshot entries so a mutation mid-loop doesn't reshuffle the
-  // iteration order. Each per-project handler awaits its own work.
   const entries = Object.entries(all);
   for (const [projectId, queue] of entries) {
     if (!isAutoRunQueueActive(queue)) continue;
@@ -230,14 +263,13 @@ async function advance(projectId: string, queue: AutoRunQueue): Promise<void> {
         if (!q || q.state !== "scheduled") return q;
         return { ...q, state: "running", nextDispatchAt: null };
       });
-      await dispatchCursor(projectId);
+      await pickAndDispatch(projectId);
     }
     return;
   }
 
   if (queue.state === "waiting") {
     if (queue.nextDispatchAt === null || now >= queue.nextDispatchAt) {
-      // Deadline gate — check before dispatching the next task.
       if (queue.deadlineAt !== null && now >= queue.deadlineAt) {
         finalizeOnDeadline(projectId);
         return;
@@ -246,7 +278,7 @@ async function advance(projectId: string, queue: AutoRunQueue): Promise<void> {
         if (!q || q.state !== "waiting") return q;
         return { ...q, state: "running", nextDispatchAt: null };
       });
-      await dispatchCursor(projectId);
+      await pickAndDispatch(projectId);
     }
     return;
   }
@@ -258,14 +290,12 @@ async function advance(projectId: string, queue: AutoRunQueue): Promise<void> {
 }
 
 async function pollRunning(projectId: string, queue: AutoRunQueue): Promise<void> {
-  const taskId = queue.taskIds[queue.cursor];
-  if (taskId === undefined) {
-    // Defensive — cursor out of range means we finished but didn't
-    // flip state. Repair it.
-    mutate(projectId, (q) => {
-      if (!q) return q;
-      return { ...q, state: "done", nextDispatchAt: null, currentTaskStartedAt: null };
-    });
+  const taskId = queue.currentTaskId;
+  if (!taskId) {
+    // No task in flight — re-trigger the picker. Happens when the
+    // dispatcher couldn't find a task on its first attempt but the
+    // queue stayed in `running` for a moment.
+    await pickAndDispatch(projectId);
     return;
   }
 
@@ -274,8 +304,6 @@ async function pollRunning(projectId: string, queue: AutoRunQueue): Promise<void
     const client = createRendererPlanFlowClient({ cloudProjectId: queue.projectId });
     task = await client.getTask(queue.externalId, taskId);
   } catch (err) {
-    // Transient network failures shouldn't abort the queue — they'll
-    // retry on the next tick. The bar still says "running".
     console.warn(`[autoRun:${projectId}] poll failed for ${taskId}:`, err);
     return;
   }
@@ -283,7 +311,7 @@ async function pollRunning(projectId: string, queue: AutoRunQueue): Promise<void
   const startedAt = queue.currentTaskStartedAt ?? Date.now();
   const elapsed = Date.now() - startedAt;
 
-  if (task?.status === "DONE") {
+  if (task?.status === "DONE" || task?.status === "DROPPED") {
     completeCurrent(projectId, taskId, "done", startedAt);
     return;
   }
@@ -304,29 +332,29 @@ function completeCurrent(
     if (!q) return q;
     const entry: AutoRunHistoryEntry = { taskId, status, startedAt, finishedAt };
     const history = [...q.history, entry];
-    const nextCursor = q.cursor + 1;
-    const allDone = nextCursor >= q.taskIds.length;
 
-    // Failure-mode gate. `done` is always benign; `failed` / `timeout`
-    // pause the queue when onFailure=stop. The user resumes via
-    // resumeAutoRun, or stops entirely.
     if ((status === "failed" || status === "timeout") && q.onFailure === "stop") {
       return {
         ...q,
         history,
         state: "paused",
         nextDispatchAt: null,
+        currentTaskId: null,
         currentTaskStartedAt: null,
       };
     }
+
+    const completedCount = status === "done" ? q.completedCount + 1 : q.completedCount + 1;
+    const allDone = completedCount >= q.targetCount;
 
     if (allDone) {
       return {
         ...q,
         history,
-        cursor: nextCursor,
+        completedCount,
         state: "done",
         nextDispatchAt: null,
+        currentTaskId: null,
         currentTaskStartedAt: null,
       };
     }
@@ -335,63 +363,76 @@ function completeCurrent(
     return {
       ...q,
       history,
-      cursor: nextCursor,
+      completedCount,
       state: pacingMs > 0 ? "waiting" : "running",
       nextDispatchAt: pacingMs > 0 ? finishedAt + pacingMs : null,
+      currentTaskId: null,
       currentTaskStartedAt: null,
     };
   });
 
-  // Back-to-back pacing: dispatch the next task immediately rather
-  // than waiting the poll interval. With pacing > 0 the tick loop
-  // picks it up when nextDispatchAt elapses.
   const updated = queuesSignal()[projectId];
   if (updated && updated.state === "running") {
-    void dispatchCursor(projectId);
+    void pickAndDispatch(projectId);
   }
 }
 
 function finalizeOnDeadline(projectId: string): void {
   mutate(projectId, (q) => {
     if (!q) return q;
-    const finishedAt = Date.now();
-    // Mark every remaining task as skipped so history shows what was
-    // queued but never dispatched. cursor jumps to the end.
-    const remaining = q.taskIds.slice(q.cursor).map((taskId) => ({
-      taskId,
-      status: "skipped" as const,
-      startedAt: finishedAt,
-      finishedAt,
-    }));
     return {
       ...q,
-      history: [...q.history, ...remaining],
-      cursor: q.taskIds.length,
       state: "done",
       nextDispatchAt: null,
+      currentTaskId: null,
       currentTaskStartedAt: null,
     };
   });
 }
 
-async function dispatchCursor(projectId: string): Promise<void> {
+async function pickAndDispatch(projectId: string): Promise<void> {
   const queue = queuesSignal()[projectId];
   if (!queue || queue.state !== "running") return;
-  const taskId = queue.taskIds[queue.cursor];
-  if (taskId === undefined) {
+
+  // Re-query the task list at the dispatch boundary so we honor the
+  // *current* dependency graph. A predecessor that just flipped to
+  // DONE makes its successor pickable in the same tick — no stale
+  // snapshot from queue-create time.
+  let tasks: Task[] = [];
+  try {
+    const client = createRendererPlanFlowClient({ cloudProjectId: queue.projectId });
+    tasks = await client.listTasks(queue.externalId);
+  } catch (err) {
+    console.warn(`[autoRun:${projectId}] listTasks failed:`, err);
+    // Defer to the next tick — likely a transient network blip.
+    return;
+  }
+
+  const taskId = pickNextTaskId(tasks, queue.history);
+  if (taskId === null) {
+    // Nothing else to dispatch. We've either run PlanFlow dry or the
+    // graph is stuck behind a non-ready task. Either way the user
+    // gets a tidy `done` and can dismiss when they're satisfied.
     mutate(projectId, (q) => {
       if (!q) return q;
-      return { ...q, state: "done" };
+      return {
+        ...q,
+        state: "done",
+        nextDispatchAt: null,
+        currentTaskId: null,
+        currentTaskStartedAt: null,
+      };
     });
     return;
   }
 
-  // Stamp currentTaskStartedAt before we kick off startTask so the
-  // timeout calculation has a reference even if the dispatch itself
-  // is slow to resolve.
   mutate(projectId, (q) => {
     if (!q || q.state !== "running") return q;
-    return { ...q, currentTaskStartedAt: Date.now() };
+    return {
+      ...q,
+      currentTaskId: taskId,
+      currentTaskStartedAt: Date.now(),
+    };
   });
 
   try {

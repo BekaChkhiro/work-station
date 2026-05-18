@@ -22,9 +22,15 @@ export interface AutoRunDialogProps {
   open: boolean;
   workspaceProjectId: string;
   externalId: string;
-  /** Tasks that meet the "ready" predicate, in display order. The
-   *  dialog slices off the top N when the user picks a count. */
+  /** Tasks that meet the "ready" predicate (deps DONE + not locked).
+   *  Used as the gate for whether Run is enabled — we need at least
+   *  one ready task to begin. */
   readyTasks: readonly Task[];
+  /** All TODO tasks in plan-id order (T1.5, T1.6, …). Drives the
+   *  "Will run" preview: the queue is dynamic, so the actual
+   *  dispatch chain walks this list as each predecessor finishes,
+   *  even if those later tasks aren't ready yet at t=0. */
+  pendingTasks: readonly Task[];
   onCancel: () => void;
   /** Fired after `startAutoRun` succeeds so the parent can close the
    *  dialog and show the bar. */
@@ -114,9 +120,14 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
     onCleanup(() => document.removeEventListener("keydown", onKey, { capture: true }));
   });
 
-  const effectiveCount = createMemo(() => Math.min(count(), props.readyTasks.length));
-  const willRun = createMemo(() => props.readyTasks.slice(0, effectiveCount()));
+  // The queue dispatches dynamically (re-querying TODOs at each
+  // boundary), so the count is capped by *all* pending tasks, not
+  // by the subset that's ready right now. We still need at least
+  // one currently-ready task to begin — the gate sits in canSubmit.
+  const effectiveCount = createMemo(() => Math.min(count(), props.pendingTasks.length));
+  const willRun = createMemo(() => props.pendingTasks.slice(0, effectiveCount()));
   const noReady = (): boolean => props.readyTasks.length === 0;
+  const noPending = (): boolean => props.pendingTasks.length === 0;
 
   const computeStartAt = (): number | null => {
     if (startWhen() === "now") return null;
@@ -142,6 +153,9 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
   const canSubmit = (): boolean => {
     if (submitting()) return false;
     if (effectiveCount() === 0) return false;
+    // For "Now" start, we need at least one ready task to dispatch on
+    // t=0. For "later" we trust that something will be ready by then.
+    if (startWhen() === "now" && props.readyTasks.length === 0) return false;
     if (startWhen() === "later" && computeStartAt() === null) return false;
     return true;
   };
@@ -154,7 +168,7 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
       startAutoRun({
         workspaceProjectId: props.workspaceProjectId,
         externalId: props.externalId,
-        taskIds: willRun().map((t) => t.taskId),
+        targetCount: effectiveCount(),
         mode: mode(),
         startAt: computeStartAt(),
         pacingMinutes: pacing(),
@@ -202,11 +216,11 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
 
           <div class="ws-aar__body">
             <Show
-              when={!noReady()}
+              when={!noPending()}
               fallback={
                 <p class="ws-aar__empty">
-                  No ready tasks right now. A task is ready when its status is TODO, every
-                  dependency is DONE, and no one else holds the lock.
+                  No TODO tasks left in this project. Create more tasks on planflow.tools or unblock
+                  the ones in BLOCKED to use auto-run.
                 </p>
               }
             >
@@ -222,14 +236,21 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
                 >
                   <For each={COUNT_CHOICES}>
                     {(n) => (
-                      <option value={n} disabled={n > props.readyTasks.length}>
-                        {n} ready task{n === 1 ? "" : "s"}
-                        {n > props.readyTasks.length ? " (not enough)" : ""}
+                      <option value={n} disabled={n > props.pendingTasks.length}>
+                        {n} task{n === 1 ? "" : "s"}
+                        {n > props.pendingTasks.length ? " (not enough)" : ""}
                       </option>
                     )}
                   </For>
                 </select>
               </div>
+
+              <Show when={noReady()}>
+                <p class="ws-aar__error" role="alert">
+                  No tasks are ready right now (every TODO is locked or its dependencies aren't DONE
+                  yet). Auto-run needs at least one task it can pick up immediately.
+                </p>
+              </Show>
 
               <div class="ws-aar__row">
                 <label class="ws-aar__label" for="ws-aar-mode">
@@ -348,7 +369,9 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
               </fieldset>
 
               <div class="ws-aar__preview">
-                <div class="ws-aar__preview-title">Will run ({effectiveCount()})</div>
+                <div class="ws-aar__preview-title">
+                  Will run ({effectiveCount()}) — picked in plan order
+                </div>
                 <ol class="ws-aar__preview-list">
                   <For each={willRun()}>
                     {(task, i) => (

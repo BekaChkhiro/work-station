@@ -1,22 +1,28 @@
 // Auto-run queue model for the PlanFlow tab.
 //
-// Lets the user pick the first N "ready" tasks (TODO + deps satisfied
-// + not locked-by-other) and dispatch them autonomously, one at a
-// time, with optional pacing between them and an optional deadline.
+// The user picks "how many" tasks they want auto-dispatched. We do
+// NOT freeze a list of taskIds up front — instead, at every dispatch
+// boundary the store re-queries PlanFlow, sorts TODO tasks by
+// canonical id ("T1.5", "T1.6", "T1.7", …), and picks the first one
+// whose dependencies are all DONE and that isn't locked by someone
+// else. That way a chain like T1.5 → T1.6 → T1.7 actually walks
+// the chain as each predecessor flips to DONE, even though only T1.5
+// was "ready" at queue-create time.
 //
 // State machine (see `state`):
 //   idle      — not active. Persisted only after a queue has ever run
 //               (history retained); otherwise the slot is null.
 //   scheduled — startAt is in the future; tick loop will move us to
 //               `running` when it elapses.
-//   running   — task #cursor is dispatched, we're polling PlanFlow
+//   running   — currentTaskId is dispatched, we're polling PlanFlow
 //               for its status to flip to DONE.
-//   waiting   — task #cursor finished (DONE or failed-but-continue),
+//   waiting   — last task finished (DONE or failed-but-continue),
 //               nextDispatchAt is set in the pacing window.
 //   paused    — user pressed pause OR a failure triggered onFailure=stop.
 //               No more dispatches until resumed.
 //   stopped   — user pressed stop; no more dispatches, queue archived.
-//   done      — cursor === taskIds.length, all finished successfully.
+//   done      — completedCount >= targetCount, or no more pickable
+//               tasks (PlanFlow ran out of ready work).
 //   failed    — onFailure=stop tripped; queue archived.
 //
 // All time fields are epoch milliseconds (Date.now()). They survive
@@ -53,12 +59,19 @@ export interface AutoRunQueue {
   id: string;
   /** Workspace projectId — keyed in the persisted record. */
   projectId: string;
-  /** PlanFlow externalId — passed to startTask + getTask polling. */
+  /** PlanFlow externalId — passed to startTask + listTasks polling. */
   externalId: string;
-  /** Ordered task ids ("T1.3", "T1.4", …). Frozen at queue-create
-   *  time so a mid-run change in the PlanFlow list doesn't reshuffle
-   *  what's already dispatched. */
-  taskIds: string[];
+  /** How many task completions the user wants. The queue stops once
+   *  `completedCount >= targetCount`, regardless of how many tasks
+   *  PlanFlow still has TODO. */
+  targetCount: number;
+  /** Successful task completions so far. Incremented on every DONE
+   *  poll hit; failures/timeouts in onFailure=continue mode count
+   *  here too (so the user gets the "3 of 3 attempted" semantics). */
+  completedCount: number;
+  /** The task we're currently polling. Null when state ∈ {scheduled,
+   *  waiting, paused, stopped, done, failed}. */
+  currentTaskId: string | null;
   /** Shared mode for every task in this queue. */
   mode: PlanFlowStartMode;
   /** Epoch ms to begin the first dispatch. Null = start immediately. */
@@ -72,12 +85,9 @@ export interface AutoRunQueue {
   deadlineAt: number | null;
   /** stop: pause queue + notify; continue: log + keep going. */
   onFailure: AutoRunFailureMode;
-  /** Index of the next task to dispatch. After all dispatches it
-   *  equals taskIds.length and state flips to "done". */
-  cursor: number;
   state: AutoRunState;
   /** When the *currently-running* task was dispatched. Lets us detect
-   *  a stuck task (no DONE flip after 60 min → timeout). */
+   *  a stuck task (no DONE flip after the timeout). */
   currentTaskStartedAt: number | null;
   /** Set during `waiting` (pacing) and `scheduled` (initial delay).
    *  The tick loop wakes up when now >= this. */
@@ -99,7 +109,9 @@ export const autoRunQueueSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   externalId: z.string(),
-  taskIds: z.array(z.string()),
+  targetCount: z.number().int().min(1),
+  completedCount: z.number().int().min(0),
+  currentTaskId: z.string().nullable(),
   mode: z.enum(["manual", "pr", "merge-master", "none"]),
   startAt: z.number().nullable(),
   pacingMinutes: z
@@ -108,7 +120,6 @@ export const autoRunQueueSchema = z.object({
     .max(24 * 60),
   deadlineAt: z.number().nullable(),
   onFailure: z.enum(["stop", "continue"]),
-  cursor: z.number().int().min(0),
   state: z.enum(["idle", "scheduled", "running", "waiting", "paused", "stopped", "done", "failed"]),
   currentTaskStartedAt: z.number().nullable(),
   nextDispatchAt: z.number().nullable(),
@@ -151,7 +162,5 @@ export function isAutoRunQueueActive(queue: AutoRunQueue | null | undefined): bo
 }
 
 export function autoRunQueueProgressLabel(queue: AutoRunQueue): string {
-  const total = queue.taskIds.length;
-  const done = queue.history.filter((h) => h.status === "done").length;
-  return `${done}/${total}`;
+  return `${queue.completedCount}/${queue.targetCount}`;
 }

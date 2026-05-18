@@ -539,16 +539,24 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
   });
 
   // Same predicate as readyIds but returns the Task objects in
-  // canonical phase/index order — AutoRunDialog uses this to preview
-  // the first N tasks that the queue will dispatch. We sort here so
-  // the queue selection is deterministic regardless of the rendered
-  // view's grouping.
+  // canonical phase/index order. Auto-run dispatches dynamically by
+  // re-querying TODOs at each boundary, so this is only the "we can
+  // start right now" gate — not the full chain.
   const readyTasksOrdered = createMemo<readonly Task[]>(() => {
     const ready = readyIds();
     return [...props.tasks]
       .filter((t) => ready.has(t.taskId))
       .sort((a, b) => compareTaskIds(a.taskId, b.taskId));
   });
+
+  // All TODO tasks in plan-id order — drives the dialog's "Will run"
+  // preview (the dispatcher walks this list as each predecessor
+  // flips to DONE) and bounds the "How many" count select.
+  const pendingTasksOrdered = createMemo<readonly Task[]>(() =>
+    [...props.tasks]
+      .filter((t) => t.status === "TODO")
+      .sort((a, b) => compareTaskIds(a.taskId, b.taskId)),
+  );
 
   const [autoRunOpen, setAutoRunOpen] = createSignal(false);
   const autoRunBusy = (): boolean => isAutoRunActive(props.workspaceProjectId);
@@ -637,6 +645,7 @@ function TaskListBody(props: TaskListBodyProps): JSX.Element {
         workspaceProjectId={props.workspaceProjectId}
         externalId={props.externalId}
         readyTasks={readyTasksOrdered()}
+        pendingTasks={pendingTasksOrdered()}
         onCancel={() => setAutoRunOpen(false)}
         onStarted={() => setAutoRunOpen(false)}
       />

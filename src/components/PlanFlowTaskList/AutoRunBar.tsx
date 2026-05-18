@@ -80,7 +80,7 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
     const q = queue();
     if (!q) return null;
     if (q.state !== "running" && q.state !== "paused") return null;
-    return q.taskIds[q.cursor] ?? null;
+    return q.currentTaskId ?? null;
   });
 
   return (
