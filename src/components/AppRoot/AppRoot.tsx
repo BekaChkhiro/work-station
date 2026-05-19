@@ -17,7 +17,7 @@
 //     store's layout tree (covers split panes from T5.6) so every PTY
 //     gets killed before the DB row is removed.
 
-import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Match, Switch, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import type { JSX } from "solid-js";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
@@ -212,6 +212,14 @@ function pickGridSplitTarget(
   return null;
 }
 
+// Module-scope so the cache survives any unexpected remount or re-evaluation
+// of the AppRoot component. The maps are app-singleton — only one Tauri window
+// runs the desktop shell, so cross-instance leakage isn't a concern.
+const globalLayoutCacheByMode: Record<SessionMode, Map<string, LayoutNode>> = {
+  local: new Map(),
+  cloud: new Map(),
+};
+
 export function AppRoot(): JSX.Element {
   const [boot, setBoot] = createSignal<BootState>({ kind: "loading" });
   const [collapsed, setCollapsed] = createSignal(false);
@@ -256,6 +264,15 @@ export function AppRoot(): JSX.Element {
   const [mountedMode, setMountedMode] = createSignal<SessionMode | null>(null);
   const currentMode = (): SessionMode => (cloudMode() ? "cloud" : "local");
 
+  // T19.17 — set to true for the entire duration of `swapWorkspaceMode`
+  // so the T7.4 auto-launch reactive effect can't fire on a transient
+  // null layout that the swap is about to fill from cache. Without this,
+  // `setLayout(project.id, null)` + the async `await getOrCreateProjectSession`
+  // gap is a race window where the effect spawns a fresh default CLI
+  // (or its shell fallback) over the still-alive PTY we're restoring —
+  // surfaced to the user as "I had claude, now I have a shell".
+  const [isSwapping, setIsSwapping] = createSignal(false);
+
   // Per-mode in-memory snapshot of each project's layout taken right
   // before `swapWorkspaceMode` clears the visible store. Toggling
   // Cloud ↔ Local doesn't actually kill the previous backend's PTYs
@@ -268,10 +285,7 @@ export function AppRoot(): JSX.Element {
   // app close goes through the boot path (DB-backed savedLayout +
   // spawn fresh), which is correct because Mac PTYs don't survive an
   // app quit.
-  const layoutCacheByMode: Record<SessionMode, Map<string, LayoutNode>> = {
-    local: new Map(),
-    cloud: new Map(),
-  };
+  const layoutCacheByMode = globalLayoutCacheByMode;
 
   // T7.7 — sessionId → CLI id captured at spawn time. The badge derived
   // from this map is the canonical "what was launched in this pane",
@@ -1385,6 +1399,9 @@ export function AppRoot(): JSX.Element {
   const autoLaunchedProjects = new Set<string>();
   createEffect(() => {
     if (boot().kind !== "ready") return;
+    // Suspend auto-launch while a mode swap is in progress — see
+    // `isSwapping` declaration for the race this prevents.
+    if (isSwapping()) return;
     const projectId = activeProjectId();
     if (projectId === null) return;
     if (autoLaunchedProjects.has(projectId)) return;
@@ -1429,10 +1446,28 @@ export function AppRoot(): JSX.Element {
     const next = currentMode();
     const prev = mountedMode();
     if (prev === null || prev === next) return;
-    void swapWorkspaceMode(next);
+    // Critical: swap reads projects(), getWorkspace(), ws.layout in its
+    // synchronous portion. Without untrack the outer effect would
+    // subscribe to all of them, and the very mutations swap performs
+    // (setLayout(null), removeProject, registerProject) would re-fire
+    // this effect — kicking off a new swap on every project mutation.
+    // We saw 10+ concurrent swaps as a result, draining the cache and
+    // making every restore see cacheKeys=[].
+    untrack(() => {
+      void swapWorkspaceMode(next);
+    });
   });
 
   const swapWorkspaceMode = async (next: SessionMode): Promise<void> => {
+    setIsSwapping(true);
+    try {
+      await swapWorkspaceModeInner(next);
+    } finally {
+      setIsSwapping(false);
+    }
+  };
+
+  const swapWorkspaceModeInner = async (next: SessionMode): Promise<void> => {
     // Snapshot the project list once — `projects()` is reactive and the
     // mutations below (setLayout) would otherwise reorder the iteration.
     const snapshot = projects().map((p) => p);
@@ -1448,7 +1483,12 @@ export function AppRoot(): JSX.Element {
       for (const project of snapshot) {
         const ws = getWorkspace(project.id);
         if (ws?.layout) {
-          cache.set(project.id, ws.layout);
+          // Decouple the cached value from Solid's store proxy. Without
+          // this clone the cached "value" is a reactive view that becomes
+          // stale (or `undefined`) the moment `setLayout(project.id, null)`
+          // mutates the underlying path. LayoutNode is plain JSON, so
+          // JSON round-trip is the safest deep clone.
+          cache.set(project.id, JSON.parse(JSON.stringify(ws.layout)) as LayoutNode);
         } else {
           cache.delete(project.id);
         }
@@ -1462,11 +1502,21 @@ export function AppRoot(): JSX.Element {
     // these session ids; removing the call also stops the
     // [cloud-reattach] handler from dropping a connection-level
     // forwarder that other in-memory subscribers still depended on.
+    //
+    // Critical: do NOT clear autoLaunchedProjects here. The setLayout
+    // null below makes each workspace eligible for T7.4's auto-launch
+    // reactive effect, which fires as a microtask before this async
+    // function's next await. If we cleared the sentinel, auto-launch
+    // would spawn a fresh CLI for the project IN THE NEW MODE on top
+    // of the still-alive PTY we're about to restore from the cache —
+    // racing setLayout calls, orphaning the original session, and (when
+    // the new spawn goes to the wrong backend) breaking the user's
+    // claude/codex session. The cache-miss + empty-savedLayout branch
+    // below clears the entry explicitly when auto-launch *should* fire.
     for (const project of snapshot) {
       sessionsByProject[project.id] = [];
       persisterByProject[project.id]?.cancel();
       setLayout(project.id, null);
-      autoLaunchedProjects.delete(project.id);
     }
 
     // Re-fetch the project list from whichever backend `next` routes to.
@@ -1557,9 +1607,18 @@ export function AppRoot(): JSX.Element {
 
           if (!isEmptyLayout(savedLayout)) {
             const cli = resolveDefaultCli(project.id);
-            await restoreProjectLayout(project.id, savedLayout, cli);
+            // Mark BEFORE the await so T7.4's auto-launch effect doesn't
+            // race with restoreProjectLayout's setLayout call.
             autoLaunchedProjects.add(project.id);
+            await restoreProjectLayout(project.id, savedLayout, cli);
+            return;
           }
+
+          // Truly empty: no cached layout, no persisted layout. Allow
+          // T7.4's effect to spawn the default CLI fresh for this
+          // project. (Auto-launch is what makes a new project show a
+          // pane on first navigation.)
+          autoLaunchedProjects.delete(project.id);
         }),
       );
     } else {
@@ -1582,6 +1641,11 @@ export function AppRoot(): JSX.Element {
             autoLaunchedProjects.add(project.id);
             return;
           }
+          // Cache miss: query the agent for a live session and reattach
+          // if available. restoreCloudSessions adds to autoLaunchedProjects
+          // when it reattaches; clear the sentinel up front so T7.4 can
+          // spawn fresh if no agent session matches.
+          autoLaunchedProjects.delete(project.id);
           await restoreCloudSessions(project.id);
         }),
       );
