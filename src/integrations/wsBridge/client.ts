@@ -359,9 +359,16 @@ export class WsBridgeClient {
       throw new Error("WebSocket implementation not provided and global WebSocket is unavailable");
     }
     this.WebSocketCtor = ctor;
-    this.setTimeoutImpl = options.setTimeoutImpl ?? (setTimeout as unknown as SetTimeoutImpl);
+    // Bare `setTimeout`/`clearTimeout` references break when called as
+    // an instance method: WebKit enforces that `this` is the Window, and
+    // assigning the bare function to a class property re-binds `this` to
+    // the class instance, throwing "Can only call Window.setTimeout on
+    // instances of Window". Wrap with arrow functions so the inner call
+    // sees the implicit global `this`.
+    this.setTimeoutImpl = options.setTimeoutImpl ?? ((handler, ms) => setTimeout(handler, ms));
     this.clearTimeoutImpl =
-      options.clearTimeoutImpl ?? (clearTimeout as unknown as ClearTimeoutImpl);
+      options.clearTimeoutImpl ??
+      ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     this.randomFn = options.randomFn ?? Math.random;
   }
 

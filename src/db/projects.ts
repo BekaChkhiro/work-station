@@ -127,7 +127,7 @@ export interface UpdateProjectInput {
   startupCommands?: ProjectStartupCommands;
 }
 
-export async function listProjects(): Promise<Project[]> {
+export async function listProjects(opts?: { mode?: () => boolean }): Promise<Project[]> {
   return routeIpc(
     async () => {
       const raw = await invoke<unknown>("project_list");
@@ -141,6 +141,7 @@ export async function listProjects(): Promise<Project[]> {
       const raw = await client.projectsList();
       return ProjectListSchema.parse(raw);
     },
+    opts,
   );
 }
 

@@ -39,11 +39,14 @@ import type { WsBridgeClient } from "../integrations/wsBridge";
 export type TransportKind = "local" | "cloud";
 
 /// Default ceiling on how long a routed call waits for the cloud
-/// client to become `open`. Picked to be longer than the wsBridge
-/// reconnect's initial backoff (500 ms × jitter) so transient drops
-/// don't surface as routing failures, but short enough that a
-/// genuinely-offline VPS produces a fast, actionable error.
-export const DEFAULT_CLOUD_WAIT_MS = 5_000;
+/// client to become `open`. Slow links + cold cloud-agent startup
+/// regularly need >5s to finish the WS handshake; falling back to
+/// "offline" before then surfaces spurious "did not open within
+/// 5000ms" errors for users on real-world latency. 20s comfortably
+/// covers a Cloudflare Tunnel + wsBridge handshake on a paired-but-
+/// idle agent while still capping a genuinely-offline VPS to a
+/// bounded, actionable wait.
+export const DEFAULT_CLOUD_WAIT_MS = 20_000;
 
 /// How often [`awaitCloudClient`] re-checks the manager state while
 /// waiting for `open`. Cheap polling — the manager doesn't expose a

@@ -1533,11 +1533,18 @@ export function AppRoot(): JSX.Element {
     // a "cwd does not exist" error from the cloud-agent. The
     // CloudConnectionBanner already surfaces the connectivity issue
     // separately so the empty sidebar is interpretable.
+    // Pin the routing decision to the swap's *target* mode. A rapid
+    // Cloud→Local→Cloud toggle would otherwise let routeIpc read the
+    // live cloudMode signal mid-await and either flip backends or
+    // throw "cloud mode is disabled" when the manager disconnects.
     let nextProjects: Project[];
     try {
-      nextProjects = await listProjects();
+      nextProjects = await listProjects({ mode: () => next === "cloud" });
     } catch (err) {
-      console.error("[T19.17] listProjects after mode swap failed:", err);
+      // Swap raced with a back-toggle (cloud-agent torn down before the
+      // request resolved). Treat as "no projects from the target mode"
+      // and let the next swap pick up the user's actual intent.
+      console.warn("[T19.17] listProjects after mode swap failed:", err);
       nextProjects = [];
     }
 
