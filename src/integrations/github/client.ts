@@ -236,7 +236,8 @@ export class GitHubClient {
           json: options.json,
           cacheTtlMs: options.cacheTtlMs,
           responseType,
-          parse: responseType === "json" ? (value) => parseWithSchema(schema, path, value) : undefined,
+          parse:
+            responseType === "json" ? (value) => parseWithSchema(schema, path, value) : undefined,
         });
       } catch (error) {
         mapGitHubHttpError(error);

@@ -26,13 +26,20 @@ export interface TaskCliLauncherOptions {
    *  the launcher types into the spawned CLI. Defaults to `manual`
    *  when omitted so legacy callers stay on the safe path. */
   mode?: PlanFlowStartMode;
+  /** Headless: spawn the PTY but do NOT inject it into the workspace
+   *  layout. Auto-run uses this so a queue full of tasks doesn't flood
+   *  the visible grid; the Auto-run bar surfaces an "Open" affordance
+   *  that lets the user attach the headless session into a pane on
+   *  demand. The PTY is otherwise identical — same env, same prompt
+   *  injection, same scrollback. */
+  headless?: boolean;
 }
 
 export type TaskCliLauncher = (
   projectId: string,
   taskId: string,
   opts?: TaskCliLauncherOptions,
-) => Promise<void> | void;
+) => Promise<string | null> | string | null;
 
 /** Synchronous lookup: which CLI (if any) is currently running in the
  *  focused pane for `projectId`. Returns `null` when no pane is focused,
@@ -80,17 +87,21 @@ export function getFocusedSessionCli(projectId: string): string | null {
 
 /** Best-effort: run the registered launcher for `(projectId, taskId)`.
  *  Pass an optional `cliName` to override the auto-resolved CLI for this
- *  specific start. Errors are caught + logged; the caller keeps going. */
+ *  specific start. Returns the spawned session id when the launcher
+ *  resolves one (notably the headless auto-run path) so the caller can
+ *  remember which PTY belongs to which task. Errors are caught + logged
+ *  and surface as `null`. */
 export async function launchTaskCli(
   projectId: string,
   taskId: string,
   opts?: TaskCliLauncherOptions,
-): Promise<void> {
+): Promise<string | null> {
   const fn = registeredLauncher;
-  if (fn == null) return;
+  if (fn == null) return null;
   try {
-    await fn(projectId, taskId, opts);
+    return (await fn(projectId, taskId, opts)) ?? null;
   } catch (error) {
     console.warn("[planflow] task CLI launcher failed:", error);
+    return null;
   }
 }

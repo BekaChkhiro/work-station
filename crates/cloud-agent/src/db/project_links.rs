@@ -64,6 +64,41 @@ pub enum ProjectLinkError {
     Sqlx(#[from] sqlx::Error),
 }
 
+/// Resolve the first `external_id` for a given `(project_id, service)` pair.
+///
+/// Used by the Phase B `auto_run_start` handler to resolve the PlanFlow
+/// project UUID for a cloud-agent project without requiring the client to
+/// send `external_id` directly (which avoids a trust boundary: the client
+/// should not be able to claim an arbitrary PlanFlow project identity).
+///
+/// Returns `Ok(None)` when no link exists for the service — the caller
+/// replies with an `auto_run_error` of kind `not_found`.
+// Phase B `auto_run_start` WS handler calls this.
+pub async fn get_by_service(
+    pool: &SqlitePool,
+    project_id: &str,
+    service: &str,
+) -> Result<Option<ProjectLink>, ProjectLinkError> {
+    if project_id.is_empty() {
+        return Err(ProjectLinkError::EmptyProjectId);
+    }
+    if service.trim().is_empty() {
+        return Err(ProjectLinkError::EmptyService);
+    }
+    let row = sqlx::query(
+        "SELECT project_id, service, external_id, metadata_json, created_at
+         FROM project_links
+         WHERE project_id = ? AND service = ?
+         ORDER BY created_at ASC
+         LIMIT 1",
+    )
+    .bind(project_id)
+    .bind(service.trim())
+    .fetch_optional(pool)
+    .await?;
+    row.map(row_to_link).transpose()
+}
+
 /// List every link for one project, ordered `(service, external_id)`
 /// so the UI renders groups deterministically.
 pub async fn list(
@@ -425,6 +460,48 @@ mod tests {
         .await
         .expect_err("string metadata should reject");
         assert!(matches!(err, ProjectLinkError::MetadataNotObject));
+    }
+
+    #[tokio::test]
+    async fn get_by_service_returns_none_for_missing_service() {
+        let pool = pool().await;
+        seed_project(&pool, "p1").await;
+        let result = get_by_service(&pool, "p1", "planflow")
+            .await
+            .expect("get_by_service");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_by_service_returns_link_when_present() {
+        let pool = pool().await;
+        seed_project(&pool, "p1").await;
+        set(
+            &pool,
+            NewProjectLink {
+                project_id: "p1".into(),
+                service: "planflow".into(),
+                external_id: "pf-uuid-1".into(),
+                metadata: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("set");
+        let link = get_by_service(&pool, "p1", "planflow")
+            .await
+            .expect("get_by_service")
+            .expect("some");
+        assert_eq!(link.external_id, "pf-uuid-1");
+        assert_eq!(link.service, "planflow");
+    }
+
+    #[tokio::test]
+    async fn get_by_service_returns_none_for_unknown_project() {
+        let pool = pool().await;
+        let result = get_by_service(&pool, "ghost", "planflow")
+            .await
+            .expect("get_by_service — no row, not an error");
+        assert!(result.is_none());
     }
 
     #[tokio::test]

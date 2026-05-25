@@ -724,3 +724,190 @@ describe("WsBridgeClient — PlanFlow Tasks bridge (T19.13)", () => {
     expect(frame.cloud_project_id).toBe("ws-proj-1");
   });
 });
+
+// Phase C — auto-run orchestration bridge (cloud-agent)
+describe("WsBridgeClient — auto_run bridge (Phase C)", () => {
+  // Minimal queue payload that satisfies the wire contract. Only fields
+  // the tests need to assert are populated — the Zod schema validation
+  // happens in the store, not here.
+  const queuePayload = {
+    id: "arq_test_1",
+    projectId: "ws-proj-1",
+    externalId: "pf-ext-1",
+    targetCount: 3,
+    completedCount: 0,
+    currentTaskId: null,
+    currentBranchName: null,
+    currentSessionId: null,
+    verifyStartedAt: null,
+    mode: "auto-merge",
+    startAt: null,
+    pacingMinutes: 0,
+    deadlineAt: null,
+    onFailure: "stop",
+    state: "running",
+    currentTaskStartedAt: null,
+    nextDispatchAt: null,
+    history: [],
+    createdAt: 1_700_000_000_000,
+  };
+
+  it("autoRunStart sends auto_run_start frame with correct fields", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.autoRunStart({
+      project_id: "ws-proj-1",
+      target_count: 3,
+      mode: "auto-merge",
+      start_at: null,
+      pacing_minutes: 0,
+      deadline_at: null,
+      on_failure: "stop",
+    });
+    const frame = MockWebSocket.at(0).parseSent<
+      FrameWithId & {
+        project_id?: string;
+        target_count?: number;
+        mode?: string;
+        on_failure?: string;
+      }
+    >(0);
+    expect(frame.type).toBe("auto_run_start");
+    expect(frame.project_id).toBe("ws-proj-1");
+    expect(frame.target_count).toBe(3);
+    expect(frame.mode).toBe("auto-merge");
+    expect(frame.on_failure).toBe("stop");
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "auto_run_result", id: frame.id, data: queuePayload }),
+    );
+    const result = await pending;
+    expect(result).toMatchObject({ id: "arq_test_1", state: "running" });
+  });
+
+  it("autoRunStop sends auto_run_stop and returns data from auto_run_result", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.autoRunStop("ws-proj-1");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId & { project_id?: string }>(0);
+    expect(frame.type).toBe("auto_run_stop");
+    expect(frame.project_id).toBe("ws-proj-1");
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({
+        type: "auto_run_result",
+        id: frame.id,
+        data: { ...queuePayload, state: "stopped" },
+      }),
+    );
+    const result = await pending;
+    expect(result).toMatchObject({ state: "stopped" });
+  });
+
+  it("autoRunPause sends auto_run_pause", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.autoRunPause("ws-proj-1");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId & { project_id?: string }>(0);
+    expect(frame.type).toBe("auto_run_pause");
+    expect(frame.project_id).toBe("ws-proj-1");
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({
+        type: "auto_run_result",
+        id: frame.id,
+        data: { ...queuePayload, state: "paused" },
+      }),
+    );
+    const result = await pending;
+    expect(result).toMatchObject({ state: "paused" });
+  });
+
+  it("autoRunResume sends auto_run_resume", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.autoRunResume("ws-proj-1");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId & { project_id?: string }>(0);
+    expect(frame.type).toBe("auto_run_resume");
+    expect(frame.project_id).toBe("ws-proj-1");
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({
+        type: "auto_run_result",
+        id: frame.id,
+        data: { ...queuePayload, state: "running" },
+      }),
+    );
+    const result = await pending;
+    expect(result).toMatchObject({ state: "running" });
+  });
+
+  it("autoRunStatus sends auto_run_status and handles null data (no queue)", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.autoRunStatus("ws-proj-1");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId & { project_id?: string }>(0);
+    expect(frame.type).toBe("auto_run_status");
+    expect(frame.project_id).toBe("ws-proj-1");
+
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "auto_run_result", id: frame.id, data: null }),
+    );
+    const result = await pending;
+    expect(result).toBeNull();
+  });
+
+  it("auto_run_error rejects with WsBridgeError", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.autoRunStart({
+      project_id: "ws-proj-1",
+      target_count: 1,
+      mode: "manual",
+      start_at: null,
+      pacing_minutes: 0,
+      deadline_at: null,
+      on_failure: "stop",
+    });
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({
+        type: "auto_run_error",
+        id: frame.id,
+        kind: "not_found",
+        message: "no project_link found for project ws-proj-1",
+      }),
+    );
+
+    await expect(pending).rejects.toBeInstanceOf(WsBridgeError);
+    await expect(pending).rejects.toMatchObject({ kind: "not_found" });
+  });
+
+  it("wrong reply type rejects with WsBridgeError(protocol)", async () => {
+    const { client } = makeClient();
+    client.connect();
+    MockWebSocket.at(0).emitOpen();
+
+    const pending = client.autoRunStop("ws-proj-1");
+    const frame = MockWebSocket.at(0).parseSent<FrameWithId>(0);
+    // Server responds with a planflow_result instead of auto_run_result
+    MockWebSocket.at(0).emitMessage(
+      JSON.stringify({ type: "planflow_result", id: frame.id, data: {} }),
+    );
+
+    await expect(pending).rejects.toBeInstanceOf(WsBridgeError);
+    await expect(pending).rejects.toMatchObject({ kind: "protocol" });
+  });
+});

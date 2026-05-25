@@ -76,7 +76,7 @@ use workstation_core::ws::protocol::{
 };
 use workstation_core::ws::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
-use crate::db::{app_settings, project_links, projects};
+use crate::db::{app_settings, auto_run as db_auto_run, project_links, projects};
 use crate::fs::{self as cfs, FsError};
 use crate::planflow_proxy::{self, PlanflowState};
 
@@ -287,6 +287,7 @@ async fn forward_stats(mut rx: broadcast::Receiver<StatsSnapshot>, out_tx: mpsc:
 /// distinguish "unknown message type" (`unsupported`) from "malformed
 /// payload for a known type" (`invalid_json`). Mirrors the desktop
 /// bridge's `super::ws::pty_bridge::handle_text` flow.
+#[allow(clippy::too_many_lines)]
 async fn handle_text(
     conn: &mut Connection,
     pool: &SqlitePool,
@@ -342,29 +343,57 @@ async fn handle_text(
     // a typed parse — the Phase-1 client doesn't depend on cloud-side
     // payload validation for handlers that haven't run yet.
     let typed = match type_str.as_str() {
-        "settings_get" | "projects_list" | "project_get" | "project_switch" | "project_create"
-        | "project_update" | "project_delete" | "project_reorder"
-        | "project_update_workspace_tabs" | "pty_spawn" | "pty_write" | "pty_resize"
-        | "pty_kill" | "pty_scrollback" | "pty_subscribe" | "pty_unsubscribe" | "pty_list"
-        | "fs_list" | "fs_read" | "fs_write" | "fs_delete" | "planflow_get_me"
-        | "planflow_list_projects" | "planflow_list_tasks" | "planflow_list_active_work"
-        | "planflow_list_comments" | "planflow_create_comment" | "planflow_start_work"
-        | "planflow_stop_work" | "planflow_update_task_status" | "planflow_token_set"
-        | "project_link_list" | "project_link_set" | "project_link_delete" => {
-            match serde_json::from_value::<ClientMessage>(value) {
-                Ok(msg) => msg,
-                Err(error) => {
-                    send_error(
-                        &conn.out_tx,
-                        echo_id,
-                        "invalid_json",
-                        format!("failed to parse client message: {error}"),
-                    )
-                    .await;
-                    return;
-                }
+        "settings_get"
+        | "projects_list"
+        | "project_get"
+        | "project_switch"
+        | "project_create"
+        | "project_update"
+        | "project_delete"
+        | "project_reorder"
+        | "project_update_workspace_tabs"
+        | "pty_spawn"
+        | "pty_write"
+        | "pty_resize"
+        | "pty_kill"
+        | "pty_scrollback"
+        | "pty_subscribe"
+        | "pty_unsubscribe"
+        | "pty_list"
+        | "fs_list"
+        | "fs_read"
+        | "fs_write"
+        | "fs_delete"
+        | "planflow_get_me"
+        | "planflow_list_projects"
+        | "planflow_list_tasks"
+        | "planflow_list_active_work"
+        | "planflow_list_comments"
+        | "planflow_create_comment"
+        | "planflow_start_work"
+        | "planflow_stop_work"
+        | "planflow_update_task_status"
+        | "planflow_token_set"
+        | "project_link_list"
+        | "project_link_set"
+        | "project_link_delete"
+        | "auto_run_start"
+        | "auto_run_stop"
+        | "auto_run_pause"
+        | "auto_run_resume"
+        | "auto_run_status" => match serde_json::from_value::<ClientMessage>(value) {
+            Ok(msg) => msg,
+            Err(error) => {
+                send_error(
+                    &conn.out_tx,
+                    echo_id,
+                    "invalid_json",
+                    format!("failed to parse client message: {error}"),
+                )
+                .await;
+                return;
             }
-        }
+        },
         other => {
             send_error(
                 &conn.out_tx,
@@ -694,14 +723,8 @@ async fn dispatch_typed(
             cloud_project_id,
             token,
         } => {
-            planflow_proxy::handle_token_set(
-                planflow,
-                &conn.out_tx,
-                id,
-                cloud_project_id,
-                token,
-            )
-            .await;
+            planflow_proxy::handle_token_set(planflow, &conn.out_tx, id, cloud_project_id, token)
+                .await;
         }
         // T19.32 — project ↔ external-service links. Same camelCase
         // wire shape the desktop's `commands/project_links.rs` exposes,
@@ -735,6 +758,45 @@ async fn dispatch_typed(
         } => {
             handle_project_link_delete(&conn.out_tx, pool, id, project_id, service, external_id)
                 .await;
+        }
+        // T19.35 Phase B — auto-run queue control plane. Each handler maps
+        // to one of the five operations; `conn.manager` provides PTY kill
+        // access for `auto_run_stop`.
+        ClientMessage::AutoRunStart {
+            id,
+            project_id,
+            target_count,
+            mode,
+            start_at,
+            pacing_minutes,
+            deadline_at,
+            on_failure,
+        } => {
+            handle_auto_run_start(
+                &conn.out_tx,
+                pool,
+                id,
+                project_id,
+                target_count,
+                mode,
+                start_at,
+                pacing_minutes,
+                deadline_at,
+                on_failure,
+            )
+            .await;
+        }
+        ClientMessage::AutoRunStop { id, project_id } => {
+            handle_auto_run_stop(&conn.out_tx, pool, &conn.manager, id, project_id).await;
+        }
+        ClientMessage::AutoRunPause { id, project_id } => {
+            handle_auto_run_pause(&conn.out_tx, pool, id, project_id).await;
+        }
+        ClientMessage::AutoRunResume { id, project_id } => {
+            handle_auto_run_resume(&conn.out_tx, pool, id, project_id).await;
+        }
+        ClientMessage::AutoRunStatus { id, project_id } => {
+            handle_auto_run_status(&conn.out_tx, pool, id, project_id).await;
         }
         // Variants not in the typed-allowlist filter inside
         // [`handle_text`] are routed to `unimplemented` before reaching
@@ -919,11 +981,9 @@ fn slugify_project_name(name: &str) -> String {
         } else if ch == '-' || ch == '_' {
             out.push(ch);
             last_was_dash = ch == '-';
-        } else if ch.is_whitespace() {
-            if !last_was_dash {
-                out.push('-');
-                last_was_dash = true;
-            }
+        } else if ch.is_whitespace() && !last_was_dash {
+            out.push('-');
+            last_was_dash = true;
         }
     }
     while out.ends_with('-') {
@@ -1147,9 +1207,7 @@ async fn handle_spawn(
     // when the user reopens the app.
     let project_id = env.get("WS_PROJECT_ID").cloned();
     let command_meta = command.clone();
-    let cwd_meta = cwd
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+    let cwd_meta = cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
 
     let manager = conn.manager.clone();
     let config = SpawnConfig {
@@ -1257,7 +1315,7 @@ async fn handle_pty_list(
         })
         .collect();
     // Newest first — the typical reattach UI picks the most recent.
-    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
     send(out_tx, &ServerMessage::PtyListResult { id, sessions }).await;
 }
 
@@ -1690,6 +1748,529 @@ fn pty_error_to_kind(error: &PtyError) -> (&'static str, String) {
         PtyError::ReaderPanic(_) => "reader_panic",
     };
     (kind, error.to_string())
+}
+
+// ============================================================
+// T19.35 Phase B — Auto-run queue control-plane handlers
+// ============================================================
+//
+// Each handler follows the same pattern as the planflow_* and project_link_*
+// handlers above: validate, touch DB (and optionally PtyManager), reply
+// with `auto_run_result` or `auto_run_error`. No synchronous orchestrator
+// kick is issued — the Phase-A tick loop observes the seeded/updated row
+// on its next 20-second beat.
+//
+// Note: a future Phase B.2 could broadcast an `auto_run_event` server-push
+// (mirroring `forward_stats`) so the desktop updates live without polling.
+// The natural plug-in point is the `run_connection` setup in this file,
+// after the system-stats forwarder spawning block (line ~219).
+
+/// Generate a stable queue id matching the TS `createAutoRunQueueId` shape:
+/// `arq_<epoch-ms-base36>_<6-char random base36>`.
+///
+/// Implementation notes:
+/// - The epoch-ms component is `now` in milliseconds, encoded in base 36.
+///   Rust stdlib has no `to_string_radix`, so we use a hand-rolled loop.
+/// - The random component reuses the UUID v4 bytes already available via
+///   the `uuid` crate (which pulls in `getrandom`) — no new crate needed.
+///   We take the first 4 bytes as a u32, take `% 36^6` to get a 6-digit
+///   value in base-36 space, then encode it. This produces the same
+///   character density as `Math.random().toString(36).slice(2,8)`.
+fn generate_queue_id() -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let epoch = db_auto_run::epoch_ms();
+    // Encode epoch as base-36 string.
+    let mut n = epoch.unsigned_abs();
+    let mut epoch_b36 = String::new();
+    if n == 0 {
+        epoch_b36.push('0');
+    } else {
+        while n > 0 {
+            epoch_b36.insert(0, DIGITS[(n % 36) as usize] as char);
+            n /= 36;
+        }
+    }
+    // Random 6-char base-36 from UUID v4 bytes.
+    let rand_uuid = Uuid::new_v4();
+    let bytes = rand_uuid.as_bytes();
+    // Combine 4 bytes into a u32, clamp to 36^6 = 2_176_782_336.
+    let rand_val = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let mut r = rand_val % 2_176_782_336_u32; // 36^6
+    let mut rand_b36 = String::new();
+    for _ in 0..6 {
+        rand_b36.insert(0, DIGITS[(r % 36) as usize] as char);
+        r /= 36;
+    }
+    format!("arq_{epoch_b36}_{rand_b36}")
+}
+
+/// Seed a new auto-run queue row and return it as `auto_run_result`.
+///
+/// Resolution order:
+///   1. Validate `mode` and `on_failure` parse to the DB enums.
+///   2. Look up `project_links WHERE project_id=? AND service='planflow'`
+///      to resolve the PlanFlow `external_id` — the client must not supply
+///      this to prevent cross-project impersonation.
+///   3. If no planflow link exists, reply `auto_run_error { kind: "not_found" }`.
+///   4. Build an `AutoRunQueue` with state = `scheduled` (if `start_at` is
+///      in the future) else `running`, upsert it, and reply.
+///   5. The orchestrator's tick loop picks it up within 20 seconds.
+///
+/// Upsert semantics: if a queue already exists for `project_id` it is
+/// fully replaced — matches the `INSERT OR REPLACE` contract in `db::auto_run`.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn handle_auto_run_start(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+    target_count: i64,
+    mode_str: String,
+    start_at: Option<i64>,
+    pacing_minutes: Option<f64>,
+    deadline_at: Option<i64>,
+    on_failure_str: String,
+) {
+    use crate::db::auto_run::{AutoRunFailureMode, AutoRunQueue, AutoRunState, PlanFlowStartMode};
+
+    // Validate enums before touching the DB so invalid payloads don't
+    // produce a half-written row.
+    let Ok(mode): Result<PlanFlowStartMode, _> = mode_str.parse() else {
+        send(
+            out_tx,
+            &ServerMessage::auto_run_error(
+                id,
+                "invalid_args",
+                format!(
+                    "invalid mode {mode_str:?}; expected manual|auto-merge|pr|merge-master|none"
+                ),
+            ),
+        )
+        .await;
+        return;
+    };
+
+    let Ok(on_failure): Result<AutoRunFailureMode, _> = on_failure_str.parse() else {
+        send(
+            out_tx,
+            &ServerMessage::auto_run_error(
+                id,
+                "invalid_args",
+                format!("invalid on_failure {on_failure_str:?}; expected stop|continue"),
+            ),
+        )
+        .await;
+        return;
+    };
+
+    if target_count < 1 {
+        send(
+            out_tx,
+            &ServerMessage::auto_run_error(id, "invalid_args", "target_count must be at least 1"),
+        )
+        .await;
+        return;
+    }
+
+    // Resolve the PlanFlow external_id from the project link — the agent
+    // owns this binding; the client must not be trusted to supply it.
+    let external_id = match project_links::get_by_service(pool, &project_id, "planflow").await {
+        Ok(Some(link)) => link.external_id,
+        Ok(None) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "not_found",
+                    format!(
+                        "no planflow project link for project {project_id:?}; \
+                         call project_link_set (service=planflow) first"
+                    ),
+                ),
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "cloud_agent::dispatch",
+                project_id = %project_id,
+                error = %error,
+                "get_by_service failed during auto_run_start",
+            );
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "internal",
+                    format!("failed to resolve planflow link: {error}"),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let now = db_auto_run::epoch_ms();
+    // Determine initial state: if start_at is provided and in the future,
+    // the queue is scheduled; otherwise it is running (tick picks it up).
+    let (state, next_dispatch_at) = match start_at {
+        Some(t) if t > now => (AutoRunState::Scheduled, Some(t)),
+        _ => (AutoRunState::Running, None),
+    };
+
+    let queue = AutoRunQueue {
+        project_id: project_id.clone(),
+        queue_id: generate_queue_id(),
+        external_id,
+        target_count,
+        completed_count: 0,
+        current_task_id: None,
+        current_branch_name: None,
+        current_session_id: None,
+        verify_started_at: None,
+        mode,
+        start_at,
+        pacing_minutes: pacing_minutes.unwrap_or(0.0),
+        deadline_at,
+        on_failure,
+        state,
+        current_task_started_at: None,
+        next_dispatch_at,
+        history: vec![],
+        created_at: now,
+    };
+
+    if let Err(error) = db_auto_run::upsert(pool, &queue).await {
+        tracing::error!(
+            target: "cloud_agent::dispatch",
+            project_id = %project_id,
+            error = %error,
+            "auto_run_start: upsert failed",
+        );
+        send(
+            out_tx,
+            &ServerMessage::auto_run_error(
+                id,
+                "internal",
+                format!("failed to persist queue: {error}"),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    tracing::info!(
+        target: "cloud_agent::dispatch",
+        project_id = %project_id,
+        queue_id = %queue.queue_id,
+        state = %queue.state,
+        target_count,
+        "auto_run_start: queue seeded; orchestrator picks it up on next tick",
+    );
+
+    let data = serde_json::to_value(&queue).expect("AutoRunQueue always serializes to JSON");
+    send(out_tx, &ServerMessage::auto_run_result(id, data)).await;
+}
+
+/// Stop the auto-run queue: kill the current PTY session (if any), set
+/// state to `stopped` so history is preserved, and reply with the
+/// updated queue.
+///
+/// Mirrors `stopAutoRun` in `src/stores/autoRunQueue.ts`: the row is
+/// kept (state = stopped) so the desktop can display history. The
+/// orchestrator's `list_active` filter excludes `stopped` rows so no
+/// further ticks fire.
+///
+/// Idempotent: stopping an already-stopped or absent queue replies with
+/// the current row (or null data) without an error.
+async fn handle_auto_run_stop(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    manager: &PtyManager,
+    id: Option<String>,
+    project_id: String,
+) {
+    use crate::db::auto_run::{AutoRunQueue, AutoRunState};
+
+    let queue = match db_auto_run::get(pool, &project_id).await {
+        Ok(Some(q)) => q,
+        Ok(None) => {
+            // No queue — reply with null data (idempotent, not an error).
+            send(
+                out_tx,
+                &ServerMessage::auto_run_result(id, serde_json::Value::Null),
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "internal",
+                    format!("failed to load queue: {error}"),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Kill the current PTY session if one is active. Errors are logged
+    // and swallowed — the PTY may already be dead (process exited naturally).
+    if let Some(ref sid_str) = queue.current_session_id {
+        if let Ok(sid) = sid_str.parse::<Uuid>() {
+            let mgr = manager.clone();
+            let pid = project_id.clone();
+            drop(tokio::task::spawn_blocking(move || match mgr.kill(sid) {
+                Ok(()) => tracing::debug!(
+                    target: "cloud_agent::dispatch",
+                    project_id = %pid,
+                    session_id = %sid,
+                    "auto_run_stop: PTY killed",
+                ),
+                Err(workstation_core::pty::PtyError::NotFound(_)) => {}
+                Err(error) => tracing::warn!(
+                    target: "cloud_agent::dispatch",
+                    project_id = %pid,
+                    session_id = %sid,
+                    error = %error,
+                    "auto_run_stop: PTY kill failed (already dead?)",
+                ),
+            }));
+        }
+    }
+
+    let updated = AutoRunQueue {
+        state: AutoRunState::Stopped,
+        next_dispatch_at: None,
+        current_task_id: None,
+        current_branch_name: None,
+        current_session_id: None,
+        current_task_started_at: None,
+        verify_started_at: None,
+        ..queue
+    };
+
+    if let Err(error) = db_auto_run::upsert(pool, &updated).await {
+        send(
+            out_tx,
+            &ServerMessage::auto_run_error(
+                id,
+                "internal",
+                format!("failed to persist stopped state: {error}"),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    tracing::info!(
+        target: "cloud_agent::dispatch",
+        project_id = %updated.project_id,
+        "auto_run_stop: queue stopped",
+    );
+
+    let data = serde_json::to_value(&updated).expect("AutoRunQueue always serializes to JSON");
+    send(out_tx, &ServerMessage::auto_run_result(id, data)).await;
+}
+
+/// Pause the auto-run queue: set state = `paused`, clear `next_dispatch_at`.
+///
+/// The current task's PTY is NOT killed — it keeps running in the background
+/// so progress isn't lost. The orchestrator's `advance` function no-ops on
+/// `paused` queues. Mirrors `pauseAutoRun` in `src/stores/autoRunQueue.ts`.
+///
+/// Replies with `auto_run_error { kind: "not_found" }` when no queue exists.
+async fn handle_auto_run_pause(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+) {
+    use crate::db::auto_run::{AutoRunQueue, AutoRunState};
+
+    let queue = match db_auto_run::get(pool, &project_id).await {
+        Ok(Some(q)) => q,
+        Ok(None) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "not_found",
+                    format!("no auto-run queue for project {project_id:?}"),
+                ),
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "internal",
+                    format!("failed to load queue: {error}"),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let updated = AutoRunQueue {
+        state: AutoRunState::Paused,
+        next_dispatch_at: None,
+        ..queue
+    };
+
+    if let Err(error) = db_auto_run::upsert(pool, &updated).await {
+        send(
+            out_tx,
+            &ServerMessage::auto_run_error(
+                id,
+                "internal",
+                format!("failed to persist paused state: {error}"),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    tracing::info!(
+        target: "cloud_agent::dispatch",
+        project_id = %updated.project_id,
+        "auto_run_pause: queue paused",
+    );
+
+    let data = serde_json::to_value(&updated).expect("AutoRunQueue always serializes to JSON");
+    send(out_tx, &ServerMessage::auto_run_result(id, data)).await;
+}
+
+/// Resume a paused auto-run queue.
+///
+/// State transition mirrors `resumeAutoRun` in `src/stores/autoRunQueue.ts`:
+/// - If a task is mid-flight (`current_task_id` is set) → state = `running`
+///   (the orchestrator's next `poll_running` call will observe the PTY output).
+/// - Otherwise → state = `running` with `next_dispatch_at = now` so the
+///   orchestrator's next tick calls `pick_and_dispatch` immediately (the
+///   wait won't exceed 20 seconds — the tick interval).
+///
+/// Note: the TS `resumeAutoRun` sets `waiting` with `next_dispatch_at=now`
+/// when no task is in flight; we use `running` here so `list_active` and
+/// `advance` handle it identically to the post-complete path (where
+/// `next_dispatch_at=None` + state=`running` also triggers `pick_and_dispatch`).
+/// The observable difference is negligible (<20 s) and avoids an extra state
+/// branch in the tick loop.
+///
+/// Replies with `auto_run_error { kind: "not_found" }` when no queue exists.
+async fn handle_auto_run_resume(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+) {
+    use crate::db::auto_run::{AutoRunQueue, AutoRunState};
+
+    let queue = match db_auto_run::get(pool, &project_id).await {
+        Ok(Some(q)) => q,
+        Ok(None) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "not_found",
+                    format!("no auto-run queue for project {project_id:?}"),
+                ),
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "internal",
+                    format!("failed to load queue: {error}"),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // If a task is already mid-flight, stay Running so the orchestrator
+    // continues polling it. Otherwise go Running with no nextDispatchAt so
+    // the next tick's pick_and_dispatch fires immediately.
+    let updated = AutoRunQueue {
+        state: AutoRunState::Running,
+        next_dispatch_at: None,
+        ..queue
+    };
+
+    if let Err(error) = db_auto_run::upsert(pool, &updated).await {
+        send(
+            out_tx,
+            &ServerMessage::auto_run_error(
+                id,
+                "internal",
+                format!("failed to persist resumed state: {error}"),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    tracing::info!(
+        target: "cloud_agent::dispatch",
+        project_id = %updated.project_id,
+        "auto_run_resume: queue resumed",
+    );
+
+    let data = serde_json::to_value(&updated).expect("AutoRunQueue always serializes to JSON");
+    send(out_tx, &ServerMessage::auto_run_result(id, data)).await;
+}
+
+/// Return the current auto-run queue state.
+///
+/// Replies with `auto_run_result { data: null }` when no queue exists
+/// (not an error — the desktop uses this to check whether a queue has been
+/// seeded before showing the Auto-run bar). Replies with the full queue JSON
+/// when a row exists.
+async fn handle_auto_run_status(
+    out_tx: &mpsc::Sender<String>,
+    pool: &SqlitePool,
+    id: Option<String>,
+    project_id: String,
+) {
+    match db_auto_run::get(pool, &project_id).await {
+        Ok(Some(queue)) => {
+            let data =
+                serde_json::to_value(&queue).expect("AutoRunQueue always serializes to JSON");
+            send(out_tx, &ServerMessage::auto_run_result(id, data)).await;
+        }
+        Ok(None) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_result(id, serde_json::Value::Null),
+            )
+            .await;
+        }
+        Err(error) => {
+            send(
+                out_tx,
+                &ServerMessage::auto_run_error(
+                    id,
+                    "internal",
+                    format!("failed to load queue: {error}"),
+                ),
+            )
+            .await;
+        }
+    }
 }
 
 async fn send(out_tx: &mpsc::Sender<String>, msg: &ServerMessage) {
@@ -2266,8 +2847,7 @@ mod tests {
     #[test]
     fn resolve_create_path_creates_under_root_when_empty() {
         let (root, _guard) = fresh_projects_root();
-        let resolved =
-            resolve_create_path("Cool App", "", &root).expect("auto-create under root");
+        let resolved = resolve_create_path("Cool App", "", &root).expect("auto-create under root");
         let prefix = root.as_path().to_string_lossy();
         assert!(
             resolved.starts_with(prefix.as_ref()),
@@ -2651,5 +3231,340 @@ mod tests {
         let frame = &frames[0];
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["kind"], "invalid_json");
+    }
+
+    // ---- T19.35 Phase B: auto-run control-plane dispatch tests ----
+
+    /// Helper: seed a planflow project link so `auto_run_start` can resolve
+    /// the `external_id` without network access.
+    async fn seed_planflow_link(pool: &SqlitePool, project_id: &str, external_id: &str) {
+        use crate::db::project_links::{self, NewProjectLink};
+        project_links::set(
+            pool,
+            NewProjectLink {
+                project_id: project_id.to_string(),
+                service: "planflow".to_string(),
+                external_id: external_id.to_string(),
+                metadata: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("seed planflow link");
+    }
+
+    /// `auto_run_start` with a valid planflow link seeds a queue row and
+    /// replies `auto_run_result` with the full queue JSON.
+    #[tokio::test]
+    async fn auto_run_start_seeds_queue_and_replies_result() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-ar", "autorun-proj").await;
+        seed_planflow_link(&pool, "p-ar", "pf-uuid-ar").await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_start","id":"r1","project_id":"p-ar","target_count":3,"mode":"pr"}"#,
+        )
+        .await;
+        assert_eq!(frames.len(), 1, "expected one reply, got {frames:?}");
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert_eq!(frame["id"], "r1");
+
+        let data = &frame["data"];
+        assert_eq!(data["projectId"], "p-ar");
+        assert_eq!(data["externalId"], "pf-uuid-ar");
+        assert_eq!(data["targetCount"], 3);
+        assert_eq!(data["mode"], "pr");
+        assert_eq!(data["completedCount"], 0);
+        // No start_at provided → should be running (starts immediately).
+        assert_eq!(data["state"], "running");
+
+        // Verify the row was actually persisted.
+        let loaded = db_auto_run::get(&pool, "p-ar")
+            .await
+            .expect("get")
+            .expect("some");
+        assert_eq!(loaded.project_id, "p-ar");
+        assert_eq!(loaded.external_id, "pf-uuid-ar");
+        assert_eq!(loaded.target_count, 3);
+    }
+
+    /// `auto_run_start` without a planflow link replies `auto_run_error`
+    /// with kind `not_found`.
+    #[tokio::test]
+    async fn auto_run_start_without_planflow_link_errors_not_found() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-nl", "no-link-proj").await;
+        // Intentionally no planflow link.
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_start","id":"r2","project_id":"p-nl","target_count":1,"mode":"manual"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_error", "got {frame}");
+        assert_eq!(frame["kind"], "not_found");
+        assert_eq!(frame["id"], "r2");
+        // No row should have been created.
+        let row = db_auto_run::get(&pool, "p-nl").await.expect("get");
+        assert!(
+            row.is_none(),
+            "queue must not be seeded when link is absent"
+        );
+    }
+
+    /// `auto_run_start` with an invalid `mode` string replies `invalid_args`.
+    #[tokio::test]
+    async fn auto_run_start_invalid_mode_replies_invalid_args() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-im", "invalid-mode").await;
+        seed_planflow_link(&pool, "p-im", "pf-uuid-im").await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_start","id":"r3","project_id":"p-im","target_count":2,"mode":"not-a-mode"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_error", "got {frame}");
+        assert_eq!(frame["kind"], "invalid_args");
+    }
+
+    /// `auto_run_status` returns `data: null` when no queue exists.
+    #[tokio::test]
+    async fn auto_run_status_returns_null_when_no_queue() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-st", "status-proj").await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_status","id":"s1","project_id":"p-st"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert_eq!(frame["id"], "s1");
+        assert!(frame["data"].is_null(), "data must be null, got {frame}");
+    }
+
+    /// `auto_run_status` returns the queue JSON when one exists.
+    #[tokio::test]
+    async fn auto_run_status_returns_queue_when_present() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-sq", "status-queue").await;
+        seed_planflow_link(&pool, "p-sq", "pf-uuid-sq").await;
+
+        // Seed via the WS handler.
+        drive(
+            &pool,
+            r#"{"type":"auto_run_start","project_id":"p-sq","target_count":5,"mode":"auto-merge"}"#,
+        )
+        .await;
+
+        // Now query status.
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_status","id":"s2","project_id":"p-sq"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert_eq!(frame["data"]["targetCount"], 5);
+        assert_eq!(frame["data"]["mode"], "auto-merge");
+    }
+
+    /// `auto_run_pause` flips state to `paused` and clears `next_dispatch_at`.
+    #[tokio::test]
+    async fn auto_run_pause_flips_state() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-pa", "pause-proj").await;
+        seed_planflow_link(&pool, "p-pa", "pf-uuid-pa").await;
+
+        // Seed a running queue.
+        drive(
+            &pool,
+            r#"{"type":"auto_run_start","project_id":"p-pa","target_count":2,"mode":"pr"}"#,
+        )
+        .await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_pause","id":"p1","project_id":"p-pa"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert_eq!(frame["data"]["state"], "paused");
+        assert!(
+            frame["data"]["nextDispatchAt"].is_null(),
+            "nextDispatchAt must be cleared on pause, got {frame}",
+        );
+
+        let loaded = db_auto_run::get(&pool, "p-pa")
+            .await
+            .expect("get")
+            .expect("some");
+        assert_eq!(
+            loaded.state,
+            crate::db::auto_run::AutoRunState::Paused,
+            "DB state must be paused"
+        );
+    }
+
+    /// `auto_run_pause` on a nonexistent queue replies `auto_run_error not_found`.
+    #[tokio::test]
+    async fn auto_run_pause_no_queue_replies_not_found() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-pnq", "pause-no-queue").await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_pause","id":"p2","project_id":"p-pnq"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_error", "got {frame}");
+        assert_eq!(frame["kind"], "not_found");
+    }
+
+    /// `auto_run_resume` on a paused queue sets state back to `running`.
+    #[tokio::test]
+    async fn auto_run_resume_sets_running() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-re", "resume-proj").await;
+        seed_planflow_link(&pool, "p-re", "pf-uuid-re").await;
+
+        // Seed + pause.
+        drive(
+            &pool,
+            r#"{"type":"auto_run_start","project_id":"p-re","target_count":2,"mode":"pr"}"#,
+        )
+        .await;
+        drive(&pool, r#"{"type":"auto_run_pause","project_id":"p-re"}"#).await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_resume","id":"r1","project_id":"p-re"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert_eq!(frame["data"]["state"], "running");
+
+        let loaded = db_auto_run::get(&pool, "p-re")
+            .await
+            .expect("get")
+            .expect("some");
+        assert_eq!(
+            loaded.state,
+            crate::db::auto_run::AutoRunState::Running,
+            "DB state must be running after resume"
+        );
+    }
+
+    /// `auto_run_stop` sets state to `stopped` and keeps the row for
+    /// history. A subsequent `auto_run_status` shows `stopped`, not null.
+    #[tokio::test]
+    async fn auto_run_stop_sets_stopped_and_row_survives() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-so", "stop-proj").await;
+        seed_planflow_link(&pool, "p-so", "pf-uuid-so").await;
+
+        // Seed a queue.
+        drive(
+            &pool,
+            r#"{"type":"auto_run_start","project_id":"p-so","target_count":3,"mode":"manual"}"#,
+        )
+        .await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_stop","id":"st1","project_id":"p-so"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert_eq!(frame["data"]["state"], "stopped");
+
+        // Row survives.
+        let loaded = db_auto_run::get(&pool, "p-so")
+            .await
+            .expect("get")
+            .expect("some");
+        assert_eq!(
+            loaded.state,
+            crate::db::auto_run::AutoRunState::Stopped,
+            "DB state must be stopped"
+        );
+
+        // Status still shows the row, not null.
+        let status_frames = drive(&pool, r#"{"type":"auto_run_status","project_id":"p-so"}"#).await;
+        assert_eq!(status_frames[0]["data"]["state"], "stopped");
+    }
+
+    /// Stopping a nonexistent queue replies `auto_run_result { data: null }` —
+    /// idempotent, not an error.
+    #[tokio::test]
+    async fn auto_run_stop_no_queue_replies_null() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-snq", "stop-no-queue").await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_stop","id":"st2","project_id":"p-snq"}"#,
+        )
+        .await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert!(frame["data"].is_null(), "data must be null, got {frame}");
+    }
+
+    /// `auto_run_start` with `start_at` in the future sets state to `scheduled`.
+    #[tokio::test]
+    async fn auto_run_start_with_future_start_at_is_scheduled() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-sch", "sched-proj").await;
+        seed_planflow_link(&pool, "p-sch", "pf-uuid-sch").await;
+
+        // start_at far in the future.
+        let future = db_auto_run::epoch_ms() + 3_600_000;
+        let payload = format!(
+            r#"{{"type":"auto_run_start","project_id":"p-sch","target_count":1,"mode":"manual","start_at":{future}}}"#
+        );
+
+        let frames = drive(&pool, &payload).await;
+        let frame = &frames[0];
+        assert_eq!(frame["type"], "auto_run_result", "got {frame}");
+        assert_eq!(frame["data"]["state"], "scheduled");
+        assert_eq!(frame["data"]["nextDispatchAt"], future);
+    }
+
+    /// E2E: `auto_run_start` seeds a row; `auto_run_status` returns it;
+    /// state is consistent across both. This exercises the full
+    /// start → status round-trip through the dispatcher.
+    #[tokio::test]
+    async fn auto_run_start_then_status_round_trip() {
+        let pool = fresh_pool().await;
+        seed_project(&pool, "p-rt", "roundtrip-proj").await;
+        seed_planflow_link(&pool, "p-rt", "pf-uuid-rt").await;
+
+        drive(
+            &pool,
+            r#"{"type":"auto_run_start","id":"s","project_id":"p-rt","target_count":7,"mode":"merge-master","pacing_minutes":5,"on_failure":"continue"}"#,
+        )
+        .await;
+
+        let frames = drive(
+            &pool,
+            r#"{"type":"auto_run_status","id":"q","project_id":"p-rt"}"#,
+        )
+        .await;
+        let data = &frames[0]["data"];
+        assert_eq!(data["targetCount"], 7);
+        assert_eq!(data["mode"], "merge-master");
+        assert!((data["pacingMinutes"].as_f64().unwrap() - 5.0).abs() < f64::EPSILON);
+        assert_eq!(data["onFailure"], "continue");
+        assert_eq!(data["externalId"], "pf-uuid-rt");
     }
 }

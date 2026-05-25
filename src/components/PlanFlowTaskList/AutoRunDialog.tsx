@@ -36,7 +36,9 @@ export interface AutoRunDialogProps {
 type StartWhen = "now" | "later";
 type DeadlineWhen = "off" | "today";
 
-const COUNT_CHOICES = [1, 2, 3, 5, 10] as const;
+// Quick-pick chips next to the count input so the common cases stay
+// one click away — anything beyond gets typed.
+const COUNT_QUICK_PICKS = [1, 3, 5, 10, 20] as const;
 const PACING_CHOICES_MINUTES = [0, 5, 15, 30, 60] as const;
 
 function pad2(n: number): string {
@@ -164,23 +166,27 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
     if (!canSubmit()) return;
     setSubmitting(true);
     setError(null);
-    try {
-      startAutoRun({
-        workspaceProjectId: props.workspaceProjectId,
-        externalId: props.externalId,
-        targetCount: effectiveCount(),
-        mode: mode(),
-        startAt: computeStartAt(),
-        pacingMinutes: pacing(),
-        deadlineAt: computeDeadlineAt(),
-        onFailure: onFailure(),
+    // startAutoRun is async in cloud mode (WS round-trip) and sync-like in
+    // local mode (returns an immediately-resolved promise). Either way we
+    // `.then`/`.catch` so both paths are handled without a try/catch race.
+    void startAutoRun({
+      workspaceProjectId: props.workspaceProjectId,
+      externalId: props.externalId,
+      targetCount: effectiveCount(),
+      mode: mode(),
+      startAt: computeStartAt(),
+      pacingMinutes: pacing(),
+      deadlineAt: computeDeadlineAt(),
+      onFailure: onFailure(),
+    })
+      .then(() => {
+        props.onStarted();
+      })
+      .catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : "Unknown error";
+        setError(detail);
+        setSubmitting(false);
       });
-      props.onStarted();
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : "Unknown error";
-      setError(detail);
-      setSubmitting(false);
-    }
   };
 
   return (
@@ -228,21 +234,54 @@ export function AutoRunDialog(props: AutoRunDialogProps): JSX.Element {
                 <label class="ws-aar__label" for="ws-aar-count">
                   How many
                 </label>
-                <select
-                  id="ws-aar-count"
-                  class="ws-aar__select"
-                  value={count()}
-                  onChange={(e) => setCount(Number.parseInt(e.currentTarget.value, 10))}
-                >
-                  <For each={COUNT_CHOICES}>
-                    {(n) => (
-                      <option value={n} disabled={n > props.pendingTasks.length}>
-                        {n} task{n === 1 ? "" : "s"}
-                        {n > props.pendingTasks.length ? " (not enough)" : ""}
-                      </option>
-                    )}
-                  </For>
-                </select>
+                <div class="ws-aar__count-group">
+                  <input
+                    id="ws-aar-count"
+                    class="ws-aar__input ws-aar__input--count"
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={count()}
+                    onInput={(e) => {
+                      const parsed = Number.parseInt(e.currentTarget.value, 10);
+                      if (Number.isNaN(parsed)) return;
+                      // Floor at 1 so the queue always has something to do.
+                      // No upper cap — typing 200 is fine; pickAndDispatch
+                      // gracefully transitions to `done` when PlanFlow runs
+                      // out of TODOs (and the "X of Y" hint right next to
+                      // the input already tells the user how big the pool is).
+                      setCount(Math.max(1, parsed));
+                    }}
+                  />
+                  <span class="ws-aar__count-unit">
+                    of {props.pendingTasks.length} task{props.pendingTasks.length === 1 ? "" : "s"}
+                  </span>
+                  <div class="ws-aar__count-chips" role="group" aria-label="Quick picks">
+                    <For each={COUNT_QUICK_PICKS}>
+                      {(n) => (
+                        <button
+                          type="button"
+                          class="ws-aar__chip"
+                          data-active={count() === n ? "true" : undefined}
+                          disabled={n > props.pendingTasks.length}
+                          onClick={() => setCount(n)}
+                        >
+                          {n}
+                        </button>
+                      )}
+                    </For>
+                    <Show when={props.pendingTasks.length > 0}>
+                      <button
+                        type="button"
+                        class="ws-aar__chip ws-aar__chip--all"
+                        data-active={count() === props.pendingTasks.length ? "true" : undefined}
+                        onClick={() => setCount(props.pendingTasks.length)}
+                      >
+                        All
+                      </button>
+                    </Show>
+                  </div>
+                </div>
               </div>
 
               <Show when={noReady()}>

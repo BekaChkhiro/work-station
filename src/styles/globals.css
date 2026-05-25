@@ -5025,7 +5025,8 @@ button {
 }
 
 .ws-aar__select,
-.ws-aar__time {
+.ws-aar__time,
+.ws-aar__input {
   background: var(--bg-surface, rgba(255, 255, 255, 0.04));
   border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
   border-radius: var(--r-xs, 4px);
@@ -5037,9 +5038,61 @@ button {
 }
 
 .ws-aar__select:focus-visible,
-.ws-aar__time:focus-visible {
+.ws-aar__time:focus-visible,
+.ws-aar__input:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 1px;
+}
+
+.ws-aar__input--count {
+  width: 72px;
+  text-align: right;
+}
+
+.ws-aar__count-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ws-aar__count-unit {
+  font-size: 11px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.55));
+}
+
+.ws-aar__count-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.ws-aar__chip {
+  background: transparent;
+  border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-family: inherit;
+  min-height: 22px;
+}
+
+.ws-aar__chip:hover:not(:disabled) {
+  background: var(--bg-surface-hover, rgba(255, 255, 255, 0.06));
+}
+
+.ws-aar__chip[data-active="true"] {
+  background: var(--accent-soft, rgba(160, 216, 216, 0.15));
+  border-color: var(--accent, #a0d8d8);
+  color: var(--accent, #a0d8d8);
+}
+
+.ws-aar__chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .ws-aar__group {

@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use workstation_core::ws::auth::AuthToken;
 
+mod auto_run;
 mod cli;
 mod config;
 mod db;
@@ -143,7 +144,26 @@ async fn run(config: Config) -> ExitCode {
     }
     let projects_root = dispatch::ProjectsRoot::new(projects_root_path);
 
-    let handle = match server::spawn(token, pool, planflow, projects_root, config.listen).await {
+    // One PtyManager per daemon. Both the WebSocket dispatch layer and the
+    // auto-run orchestrator share this handle so PTYs spawned by the
+    // orchestrator are visible to the desktop's `pty_list` request when
+    // it reconnects. `PtyManager::clone` is an `Arc` bump — cheap.
+    let manager = workstation_core::pty::PtyManager::new();
+    let monitor = workstation_core::ws::system_monitor::start(manager.clone());
+    let sessions_meta = dispatch::new_session_metadata_store();
+
+    let mut handle = match server::spawn_with_components(
+        token,
+        pool.clone(),
+        manager.clone(),
+        monitor,
+        planflow.clone(),
+        projects_root.clone(),
+        sessions_meta,
+        config.listen,
+    )
+    .await
+    {
         Ok(h) => h,
         Err(e) => {
             tracing::error!(
@@ -155,9 +175,19 @@ async fn run(config: Config) -> ExitCode {
         }
     };
 
+    // Phase A (T19.35) — spawn the server-side auto-run orchestration
+    // loop. The loop ticks every 20 seconds, picks up active queues from
+    // the DB, and drives the state machine independently of any desktop
+    // connection. The orchestrator shares the same `PtyManager` as the
+    // WebSocket layer so the desktop's `pty_list` can surface sessions
+    // the orchestrator spawned. The JoinHandle is stored on the server
+    // handle so it is aborted cleanly on SIGTERM / SIGINT.
+    let orch_handle = auto_run::spawn_orchestrator(pool, manager, planflow, projects_root);
+    server::attach_orchestrator(&mut handle, orch_handle);
+
     tracing::info!(
         listen = %handle.local_addr,
-        "cloud-agent listener ready",
+        "cloud-agent listener ready (auto-run orchestrator active)",
     );
 
     let shutdown_reason = wait_for_shutdown().await;

@@ -91,6 +91,7 @@ import {
   isEmptyLayout,
   paneNode,
   remapSessionIds,
+  splitNode,
   type LayoutNode,
   type PaneNode,
   type SplitDirection,
@@ -466,22 +467,50 @@ export function AppRoot(): JSX.Element {
 
     const effectiveCli: PaneCliOption = cli ?? cloudDefaultShellOption();
 
+    // Spawn every pane's PTY in parallel — sequential `await` here was
+    // the dominant cost on boot for multi-pane layouts (each spawn is a
+    // fork+exec + openpty round-trip through Tauri IPC, ~100-300ms
+    // apiece). For 4 saved panes that's ~1s of perceived "session not
+    // loading" before any pane is even visible. Promise.all lets the
+    // backend's spawn_blocking pool work them concurrently while the
+    // frontend waits once for the slowest.
     const mapping = new Map<string, string>();
+    const spawnStart = performance.now();
+    let results: PromiseSettledResult<{ paneSessionId: string; newId: string }>[];
     try {
-      for (const pane of panes) {
-        const newId = await spawnCli(projectId, effectiveCli);
-        trackSession(projectId, newId);
-        mapping.set(pane.sessionId, newId);
-      }
+      results = await Promise.allSettled(
+        panes.map(async (pane) => ({
+          paneSessionId: pane.sessionId,
+          newId: await spawnCli(projectId, effectiveCli),
+        })),
+      );
     } catch (err) {
-      // Partial restore — kill what was already spawned and bail.
-      for (const newId of mapping.values()) {
-        void ptyKill(newId);
-        untrackSession(projectId, newId);
-      }
       setActionError(err instanceof Error ? err.message : String(err));
       return;
     }
+
+    const firstRejection = results.find((r) => r.status === "rejected");
+    if (firstRejection) {
+      // Partial restore — kill what was already spawned and bail.
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          void ptyKill(r.value.newId);
+        }
+      }
+      const reason = (firstRejection as PromiseRejectedResult).reason;
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+      return;
+    }
+
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        trackSession(projectId, r.value.newId);
+        mapping.set(r.value.paneSessionId, r.value.newId);
+      }
+    }
+    console.info(
+      `[boot] restoreProjectLayout: ${panes.length} panes spawned in ${Math.round(performance.now() - spawnStart)}ms`,
+    );
 
     const restoredLayout = remapSessionIds(savedLayout, mapping);
     setLayout(projectId, restoredLayout);
@@ -489,12 +518,11 @@ export function AppRoot(): JSX.Element {
     if (restoredPanes[0]) setFocusedSession(projectId, restoredPanes[0].sessionId);
   };
 
-  // Cloud-mode reattach: pull any live PTY sessions the agent kept
+  // Cloud-mode reattach: pull every live PTY session the agent kept
   // alive (we deliberately skip ptyKill on app close in cloud mode —
-  // see onCleanup), pick the newest one for the project, and drop
-  // it into the layout as a single pane. `Terminal` subscribes via
-  // `ptySubscribe` on mount so xterm starts streaming output and
-  // replays the scrollback the agent buffered while we were away.
+  // see onCleanup), build a balanced split tree so each one lands in
+  // its own pane, and `Terminal` re-subscribes via `ptySubscribe` on
+  // mount to resume streaming + replay scrollback.
   //
   // Silent failure is intentional: no sessions / agent unreachable /
   // protocol error all degrade to "auto-launch a fresh CLI" via the
@@ -504,20 +532,46 @@ export function AppRoot(): JSX.Element {
     try {
       const sessions = await ptyListCloud(projectId);
       if (sessions.length === 0) return;
-      // `pty_list_result.sessions` is already sorted newest-first by
-      // the agent; reusing index 0 keeps the contract simple.
-      const newest = sessions[0];
-      if (!newest) return;
-      setLayout(projectId, paneNode(newest.sessionId));
-      setFocusedSession(projectId, newest.sessionId);
-      trackSession(projectId, newest.sessionId);
-      // Treat the reattached session as if the auto-launch already
+      // `pty_list_result.sessions` is sorted newest-first by the agent;
+      // reverse it so the oldest pane lands on the left (matches what
+      // the user remembers from before the app close).
+      const ordered = [...sessions].reverse();
+      const layout = buildBalancedLayout(ordered.map((s) => s.sessionId));
+      if (!layout) return;
+      setLayout(projectId, layout);
+      for (const pane of collectPanes(layout)) {
+        trackSession(projectId, pane.sessionId);
+      }
+      const firstPane = collectPanes(layout)[0];
+      if (firstPane) setFocusedSession(projectId, firstPane.sessionId);
+      // Treat the reattached sessions as if the auto-launch already
       // happened so the T7.4 effect doesn't try to spawn a duplicate
-      // CLI alongside the one we just reattached to.
+      // CLI alongside the ones we just reattached to.
       autoLaunchedProjects.add(projectId);
     } catch (err) {
       console.warn("[cloud-reattach] ptyList failed; falling back to auto-launch:", err);
     }
+  };
+
+  // Build a balanced binary split tree from a flat session-id list so
+  // every pane gets a roughly equal share of the workspace area. The
+  // recursion bottoms out at single panes; intermediate splits
+  // alternate horizontal/vertical so 4 sessions land in a 2×2 grid
+  // rather than a four-way row that crushes each pane to a sliver.
+  const buildBalancedLayout = (
+    sessionIds: string[],
+    dir: SplitDirection = "h",
+  ): LayoutNode | null => {
+    if (sessionIds.length === 0) return null;
+    if (sessionIds.length === 1) {
+      const id = sessionIds[0];
+      return id ? paneNode(id) : null;
+    }
+    const mid = Math.ceil(sessionIds.length / 2);
+    const left = buildBalancedLayout(sessionIds.slice(0, mid), dir === "h" ? "v" : "h");
+    const right = buildBalancedLayout(sessionIds.slice(mid), dir === "h" ? "v" : "h");
+    if (!left || !right) return left ?? right;
+    return splitNode(dir, left, right);
   };
 
   const registerProject = (persisted: Project): void => {
@@ -583,24 +637,36 @@ export function AppRoot(): JSX.Element {
     }
 
     void (async () => {
+      const bootStart = performance.now();
+      const mark = (label: string, since: number): void => {
+        console.info(`[boot] ${label}: ${Math.round(performance.now() - since)}ms`);
+      };
       try {
+        const themeStart = performance.now();
         try {
           setThemeMode(await getSetting("theme"));
         } catch (err) {
           console.error("[T8.3] theme restore failed:", err);
         }
+        mark("theme+bindings start", themeStart);
         await loadPersistedBindings();
+        mark("loadPersistedBindings", themeStart);
+        const cliStart = performance.now();
         try {
           setAvailableClis(await cliListAvailable());
         } catch (err) {
           setActionError(err instanceof Error ? err.message : String(err));
         }
+        mark("cliListAvailable", cliStart);
+        const projectsStart = performance.now();
         const persisted = await listProjects();
+        mark(`listProjects (${persisted.length} projects)`, projectsStart);
         // T19.17 — pin the mode for the boot pass. cloudMode() is hydrated
         // synchronously from settings defaults, then asynchronously from
         // SQLite; we capture once so every project loads under the same
         // mode and the reactive flip-handler can no-op while we restore.
         const bootMode = currentMode();
+        const projectsLoopStart = performance.now();
         for (const p of persisted) {
           registerProject(p);
 
@@ -665,6 +731,7 @@ export function AppRoot(): JSX.Element {
             await restoreCloudSessions(p.id);
           }
         }
+        mark(`projects-loop (${persisted.length} projects, mode=${bootMode})`, projectsLoopStart);
         // T19.17 — record the mode the persister/session maps now point at.
         // The reactive flip-handler below diffs against this to detect
         // user-initiated cloud_mode toggles after boot.
@@ -693,6 +760,7 @@ export function AppRoot(): JSX.Element {
         // no PTY-output scraping, so no hidden-bridge installer is
         // needed. The chat panel spawns its own PTY directly.
         setBoot({ kind: "ready" });
+        mark("boot TOTAL", bootStart);
         void checkUpdate()
           .then((update) => {
             if (update?.available) setUpdateVersion(update.version ?? "new version");
@@ -1197,9 +1265,10 @@ export function AppRoot(): JSX.Element {
     projectId: string,
     taskId: string,
     opts?: TaskCliLauncherOptions,
-  ): Promise<void> => {
+  ): Promise<string | null> => {
     const mode: PlanFlowStartMode = opts?.mode ?? "manual";
     const cliName = opts?.cliName;
+    const headless = opts?.headless === true;
     const prompt = formatPlanFlowStartPrompt(taskId, mode);
     const ws = getWorkspace(projectId);
     const focused = ws?.focusedSessionId ?? null;
@@ -1207,19 +1276,40 @@ export function AppRoot(): JSX.Element {
       cliName && TASK_CLI_NAMES.has(cliName)
         ? (availableClis().find((c) => c.name === cliName) ?? resolveTaskCli(projectId))
         : resolveTaskCli(projectId);
-    if (!cli) return;
+    if (!cli) return null;
 
     // Surface the Terminal tab before spawning so the new pane is
     // actually visible — otherwise the spawned CLI lives in a hidden
     // workspace whose xterm is paused (T4.12 IntersectionObserver),
     // the user sees nothing happen, and the Start prompt only renders
     // after they manually switch tabs.
-    setActiveTab(projectId, "terminal");
+    //
+    // Headless launches deliberately skip this: auto-run wants the PTY
+    // to live in the backend without disturbing whichever workspace
+    // tab the user is currently on. The PTY keeps streaming output
+    // into its scrollback and the Auto-run bar's "Open" button
+    // attaches it to the visible layout on demand.
+    if (!headless) {
+      setActiveTab(projectId, "terminal");
+    }
 
     // Spawn without startup commands — write the prompt once the REPL is
     // idle (see writePromptWhenReady below).
     const sessionId = await spawnCli(projectId, cli);
     trackSession(projectId, sessionId);
+
+    if (headless) {
+      // Backend-only: no setLayout / splitPane. The pane lives in
+      // sessionsByProject (via trackSession) so close-pane / Cmd+W
+      // pathways still see it once the user attaches it to a slot,
+      // but it stays invisible until then.
+      console.warn(
+        `[autoRun] headless spawn OK taskId=${taskId} sessionId=${sessionId} cli=${cli.name}`,
+      );
+      writePromptWhenReady(sessionId, prompt);
+      return sessionId;
+    }
+
     if (ws?.layout) {
       const target = pickGridSplitTarget(ws.layout, focused);
       if (target !== null) {
@@ -1230,15 +1320,16 @@ export function AppRoot(): JSX.Element {
         if (!attached) {
           await ptyKill(sessionId);
           untrackSession(projectId, sessionId);
-          return;
+          return null;
         }
         writePromptWhenReady(sessionId, prompt);
-        return;
+        return sessionId;
       }
     }
     setLayout(projectId, paneNode(sessionId));
     setFocusedSession(projectId, sessionId);
     writePromptWhenReady(sessionId, prompt);
+    return sessionId;
   };
 
   // Write `prompt` (no newline) into a CLI pane once it has been idle for
@@ -1265,8 +1356,14 @@ export function AppRoot(): JSX.Element {
     // Shared mutable state for the timers and subscription reference so
     // both the chunk handler and the flush function can reach them.
     const state = {
-      idleTimer: null as ReturnType<typeof window.setTimeout> | null,
-      maxTimer: null as ReturnType<typeof window.setTimeout> | null,
+      // Browser `window.setTimeout` returns a numeric handle. Annotate as
+      // `number` directly: with @types/node also in scope, the `typeof
+      // window.setTimeout` query resolves to the Node `Timeout` overload
+      // while the call expression returns `number`, so the ReturnType form
+      // mis-typed these fields and tripped tsc (number not assignable to
+      // Timeout).
+      idleTimer: null as number | null,
+      maxTimer: null as number | null,
       done: false,
       sub: null as { unsubscribe: () => void } | null,
     };
@@ -1290,6 +1387,7 @@ export function AppRoot(): JSX.Element {
       // the time CR lands, so the submit fires on a partial buffer
       // (looked to the user like "Start did nothing — I had to press
       // Enter myself").
+      console.warn(`[autoRun] writePromptWhenReady FLUSH sessionId=${sessionId.slice(0, 8)}`);
       void ptyWrite(sessionId, encoder.encode(prompt))
         .then(
           () =>
@@ -1298,8 +1396,14 @@ export function AppRoot(): JSX.Element {
             }),
         )
         .then(() => ptyWrite(sessionId, encoder.encode("\r")))
-        .catch(() => {
-          // Session closed — silently ignore.
+        .then(() => {
+          console.warn(`[autoRun] writePromptWhenReady CR sent sessionId=${sessionId.slice(0, 8)}`);
+        })
+        .catch((err) => {
+          console.warn(
+            `[autoRun] writePromptWhenReady FAILED sessionId=${sessionId.slice(0, 8)}:`,
+            err,
+          );
         });
     };
 

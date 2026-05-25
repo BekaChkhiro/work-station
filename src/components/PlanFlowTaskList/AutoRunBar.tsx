@@ -22,7 +22,14 @@ import {
   resumeAutoRun,
   stopAutoRun,
 } from "../../stores/autoRunQueue";
-import { setActiveTab } from "../../stores/workspace";
+import {
+  getWorkspace,
+  setActiveTab,
+  setFocusedSession,
+  setLayout,
+  splitPane,
+} from "../../stores/workspace";
+import { collectPanes, paneNode } from "../../types/layout";
 import {
   autoRunQueueProgressLabel,
   isAutoRunQueueActive,
@@ -122,8 +129,31 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
     return q.currentTaskId ?? null;
   });
 
-  const openInTerminal = (projectId: string): void => {
+  const openInTerminal = (projectId: string, sessionId: string | null): void => {
     setActiveTab(projectId, "terminal");
+    if (sessionId === null) return;
+    // If the headless session is already in the layout (user clicked
+    // Open earlier, or auto-run wasn't headless for some reason),
+    // just focus it. Otherwise splice it next to whichever pane is
+    // focused — splitPane mutates the layout in-place without
+    // remounting the existing Terminals. Empty layouts fall back to
+    // a single-pane setLayout so the agent has somewhere to render.
+    const ws = getWorkspace(projectId);
+    const already =
+      ws?.layout != null && collectPanes(ws.layout).some((p) => p.sessionId === sessionId);
+    if (already) {
+      setFocusedSession(projectId, sessionId);
+      return;
+    }
+    if (ws?.layout) {
+      const focused = ws.focusedSessionId ?? collectPanes(ws.layout)[0]?.sessionId ?? null;
+      if (focused) {
+        splitPane(projectId, focused, "v", sessionId);
+        return;
+      }
+    }
+    setLayout(projectId, paneNode(sessionId));
+    setFocusedSession(projectId, sessionId);
   };
 
   // Use a `keyed` Show: the children re-create whenever the queue
@@ -169,11 +199,15 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
                 <button
                   type="button"
                   class="ws-aar-bar__btn"
-                  onClick={() => openInTerminal(q.projectId)}
+                  onClick={() => openInTerminal(q.projectId, q.currentSessionId ?? null)}
                   aria-label="Open terminal pane"
-                  title="Jump to the terminal tab to watch the agent"
+                  title={
+                    q.currentSessionId
+                      ? "Attach the running agent's pane to this workspace"
+                      : "Jump to the terminal tab to watch the agent"
+                  }
                 >
-                  ⤴ Terminal
+                  ⤴ Open
                 </button>
               </Show>
               <Show
@@ -184,7 +218,7 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
                 <button
                   type="button"
                   class="ws-aar-bar__btn"
-                  onClick={() => pauseAutoRun(q.projectId)}
+                  onClick={() => void pauseAutoRun(q.projectId)}
                   aria-label="Pause auto run"
                   title="Finish current task, then stop dispatching"
                 >
@@ -195,7 +229,7 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
                 <button
                   type="button"
                   class="ws-aar-bar__btn"
-                  onClick={() => resumeAutoRun(q.projectId)}
+                  onClick={() => void resumeAutoRun(q.projectId)}
                   aria-label="Resume auto run"
                   title="Continue from where the queue paused"
                 >
@@ -206,7 +240,7 @@ export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
                 <button
                   type="button"
                   class="ws-aar-bar__btn ws-aar-bar__btn--danger"
-                  onClick={() => stopAutoRun(q.projectId)}
+                  onClick={() => void stopAutoRun(q.projectId)}
                   aria-label="Stop auto run"
                   title="Stop the queue entirely"
                 >

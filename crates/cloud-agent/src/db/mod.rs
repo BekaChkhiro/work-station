@@ -27,6 +27,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{Executor, Row};
 
 pub mod app_settings;
+pub mod auto_run;
 pub mod project_links;
 pub mod projects;
 
@@ -52,6 +53,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_projects.sql")),
     (2, include_str!("../../migrations/0002_app_settings.sql")),
     (3, include_str!("../../migrations/0003_project_links.sql")),
+    (4, include_str!("../../migrations/0004_auto_run_queues.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]

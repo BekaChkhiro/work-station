@@ -155,16 +155,20 @@ export async function awaitCloudClient(opts?: {
   const clearTimeoutImpl =
     opts?.clearTimeoutImpl ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
-  const settled = settledVerdict(manager);
-  if (settled) throw settled;
-
   const existing = manager.client();
   if (existing && manager.state() === "open") return existing;
 
-  // Trigger a dial if the manager is idle (e.g. tests, or pre-bootstrap
-  // call). connect() is idempotent so calling on `connecting`/`open` is
-  // a no-op.
+  // Trigger a dial *before* checking the verdict. The `installCloudAgentAutoConnect`
+  // effect that flips the manager out of "disabled" runs in a separate Solid
+  // effect from the caller (e.g. swapWorkspaceMode), so on a fresh
+  // cloudMode→true the manager can still report "disabled" here even though
+  // the signal already says cloud is on. Kicking connect() first lets the
+  // manager start its handshake; the poll below then sees "connecting" instead
+  // of throwing the stale "disabled" verdict immediately.
   void manager.connect();
+
+  const settled = settledVerdict(manager);
+  if (settled) throw settled;
 
   return new Promise<WsBridgeClient>((resolve, reject) => {
     const started = now();

@@ -28,37 +28,58 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 
+/// Filename for the on-disk PATH cache. Lives in `dirs::cache_dir()` so
+/// it survives across runs but is fair game for the OS to nuke. Format
+/// is plain JSON (see `cache::CachedPath`).
+#[cfg(unix)]
+const PATH_CACHE_FILE: &str = "work-station/path_cache.json";
+
 /// Update the current process PATH from the user's interactive login
 /// shell, if we can resolve one. Logs the outcome and returns silently
 /// on any failure — detection then falls back to whatever PATH the OS
 /// gave us (which is at least good enough for `bash` / `zsh`).
+///
+/// **Cache:** the first boot writes the resolved PATH to disk along
+/// with the shell + rc-file mtimes that produced it. Subsequent boots
+/// load that cache in <1ms and skip the 0.5–2.5s shell probe entirely
+/// — the dominant cost users were seeing on every cold start. The
+/// cache is invalidated automatically when `$SHELL` changes or any
+/// tracked rc file's mtime moves, so `brew install …`-style additions
+/// flow through naturally as long as the user touches their rc.
 pub fn hydrate_from_login_shell() {
     #[cfg(unix)]
     {
+        // Fast path — if we have a fresh disk cache, apply it and
+        // bail. No subprocess, no rc-file execution.
+        if let Some((cached_path, source)) = cache::load_fresh() {
+            tracing::info!(
+                target: "shell_path",
+                source = source,
+                chars = cached_path.len(),
+                "hydrated PATH from disk cache (skipping shell probe)",
+            );
+            apply_path(std::ffi::OsString::from(cached_path));
+            return;
+        }
+
         match probe_login_path() {
             Ok((path, elapsed)) => {
-                let previous = std::env::var_os("PATH").unwrap_or_default();
-                if previous == path {
-                    tracing::debug!(
-                        target: "shell_path",
-                        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-                        "login-shell PATH matched current PATH; no change",
-                    );
-                    return;
-                }
                 tracing::info!(
                     target: "shell_path",
                     elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                     chars = path.len(),
                     "hydrated PATH from login shell",
                 );
-                // SAFETY: set_var is unsound if other threads are
-                // reading the env concurrently. We run before any
-                // background tasks (cli registry scan, db init) are
-                // spawned in `lib.rs::run`, so we're single-threaded
-                // here. Anything that reads PATH later (cli detection,
-                // pty spawns) sees the updated value.
-                std::env::set_var("PATH", path);
+                if let Some(s) = path.to_str() {
+                    if let Err(error) = cache::save(s) {
+                        tracing::warn!(
+                            target: "shell_path",
+                            %error,
+                            "failed to write PATH cache; subsequent boots will reprobe",
+                        );
+                    }
+                }
+                apply_path(path);
             }
             Err(reason) => {
                 tracing::warn!(
@@ -68,6 +89,118 @@ pub fn hydrate_from_login_shell() {
                 );
             }
         }
+    }
+}
+
+#[cfg(unix)]
+fn apply_path(path: std::ffi::OsString) {
+    let previous = std::env::var_os("PATH").unwrap_or_default();
+    if previous == path {
+        return;
+    }
+    // SAFETY: set_var is unsound if other threads are reading the env
+    // concurrently. We run before any background tasks (cli registry
+    // scan, db init) are spawned in `lib.rs::run`, so we're
+    // single-threaded here. Anything that reads PATH later (cli
+    // detection, pty spawns) sees the updated value.
+    std::env::set_var("PATH", path);
+}
+
+#[cfg(unix)]
+mod cache {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::PATH_CACHE_FILE;
+
+    /// rc files we treat as inputs to the probe. Missing entries are
+    /// skipped at fingerprint time, not treated as errors.
+    const RC_FILES: &[&str] = &[
+        ".zshrc",
+        ".zprofile",
+        ".zshenv",
+        ".zlogin",
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+    ];
+
+    #[derive(Serialize, Deserialize)]
+    struct CachedPath {
+        shell: String,
+        /// (absolute path, mtime as seconds since epoch). Missing
+        /// files appear with mtime == 0 so adding a previously-absent
+        /// rc file invalidates the cache automatically.
+        rc_mtimes: Vec<(String, i64)>,
+        path: String,
+    }
+
+    fn cache_path() -> Option<PathBuf> {
+        dirs::cache_dir().map(|d| d.join(PATH_CACHE_FILE))
+    }
+
+    fn current_shell() -> String {
+        std::env::var("SHELL").unwrap_or_default()
+    }
+
+    fn current_mtimes() -> Vec<(String, i64)> {
+        let Some(home) = dirs::home_dir() else {
+            return Vec::new();
+        };
+        RC_FILES
+            .iter()
+            .map(|name| {
+                let p = home.join(name);
+                let mtime = fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0i64, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+                (p.to_string_lossy().into_owned(), mtime)
+            })
+            .collect()
+    }
+
+    /// Returns `Some((path, source_tag))` when a cache file exists and
+    /// its fingerprint matches the current environment.
+    pub(super) fn load_fresh() -> Option<(String, &'static str)> {
+        let path = cache_path()?;
+        let raw = fs::read_to_string(&path).ok()?;
+        let cached: CachedPath = serde_json::from_str(&raw).ok()?;
+        if cached.shell != current_shell() {
+            tracing::debug!(target: "shell_path", "cache invalidated: $SHELL changed");
+            return None;
+        }
+        if cached.rc_mtimes != current_mtimes() {
+            tracing::debug!(target: "shell_path", "cache invalidated: rc-file mtime drift");
+            return None;
+        }
+        if cached.path.is_empty() {
+            return None;
+        }
+        Some((cached.path, "disk_cache"))
+    }
+
+    pub(super) fn save(path: &str) -> Result<(), String> {
+        let target = cache_path().ok_or_else(|| "no cache dir available".to_string())?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create_dir_all: {e}"))?;
+        }
+        let payload = CachedPath {
+            shell: current_shell(),
+            rc_mtimes: current_mtimes(),
+            path: path.to_string(),
+        };
+        let body = serde_json::to_string(&payload).map_err(|e| format!("serialize: {e}"))?;
+        // Atomic-ish write: stage to a sibling tmp file then rename so
+        // a crash partway through a write never leaves a corrupted
+        // cache that future boots would silently fall back from.
+        let tmp = target.with_extension("json.tmp");
+        fs::write(&tmp, body).map_err(|e| format!("write tmp: {e}"))?;
+        fs::rename(&tmp, &target).map_err(|e| format!("rename: {e}"))?;
+        Ok(())
     }
 }
 

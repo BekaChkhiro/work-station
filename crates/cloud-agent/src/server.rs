@@ -53,6 +53,9 @@ pub struct ServerHandle {
     pub local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
+    /// Long-lived auto-run orchestrator loop. Aborted on server shutdown
+    /// so it doesn't outlive the DB pool it holds a reference to.
+    orchestrator: Option<JoinHandle<()>>,
 }
 
 impl ServerHandle {
@@ -60,6 +63,11 @@ impl ServerHandle {
     /// the task's join result so the caller can surface panics.
     pub async fn shutdown(mut self) -> Result<(), tokio::task::JoinError> {
         let _ = self.shutdown.send(true);
+        // Abort the orchestrator first — it holds a clone of the DB pool
+        // and must not outlive the server's lifetime.
+        if let Some(orch) = self.orchestrator.take() {
+            orch.abort();
+        }
         if let Some(task) = self.task.take() {
             task.await?;
         }
@@ -73,6 +81,9 @@ impl Drop for ServerHandle {
         // least signal the server task so it doesn't outlive the
         // handle's lifetime.
         let _ = self.shutdown.send(true);
+        if let Some(orch) = self.orchestrator.take() {
+            orch.abort();
+        }
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -146,6 +157,9 @@ pub(crate) fn router(
 /// graceful-shutdown signal. The caller drives shutdown explicitly
 /// (`handle.shutdown().await`) — `Drop` is a fallback that aborts the
 /// task if the handle is dropped without an awaited shutdown.
+// Integration tests that don't need a shared PtyManager use this
+// convenience wrapper. The binary entry-point uses spawn_with_components.
+#[allow(dead_code)]
 pub async fn spawn(
     token: AuthToken,
     pool: SqlitePool,
@@ -177,10 +191,23 @@ pub async fn spawn(
     .await
 }
 
+/// Variant of [`spawn`] that also accepts an explicit `orchestrator`
+/// handle so callers can optionally suppress the auto-run loop (tests
+/// that don't need it pass `None`).
+///
+/// The handle is stored on [`ServerHandle`] and aborted on shutdown so
+/// the orchestrator doesn't outlive the DB pool it holds a reference to.
+pub(crate) fn attach_orchestrator(handle: &mut ServerHandle, orch: JoinHandle<()>) {
+    handle.orchestrator = Some(orch);
+}
+
 /// Same as [`spawn`] but with caller-supplied `PtyManager` and
 /// `SystemMonitorHandle`. Tests use this to inject a fast-tick monitor
 /// so `system_stats` smoke tests don't wait the production 4-second
 /// cadence.
+// Each argument is a distinct injectable component; no cohesive grouping
+// exists that wouldn't just be a grab-bag struct.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_with_components(
     token: AuthToken,
     pool: SqlitePool,
@@ -220,6 +247,7 @@ pub(crate) async fn spawn_with_components(
         local_addr,
         shutdown: shutdown_tx,
         task: Some(task),
+        orchestrator: None,
     })
 }
 
@@ -269,6 +297,9 @@ struct WsQuery {
 /// owns per-connection state until the peer closes (T19.24). T19.25
 /// threads the SQLite pool through here so the dispatcher can serve
 /// DB-backed `settings_get` / projects handlers.
+// Axum extracts each Extension as a separate argument; no refactoring
+// without replacing Extensions with a single wrapper type (out of scope).
+#[allow(clippy::too_many_arguments)]
 async fn ws_handler(
     Query(_query): Query<WsQuery>,
     Extension(pool): Extension<SqlitePool>,
@@ -315,10 +346,8 @@ mod tests {
         // would short-circuit on `no_credential` instead of hitting the
         // network. The real proxy behaviour is covered by the
         // `planflow_proxy::tests` suite against a wiremock server.
-        let planflow = PlanflowState::for_test(
-            "http://127.0.0.1:1",
-            std::sync::Arc::new(|_pid| Ok(None)),
-        );
+        let planflow =
+            PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|_pid| Ok(None)));
         let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
         std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
         let handle = spawn(
@@ -510,10 +539,8 @@ mod tests {
         let manager = PtyManager::new();
         let monitor =
             system_monitor::start_with_interval(manager.clone(), Duration::from_millis(50));
-        let planflow = PlanflowState::for_test(
-            "http://127.0.0.1:1",
-            std::sync::Arc::new(|_pid| Ok(None)),
-        );
+        let planflow =
+            PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|_pid| Ok(None)));
         let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
         std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
         let sessions_meta = dispatch::new_session_metadata_store();

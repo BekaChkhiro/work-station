@@ -75,6 +75,11 @@ export interface StartTaskInput {
    *  `planflow_task_start(...)` prompt that gets typed into the CLI.
    *  Defaults to `manual` when omitted. */
   mode?: PlanFlowStartMode;
+  /** Auto-run uses this to spawn the CLI without inserting a pane into
+   *  the visible layout. The session id is returned in the result so
+   *  the queue can remember which PTY belongs to the task and surface
+   *  an "Open" affordance later. */
+  headless?: boolean;
 }
 
 export interface StartTaskResult {
@@ -88,6 +93,11 @@ export interface StartTaskResult {
    *  is on the editor / integration tab). The caller can surface this so
    *  the user knows to open a terminal. */
   prefilled: boolean;
+  /** Session id of the spawned CLI pane (headless or visible). `null`
+   *  when the launcher refused to spawn — no available CLI, no project
+   *  metadata, etc. Auto-run threads this back into the queue so the
+   *  bar's "Open" button can attach the right PTY to the visible layout. */
+  sessionId: string | null;
 }
 
 export interface MarkProgressInput {
@@ -206,7 +216,13 @@ export async function startTask(input: StartTaskInput): Promise<StartTaskResult>
   // Step 4 — flip to the terminal tab. No-op if the project doesn't have
   // a "terminal" tab visible (terminal is always present per the schema,
   // but `setActiveTab` no-ops defensively for missing kinds).
-  setActiveTab(input.workspaceProjectId, "terminal");
+  //
+  // Headless auto-run skips the tab flip so a running queue doesn't yank
+  // the user off whatever tab they're reading. The Auto-run bar's
+  // "Open" button is the explicit surface for that switch.
+  if (input.headless !== true) {
+    setActiveTab(input.workspaceProjectId, "terminal");
+  }
 
   // Step 5 — pre-fill the checkout command into the focused pane. We do
   // *not* append a newline: the spec wants the user to hit Enter
@@ -216,13 +232,18 @@ export async function startTask(input: StartTaskInput): Promise<StartTaskResult>
   // codex). The git command would be typed into the CLI's REPL, not the
   // shell, and end up being interpreted as a chat prompt — surprising
   // and not useful. The Step 6 launcher handles the CLI case directly.
+  //
+  // Headless skips the pre-fill entirely: there is no focused pane to
+  // type into without disturbing the user's current view.
   let prefilled = false;
-  const focusedSessionId = focusedSessionFor(input.workspaceProjectId);
-  const focusedIsCli = getFocusedSessionCli(input.workspaceProjectId) !== null;
-  if (branchName !== null && focusedSessionId !== null && !focusedIsCli) {
-    const command = formatCheckoutCommand(branchName);
-    await writeBytes(focusedSessionId, command);
-    prefilled = true;
+  if (input.headless !== true) {
+    const focusedSessionId = focusedSessionFor(input.workspaceProjectId);
+    const focusedIsCli = getFocusedSessionCli(input.workspaceProjectId) !== null;
+    if (branchName !== null && focusedSessionId !== null && !focusedIsCli) {
+      const command = formatCheckoutCommand(branchName);
+      await writeBytes(focusedSessionId, command);
+      prefilled = true;
+    }
   }
 
   // Step 6 — feed `planflow_task_start(taskId: …)` to a CLI. The launcher
@@ -232,12 +253,13 @@ export async function startTask(input: StartTaskInput): Promise<StartTaskResult>
   // new CLI pane is spawned next to the existing layout. Wired by
   // AppRoot via `setTaskCliLauncher`; failures are swallowed inside the
   // launcher so the lock we just claimed stays intact.
-  void launchTaskCli(input.workspaceProjectId, input.taskId, {
+  const sessionId = await launchTaskCli(input.workspaceProjectId, input.taskId, {
     cliName: input.cliName,
     mode: input.mode,
+    headless: input.headless,
   });
 
-  return { task, branchName, prefilled };
+  return { task, branchName, prefilled, sessionId };
 }
 
 export async function markProgress(input: MarkProgressInput): Promise<MarkProgressResult> {

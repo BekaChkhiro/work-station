@@ -80,6 +80,11 @@ export interface AutoRunQueue {
    *  to look up the PR during verifying_merge. Null until the dispatch
    *  succeeds. */
   currentBranchName: string | null;
+  /** PTY session id for the current task's headless CLI pane. The
+   *  Auto-run bar's "Open" button uses this to attach the running
+   *  agent to the visible layout on demand. Null until the dispatch
+   *  succeeds, or when the launcher refused to spawn. */
+  currentSessionId: string | null;
   /** When we entered the verifying_merge state. Lets us time the wait
    *  out so a stuck PR (CI failure, branch protection still pending)
    *  doesn't pin the queue forever. */
@@ -125,6 +130,7 @@ export const autoRunQueueSchema = z.object({
   completedCount: z.number().int().min(0),
   currentTaskId: z.string().nullable(),
   currentBranchName: z.string().nullable(),
+  currentSessionId: z.string().nullable().optional().default(null),
   verifyStartedAt: z.number().nullable(),
   mode: z.enum(["manual", "auto-merge", "pr", "merge-master", "none"]),
   startAt: z.number().nullable(),

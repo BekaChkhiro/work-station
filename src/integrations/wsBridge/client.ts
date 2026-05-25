@@ -92,7 +92,12 @@ export type ServerMessage =
     }
   // Generic error envelope used by the projects / settings handlers
   // (distinct from `pty_error` which carries session_id).
-  | { type: "error"; id?: string; kind: string; message: string };
+  | { type: "error"; id?: string; kind: string; message: string }
+  // Phase C — auto-run orchestration bridge reply frames. `data` is the
+  // agent-side AutoRunQueue in camelCase (matches the TS AutoRunQueue
+  // interface); null is valid on `auto_run_status` when no queue exists.
+  | { type: "auto_run_result"; id?: string; data: unknown }
+  | { type: "auto_run_error"; id?: string; kind: string; message: string };
 
 /**
  * T19.14 — snapshot delivered to a [`WsBridgeClient.onSystemStats`]
@@ -789,6 +794,107 @@ export class WsBridgeClient {
     return reply.data;
   }
 
+  // ---- Phase C: auto-run orchestration bridge -----------------------------
+  //
+  // Each method maps 1:1 to an `auto_run_*` ClientMessage variant in the
+  // cloud-agent's `dispatch.rs`. The agent resolves the PlanFlow project
+  // from its `project_links` table using `project_id` alone — the client
+  // never sends `external_id`. Replies come back as `auto_run_result`
+  // (data = camelCase AutoRunQueue | null) or `auto_run_error`.
+
+  /** Start or restart a cloud-side auto-run queue for `projectId`. Returns
+   *  the newly-created queue as an `AutoRunQueue`-shaped object (validated
+   *  by the caller). */
+  async autoRunStart(args: {
+    project_id: string;
+    target_count: number;
+    mode: string;
+    start_at: number | null;
+    pacing_minutes: number;
+    deadline_at: number | null;
+    on_failure: string;
+  }): Promise<unknown> {
+    const reply = await this.request({
+      type: "auto_run_start",
+      project_id: args.project_id,
+      target_count: args.target_count,
+      mode: args.mode,
+      start_at: args.start_at,
+      pacing_minutes: args.pacing_minutes,
+      deadline_at: args.deadline_at,
+      on_failure: args.on_failure,
+    });
+    if (reply.type === "auto_run_error") {
+      throw new WsBridgeError(reply.kind, reply.message);
+    }
+    if (reply.type !== "auto_run_result") {
+      throw new WsBridgeError("protocol", `expected auto_run_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  /** Stop the cloud-side queue for `projectId`. Returns the updated queue. */
+  async autoRunStop(projectId: string): Promise<unknown> {
+    const reply = await this.request({
+      type: "auto_run_stop",
+      project_id: projectId,
+    });
+    if (reply.type === "auto_run_error") {
+      throw new WsBridgeError(reply.kind, reply.message);
+    }
+    if (reply.type !== "auto_run_result") {
+      throw new WsBridgeError("protocol", `expected auto_run_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  /** Pause the cloud-side queue for `projectId`. Returns the updated queue. */
+  async autoRunPause(projectId: string): Promise<unknown> {
+    const reply = await this.request({
+      type: "auto_run_pause",
+      project_id: projectId,
+    });
+    if (reply.type === "auto_run_error") {
+      throw new WsBridgeError(reply.kind, reply.message);
+    }
+    if (reply.type !== "auto_run_result") {
+      throw new WsBridgeError("protocol", `expected auto_run_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  /** Resume a paused cloud-side queue for `projectId`. Returns the updated
+   *  queue. */
+  async autoRunResume(projectId: string): Promise<unknown> {
+    const reply = await this.request({
+      type: "auto_run_resume",
+      project_id: projectId,
+    });
+    if (reply.type === "auto_run_error") {
+      throw new WsBridgeError(reply.kind, reply.message);
+    }
+    if (reply.type !== "auto_run_result") {
+      throw new WsBridgeError("protocol", `expected auto_run_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
+  /** Poll the current state of the cloud-side queue for `projectId`.
+   *  Returns the queue object, or `null` when no queue exists. */
+  async autoRunStatus(projectId: string): Promise<unknown> {
+    const reply = await this.request({
+      type: "auto_run_status",
+      project_id: projectId,
+    });
+    if (reply.type === "auto_run_error") {
+      throw new WsBridgeError(reply.kind, reply.message);
+    }
+    if (reply.type !== "auto_run_result") {
+      throw new WsBridgeError("protocol", `expected auto_run_result, got ${reply.type}`);
+    }
+    return reply.data;
+  }
+
   /**
    * Listen to server-initiated `active_project_changed` events. Reserved
    * in the wire protocol today (the cloud-agent only emits a Tauri event
@@ -949,6 +1055,18 @@ export class WsBridgeClient {
         }
         return;
       }
+      case "auto_run_error": {
+        // Phase C — auto-run orchestration error frame.
+        const id = parsed.id;
+        if (id !== undefined) {
+          const pending = this.pending.get(id);
+          if (pending) {
+            this.pending.delete(id);
+            pending.reject(new WsBridgeError(parsed.kind, parsed.message));
+          }
+        }
+        return;
+      }
       case "active_project_changed": {
         // Server-initiated event — no correlation id. Already delivered
         // to every `onMessage` handler above (which is where
@@ -967,7 +1085,8 @@ export class WsBridgeClient {
       case "project_links_result":
       case "project_link_result":
       case "project_link_deleted":
-      case "planflow_result": {
+      case "planflow_result":
+      case "auto_run_result": {
         const id = parsed.id;
         if (id !== undefined) {
           const pending = this.pending.get(id);

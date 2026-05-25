@@ -148,6 +148,16 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "project_link_list",
     "project_link_set",
     "project_link_delete",
+    // T19.35 Phase B — auto-run queue control plane. Five operations:
+    // seed a new queue, stop it (kills the current PTY + sets state=stopped),
+    // pause/resume it, and query its current state. The server-side
+    // orchestrator's own 20-second tick loop then drives the queue without
+    // any further client interaction — Phase C wires the desktop thin client.
+    "auto_run_start",
+    "auto_run_stop",
+    "auto_run_pause",
+    "auto_run_resume",
+    "auto_run_status",
 ];
 
 /// Client → server frame.
@@ -503,10 +513,94 @@ pub enum ClientMessage {
         service: String,
         external_id: String,
     },
+
+    // ---- T19.35 Phase B: auto-run queue control plane ----
+    //
+    // Five frames let the desktop seed and drive a server-side auto-run
+    // queue. `external_id` (the PlanFlow project UUID) is NOT sent by the
+    // client — the agent resolves it from `project_links WHERE service='planflow'`
+    // to prevent a client from impersonating an arbitrary PlanFlow project.
+    //
+    // Success replies: `auto_run_result { id, data: <queue-json> }`.
+    // Failure replies: `auto_run_error { id, kind, message }`.
+    //
+    // Note: the agent's orchestrator tick loop (Phase A) picks up the
+    // seeded queue on its next 20-second beat — no synchronous dispatch
+    // is triggered from the WS handler itself. Phase C (desktop) polls
+    // `auto_run_status` for UI updates; a future Phase B.2 may add a
+    // server-push `auto_run_event` broadcast (noted in dispatch.rs).
+    /// Seed a new auto-run queue for a project. The agent resolves the
+    /// PlanFlow `external_id` from `project_links WHERE service='planflow'`;
+    /// if none exists the reply is `auto_run_error { kind: "not_found" }`.
+    ///
+    /// `mode` must be one of: `manual`, `auto-merge`, `pr`, `merge-master`, `none`.
+    /// `on_failure` must be one of: `stop`, `continue`.
+    /// `start_at`: optional epoch-ms; omit (or null) to start immediately.
+    /// `deadline_at`: optional epoch-ms hard stop; omit for no deadline.
+    /// `pacing_minutes`: minutes between task completions (0 = back-to-back).
+    AutoRunStart {
+        #[serde(default)]
+        id: Option<String>,
+        /// Cloud-agent project UUID (the `projects.id` column).
+        project_id: String,
+        /// Number of task completions requested.
+        target_count: i64,
+        /// Start mode — `manual`, `auto-merge`, `pr`, `merge-master`, `none`.
+        mode: String,
+        /// Epoch-ms to begin dispatching; `null` / absent means "start now".
+        #[serde(default)]
+        start_at: Option<i64>,
+        /// Minutes between task completions (`0` = back-to-back).
+        #[serde(default)]
+        pacing_minutes: Option<f64>,
+        /// Epoch-ms hard deadline; `null` / absent means no deadline.
+        #[serde(default)]
+        deadline_at: Option<i64>,
+        /// Failure policy — `stop` | `continue`.
+        #[serde(default = "default_on_failure")]
+        on_failure: String,
+    },
+    /// Stop the auto-run queue for a project. The current PTY session
+    /// (if any) is killed immediately; the queue row is set to `stopped`
+    /// so history is preserved. Idempotent — stopping an already-stopped
+    /// or absent queue is not an error.
+    AutoRunStop {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    /// Pause the auto-run queue. The current task (if any) keeps running
+    /// in its PTY; no new tasks are dispatched until `auto_run_resume`.
+    /// Mirrors `pauseAutoRun` in `src/stores/autoRunQueue.ts`.
+    AutoRunPause {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    /// Resume a paused auto-run queue. Sets state to `running` (if a
+    /// task is currently mid-flight) or `waiting` with
+    /// `next_dispatch_at = now` so the orchestrator picks up immediately
+    /// on its next tick. Mirrors `resumeAutoRun`.
+    AutoRunResume {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
+    /// Fetch the current auto-run queue state for a project.
+    /// Replies with `auto_run_result { data: null }` when no queue exists.
+    AutoRunStatus {
+        #[serde(default)]
+        id: Option<String>,
+        project_id: String,
+    },
 }
 
 fn default_link_metadata() -> Value {
     serde_json::json!({})
+}
+
+fn default_on_failure() -> String {
+    "stop".to_string()
 }
 
 /// Server → client frame.
@@ -717,6 +811,37 @@ pub enum ServerMessage {
         id: Option<String>,
     },
 
+    // ---- T19.35 Phase B: auto-run queue replies ----
+    //
+    // `auto_run_result` carries the full queue JSON on success (or
+    // `data: null` for `auto_run_status` when no queue exists).  It
+    // mirrors the `planflow_result` shape so the Phase C desktop client
+    // can parse both with the same branch. `auto_run_error` mirrors
+    // `planflow_error` — `kind` is a stable `snake_case` discriminator
+    // (`not_found`, `invalid_args`, `internal`) the desktop can branch on.
+    //
+    // Note: server-push `auto_run_event` (for live UI updates without
+    // polling) is out of scope for Phase B — the client polls
+    // `auto_run_status`. The natural plug-in point would mirror the
+    // `forward_stats` broadcaster in `dispatch.rs`.
+    /// Response to all five `auto_run_*` requests on success.
+    /// `data` is the full `AutoRunQueue` serialized to JSON, or `null`
+    /// for `auto_run_status` when no queue exists for the project.
+    AutoRunResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        data: Value,
+    },
+    /// Failure reply for any `auto_run_*` request.
+    /// `kind` is a stable `snake_case` discriminator the desktop can
+    /// branch on without parsing `message`.
+    AutoRunError {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        kind: String,
+        message: String,
+    },
+
     // ---- T19.32: cloud-agent project_links replies ----
     //
     // Failures share the generic `Error` envelope (kinds: `not_found`
@@ -853,6 +978,27 @@ impl ServerMessage {
             kind: kind.into(),
             message: message.into(),
             status,
+        }
+    }
+
+    /// Convenience: auto-run control-plane success reply (T19.35 Phase B).
+    ///
+    /// `data` is the full `AutoRunQueue` serialised to JSON, or
+    /// `Value::Null` for `auto_run_status` when no queue exists.
+    pub fn auto_run_result(id: Option<String>, data: Value) -> Self {
+        Self::AutoRunResult { id, data }
+    }
+
+    /// Convenience: auto-run control-plane error reply (T19.35 Phase B).
+    pub fn auto_run_error(
+        id: Option<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::AutoRunError {
+            id,
+            kind: kind.into(),
+            message: message.into(),
         }
     }
 }
@@ -1056,6 +1202,136 @@ mod tests {
         assert!(
             !json.contains("session_id"),
             "generic error must not carry session_id, got {json}"
+        );
+    }
+
+    // ---- T19.35 Phase B: auto-run protocol tests ----
+
+    #[test]
+    fn parses_auto_run_start_minimal() {
+        let raw =
+            r#"{"type":"auto_run_start","id":"r","project_id":"p1","target_count":3,"mode":"pr"}"#;
+        let msg: ClientMessage = serde_json::from_str(raw).expect("parse");
+        match msg {
+            ClientMessage::AutoRunStart {
+                id,
+                project_id,
+                target_count,
+                mode,
+                start_at,
+                pacing_minutes,
+                deadline_at,
+                on_failure,
+            } => {
+                assert_eq!(id.as_deref(), Some("r"));
+                assert_eq!(project_id, "p1");
+                assert_eq!(target_count, 3);
+                assert_eq!(mode, "pr");
+                assert!(start_at.is_none());
+                assert!(pacing_minutes.is_none());
+                assert!(deadline_at.is_none());
+                // default on_failure = "stop"
+                assert_eq!(on_failure, "stop");
+            }
+            other => panic!("expected AutoRunStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_auto_run_start_full() {
+        let raw = r#"{"type":"auto_run_start","project_id":"p1","target_count":5,"mode":"auto-merge","start_at":1700000000000,"pacing_minutes":2.5,"deadline_at":1700003600000,"on_failure":"continue"}"#;
+        let msg: ClientMessage = serde_json::from_str(raw).expect("parse");
+        match msg {
+            ClientMessage::AutoRunStart {
+                target_count,
+                mode,
+                start_at,
+                pacing_minutes,
+                deadline_at,
+                on_failure,
+                ..
+            } => {
+                assert_eq!(target_count, 5);
+                assert_eq!(mode, "auto-merge");
+                assert_eq!(start_at, Some(1_700_000_000_000));
+                assert!((pacing_minutes.unwrap() - 2.5).abs() < f64::EPSILON);
+                assert_eq!(deadline_at, Some(1_700_003_600_000));
+                assert_eq!(on_failure, "continue");
+            }
+            other => panic!("expected AutoRunStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_auto_run_stop() {
+        let raw = r#"{"type":"auto_run_stop","id":"s","project_id":"p2"}"#;
+        let msg: ClientMessage = serde_json::from_str(raw).expect("parse");
+        assert!(matches!(
+            msg,
+            ClientMessage::AutoRunStop {
+                id: Some(_),
+                project_id,
+            } if project_id == "p2"
+        ));
+    }
+
+    #[test]
+    fn parses_auto_run_pause_and_resume() {
+        for type_str in ["auto_run_pause", "auto_run_resume"] {
+            let raw = format!(r#"{{"type":"{type_str}","project_id":"p3"}}"#);
+            let msg: ClientMessage = serde_json::from_str(&raw).expect("parse");
+            match msg {
+                ClientMessage::AutoRunPause { project_id, .. }
+                | ClientMessage::AutoRunResume { project_id, .. } => {
+                    assert_eq!(project_id, "p3");
+                }
+                other => panic!("expected Pause/Resume, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_auto_run_status() {
+        let raw = r#"{"type":"auto_run_status","id":"q","project_id":"p4"}"#;
+        let msg: ClientMessage = serde_json::from_str(raw).expect("parse");
+        assert!(matches!(
+            msg,
+            ClientMessage::AutoRunStatus {
+                id: Some(_),
+                project_id,
+            } if project_id == "p4"
+        ));
+    }
+
+    #[test]
+    fn auto_run_result_serializes_with_data() {
+        let msg = ServerMessage::auto_run_result(
+            Some("req-1".into()),
+            serde_json::json!({"state": "running"}),
+        );
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"auto_run_result""#), "got {json}");
+        assert!(json.contains(r#""id":"req-1""#), "got {json}");
+        assert!(json.contains(r#""state":"running""#), "got {json}");
+    }
+
+    #[test]
+    fn auto_run_result_with_null_data() {
+        let msg = ServerMessage::auto_run_result(None, serde_json::Value::Null);
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"auto_run_result""#), "got {json}");
+        assert!(json.contains(r#""data":null"#), "got {json}");
+    }
+
+    #[test]
+    fn auto_run_error_serializes_kind_and_message() {
+        let msg = ServerMessage::auto_run_error(Some("r".into()), "not_found", "no planflow link");
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"auto_run_error""#), "got {json}");
+        assert!(json.contains(r#""kind":"not_found""#), "got {json}");
+        assert!(
+            json.contains(r#""message":"no planflow link""#),
+            "got {json}"
         );
     }
 

@@ -12,6 +12,24 @@
 // and that no other user holds. That way a chain T1.5 → T1.6 → T1.7
 // actually walks forward as each predecessor flips to DONE, instead
 // of being frozen to a snapshot of "what was ready at t=0".
+//
+// Phase C — cloud-mode split:
+//
+// In cloud mode the orchestration loop lives on the agent VPS. The
+// desktop's role is limited to:
+//   1. Issuing `auto_run_*` WS frames (start/stop/pause/resume).
+//   2. Polling `auto_run_status` every AUTO_RUN_POLL_INTERVAL_MS and
+//      writing the agent's reply into the same signal that the bar
+//      reads, so the UI reflects agent progress even when the app was
+//      closed mid-run.
+//   3. NOT running `advance()` / `pickAndDispatch()` for cloud queues.
+//
+// The two modes are kept strictly separate by the `origin` field on
+// the in-memory queue object. Local queues have `origin: "local"`;
+// cloud queues have `origin: "cloud"`. The local tick loop skips any
+// queue whose origin is "cloud", so a mode-toggle mid-run cannot
+// accidentally double-drive a queue. The field is optional in the
+// persisted Zod schema so old local-only saves continue to parse.
 
 import { createMemo, createSignal } from "solid-js";
 
@@ -22,10 +40,14 @@ import { createRendererPlanFlowClient } from "../integrations/planflow";
 import { startTask } from "../integrations/planflow/startTask";
 import type { Task } from "../integrations/planflow/schemas";
 import { readTextFile } from "../ipc/files";
+import { ptyKill } from "../ipc/pty";
+import { awaitCloudClient } from "../ipc/transport";
+import { cloudMode } from "../stores/cloudMode";
 import {
   AUTO_RUN_POLL_INTERVAL_MS,
   AUTO_RUN_TASK_TIMEOUT_MS,
   AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS,
+  autoRunQueueSchema,
   createAutoRunQueueId,
   isAutoRunQueueActive,
   type AutoRunFailureMode,
@@ -35,10 +57,30 @@ import {
 } from "../types/autoRunQueue";
 import type { PlanFlowStartMode } from "../types/planflowStartMode";
 
-const [queuesSignal, setQueuesSignal] = createSignal<AutoRunQueuesByProject>({});
+// ──────────────────────────────────────────────────────────────────────────
+// In-memory queue type extended with an `origin` discriminator so the
+// local tick loop can skip cloud-owned queues. The field is stripped
+// before persistence so existing local saves still parse.
+
+type AutoRunOrigin = "local" | "cloud";
+
+/** In-memory queue object. `origin` is NOT persisted (always "local" on
+ *  load from storage; cloud queues are never written to local storage). */
+interface AutoRunQueueMem extends AutoRunQueue {
+  origin: AutoRunOrigin;
+}
+
+// Re-export the public signal type without the internal `origin` field.
+// Components consume `AutoRunQueue` (from types/), not `AutoRunQueueMem`.
+type AutoRunQueuesByProjectMem = Record<string, AutoRunQueueMem>;
+
+const [queuesSignal, setQueuesSignal] = createSignal<AutoRunQueuesByProjectMem>({});
 
 let hydrated = false;
 let tickInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Map of `projectId → polling interval handle` for cloud queues. */
+const cloudPollIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
 export interface StartAutoRunInput {
   workspaceProjectId: string;
@@ -127,16 +169,18 @@ export function isAutoRunActive(projectId: string): boolean {
 
 export const allAutoRunQueues = createMemo<AutoRunQueuesByProject>(() => queuesSignal());
 
-/** Replace one project's slot. Persists asynchronously; the signal
- *  is updated synchronously so reactive UI stays in lockstep. */
+/** Replace one project's slot. In local mode: persists asynchronously;
+ *  the signal is updated synchronously. In cloud mode: only the signal
+ *  is updated (the agent DB is the source of truth). */
 function mutate(
   projectId: string,
-  fn: (current: AutoRunQueue | null) => AutoRunQueue | null,
-): AutoRunQueue | null {
+  fn: (current: AutoRunQueueMem | null) => AutoRunQueueMem | null,
+  { persist = true }: { persist?: boolean } = {},
+): AutoRunQueueMem | null {
   const all = queuesSignal();
   const current = all[projectId] ?? null;
   const next = fn(current);
-  const merged: AutoRunQueuesByProject = {};
+  const merged: AutoRunQueuesByProjectMem = {};
   for (const [key, value] of Object.entries(all)) {
     if (key === projectId && next === null) continue;
     merged[key] = value;
@@ -145,9 +189,23 @@ function mutate(
     merged[projectId] = next;
   }
   setQueuesSignal(merged);
-  void setSetting("planflow_auto_run_queues", merged).catch((err: unknown) => {
-    console.warn("[autoRun] persist failed:", err);
-  });
+
+  // Cloud-mode queues are never written to local app_settings — the
+  // agent DB is authoritative.  Also skip persisting if the caller
+  // explicitly opted out (e.g. cloud poll write-back).
+  const isCloud = next?.origin === "cloud" || current?.origin === "cloud";
+  if (persist && !isCloud) {
+    // Strip the runtime-only `origin` field before persisting by
+    // running each queue through the Zod schema, which doesn't include it.
+    const persistable: AutoRunQueuesByProject = {};
+    for (const [k, v] of Object.entries(merged)) {
+      if (v.origin === "cloud") continue;
+      persistable[k] = autoRunQueueSchema.parse(v);
+    }
+    void setSetting("planflow_auto_run_queues", persistable).catch((err: unknown) => {
+      console.warn("[autoRun] persist failed:", err);
+    });
+  }
   return next;
 }
 
@@ -156,7 +214,14 @@ export async function hydrateAutoRunQueues(): Promise<void> {
   hydrated = true;
   try {
     const stored = await getSetting("planflow_auto_run_queues");
-    setQueuesSignal(stored ?? {});
+    // Attach `origin: "local"` to every rehydrated queue.
+    const withOrigin: AutoRunQueuesByProjectMem = {};
+    if (stored) {
+      for (const [k, v] of Object.entries(stored)) {
+        withOrigin[k] = { ...v, origin: "local" };
+      }
+    }
+    setQueuesSignal(withOrigin);
   } catch (err) {
     console.warn("[autoRun] hydrate failed:", err);
   }
@@ -177,11 +242,93 @@ export function _stopTickForTests(): void {
     clearInterval(tickInterval);
     tickInterval = null;
   }
+  // Also stop any cloud poll intervals.
+  for (const handle of cloudPollIntervals.values()) {
+    clearInterval(handle);
+  }
+  cloudPollIntervals.clear();
 }
 
-export function startAutoRun(input: StartAutoRunInput): AutoRunQueue {
+// ──────────────────────────────────────────────────────────────────────────
+// Cloud-mode helpers
+
+/** Parse the raw agent response into a validated AutoRunQueue. The agent
+ *  returns camelCase keys matching the TS interface exactly. Returns null
+ *  when `data` is null (no queue found). Throws on invalid shape. */
+function parseAgentQueue(data: unknown): AutoRunQueueMem | null {
+  if (data === null || data === undefined) return null;
+  const parsed = autoRunQueueSchema.parse(data);
+  return { ...parsed, origin: "cloud" as const };
+}
+
+/** Write an agent-returned queue into the signal without persisting to
+ *  local storage (cloud queues live in the agent DB). */
+function mutateFromAgent(projectId: string, queue: AutoRunQueueMem | null): void {
+  mutate(projectId, () => queue, { persist: false });
+}
+
+/** Start the status-polling loop for a cloud queue. Idempotent — calling
+ *  while a loop is already running is a no-op. Stops automatically when
+ *  the queue reaches a terminal state (done/stopped/failed/idle). */
+function startCloudPoll(projectId: string): void {
+  if (cloudPollIntervals.has(projectId)) return;
+  const handle = setInterval(() => {
+    void pollCloudQueue(projectId);
+  }, AUTO_RUN_POLL_INTERVAL_MS);
+  cloudPollIntervals.set(projectId, handle);
+}
+
+function stopCloudPoll(projectId: string): void {
+  const handle = cloudPollIntervals.get(projectId);
+  if (handle !== undefined) {
+    clearInterval(handle);
+    cloudPollIntervals.delete(projectId);
+  }
+}
+
+async function pollCloudQueue(projectId: string): Promise<void> {
+  try {
+    const client = await awaitCloudClient();
+    const raw = await client.autoRunStatus(projectId);
+    const queue = parseAgentQueue(raw);
+    mutateFromAgent(projectId, queue);
+    // Stop polling once the queue is in a terminal / inactive state.
+    if (!queue || !isAutoRunQueueActive(queue)) {
+      stopCloudPoll(projectId);
+    }
+  } catch (err) {
+    console.warn(`[autoRun:${projectId}] cloud poll failed:`, err);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Public action API
+
+export async function startAutoRun(input: StartAutoRunInput): Promise<AutoRunQueue> {
+  if (cloudMode()) {
+    // Cloud branch — delegate everything to the agent orchestrator.
+    const client = await awaitCloudClient();
+    const raw = await client.autoRunStart({
+      project_id: input.workspaceProjectId,
+      target_count: input.targetCount,
+      mode: input.mode,
+      start_at: input.startAt,
+      pacing_minutes: input.pacingMinutes,
+      deadline_at: input.deadlineAt,
+      on_failure: input.onFailure,
+    });
+    const queue = parseAgentQueue(raw);
+    if (!queue) {
+      throw new Error("[autoRun] cloud agent returned null for auto_run_start");
+    }
+    mutateFromAgent(input.workspaceProjectId, queue);
+    startCloudPoll(input.workspaceProjectId);
+    return queue;
+  }
+
+  // Local branch — unchanged from original.
   const now = Date.now();
-  const queue: AutoRunQueue = {
+  const queue: AutoRunQueueMem = {
     id: createAutoRunQueueId(),
     projectId: input.workspaceProjectId,
     externalId: input.externalId,
@@ -189,6 +336,7 @@ export function startAutoRun(input: StartAutoRunInput): AutoRunQueue {
     completedCount: 0,
     currentTaskId: null,
     currentBranchName: null,
+    currentSessionId: null,
     verifyStartedAt: null,
     mode: input.mode,
     startAt: input.startAt,
@@ -200,6 +348,7 @@ export function startAutoRun(input: StartAutoRunInput): AutoRunQueue {
     nextDispatchAt: input.startAt && input.startAt > now ? input.startAt : null,
     history: [],
     createdAt: now,
+    origin: "local",
   };
   mutate(input.workspaceProjectId, () => queue);
   ensureTickStarted();
@@ -209,7 +358,20 @@ export function startAutoRun(input: StartAutoRunInput): AutoRunQueue {
   return queue;
 }
 
-export function pauseAutoRun(projectId: string): void {
+export async function pauseAutoRun(projectId: string): Promise<void> {
+  if (cloudMode()) {
+    try {
+      const client = await awaitCloudClient();
+      const raw = await client.autoRunPause(projectId);
+      const queue = parseAgentQueue(raw);
+      mutateFromAgent(projectId, queue);
+    } catch (err) {
+      console.warn(`[autoRun:${projectId}] cloud pause failed:`, err);
+    }
+    return;
+  }
+
+  // Local branch — unchanged.
   mutate(projectId, (current) => {
     if (!current) return current;
     if (!isAutoRunQueueActive(current)) return current;
@@ -217,7 +379,23 @@ export function pauseAutoRun(projectId: string): void {
   });
 }
 
-export function resumeAutoRun(projectId: string): void {
+export async function resumeAutoRun(projectId: string): Promise<void> {
+  if (cloudMode()) {
+    try {
+      const client = await awaitCloudClient();
+      const raw = await client.autoRunResume(projectId);
+      const queue = parseAgentQueue(raw);
+      mutateFromAgent(projectId, queue);
+      if (queue && isAutoRunQueueActive(queue)) {
+        startCloudPoll(projectId);
+      }
+    } catch (err) {
+      console.warn(`[autoRun:${projectId}] cloud resume failed:`, err);
+    }
+    return;
+  }
+
+  // Local branch — unchanged.
   mutate(projectId, (current) => {
     if (!current) return current;
     if (current.state !== "paused") return current;
@@ -228,7 +406,21 @@ export function resumeAutoRun(projectId: string): void {
   });
 }
 
-export function stopAutoRun(projectId: string): void {
+export async function stopAutoRun(projectId: string): Promise<void> {
+  if (cloudMode()) {
+    try {
+      const client = await awaitCloudClient();
+      const raw = await client.autoRunStop(projectId);
+      const queue = parseAgentQueue(raw);
+      mutateFromAgent(projectId, queue);
+      stopCloudPoll(projectId);
+    } catch (err) {
+      console.warn(`[autoRun:${projectId}] cloud stop failed:`, err);
+    }
+    return;
+  }
+
+  // Local branch — unchanged.
   mutate(projectId, (current) => {
     if (!current) return current;
     return {
@@ -240,11 +432,18 @@ export function stopAutoRun(projectId: string): void {
 }
 
 export function dismissAutoRun(projectId: string): void {
-  mutate(projectId, (current) => {
-    if (!current) return current;
-    if (isAutoRunQueueActive(current)) return current;
-    return null;
-  });
+  // Dismiss is UI-only — stop cloud polling and clear signal, no WS frame
+  // needed (the agent keeps its history row regardless).
+  stopCloudPoll(projectId);
+  mutate(
+    projectId,
+    (current) => {
+      if (!current) return current;
+      if (isAutoRunQueueActive(current)) return current;
+      return null;
+    },
+    { persist: !cloudMode() },
+  );
 }
 
 async function tick(): Promise<void> {
@@ -252,6 +451,8 @@ async function tick(): Promise<void> {
   const entries = Object.entries(all);
   for (const [projectId, queue] of entries) {
     if (!isAutoRunQueueActive(queue)) continue;
+    // Cloud queues are driven by the agent — never advance them locally.
+    if (queue.origin === "cloud") continue;
     try {
       await advance(projectId, queue);
     } catch (err) {
@@ -260,7 +461,11 @@ async function tick(): Promise<void> {
   }
 }
 
-async function advance(projectId: string, queue: AutoRunQueue): Promise<void> {
+async function advance(projectId: string, queue: AutoRunQueueMem): Promise<void> {
+  // Double-check: never dispatch a cloud-origin queue from the local loop,
+  // even if called directly (e.g. from resumeAutoRun's local branch).
+  if (queue.origin === "cloud") return;
+
   const now = Date.now();
 
   if (queue.state === "scheduled") {
@@ -300,7 +505,7 @@ async function advance(projectId: string, queue: AutoRunQueue): Promise<void> {
   }
 }
 
-async function pollRunning(projectId: string, queue: AutoRunQueue): Promise<void> {
+async function pollRunning(projectId: string, queue: AutoRunQueueMem): Promise<void> {
   const taskId = queue.currentTaskId;
   if (!taskId) {
     // No task in flight — re-trigger the picker. Happens when the
@@ -339,6 +544,14 @@ function completeCurrent(
   startedAt: number,
 ): void {
   const finishedAt = Date.now();
+  // Capture the just-finished task's headless PTY id BEFORE the mutate
+  // clears it. Every branch except `verifying_merge` drops the session
+  // id from the queue; the kill below tears down the matching PTY on
+  // the backend so we don't leak a claude process per task. Without
+  // this, long auto-run runs piled up dozens of orphan claudes on the
+  // cloud-agent VPS, exhausted its RAM, and made subsequent dispatches
+  // silently fail to spawn.
+  const previousSessionId = queuesSignal()[projectId]?.currentSessionId ?? null;
   mutate(projectId, (q) => {
     if (!q) return q;
     const entry: AutoRunHistoryEntry = { taskId, status, startedAt, finishedAt };
@@ -352,6 +565,7 @@ function completeCurrent(
         nextDispatchAt: null,
         currentTaskId: null,
         currentBranchName: null,
+        currentSessionId: null,
         currentTaskStartedAt: null,
         verifyStartedAt: null,
       };
@@ -394,6 +608,7 @@ function completeCurrent(
         nextDispatchAt: null,
         currentTaskId: null,
         currentBranchName: null,
+        currentSessionId: null,
         currentTaskStartedAt: null,
         verifyStartedAt: null,
       };
@@ -408,12 +623,24 @@ function completeCurrent(
       nextDispatchAt: pacingMs > 0 ? finishedAt + pacingMs : null,
       currentTaskId: null,
       currentBranchName: null,
+      currentSessionId: null,
       currentTaskStartedAt: null,
       verifyStartedAt: null,
     };
   });
 
   const updated = queuesSignal()[projectId];
+
+  // Reap the just-finished task's PTY when the mutate cleared its
+  // session id. verifying_merge keeps the id intact (the PR check
+  // may still want to inspect the agent's last words), so we only
+  // kill when the queue actually moved past this task.
+  if (previousSessionId !== null && updated?.currentSessionId !== previousSessionId) {
+    void ptyKill(previousSessionId).catch((err) => {
+      console.warn(`[autoRun:${projectId}] ptyKill ${previousSessionId.slice(0, 8)} failed:`, err);
+    });
+  }
+
   if (updated && updated.state === "running") {
     void pickAndDispatch(projectId);
   }
@@ -435,6 +662,8 @@ function finalizeOnDeadline(projectId: string): void {
 async function pickAndDispatch(projectId: string): Promise<void> {
   const queue = queuesSignal()[projectId];
   if (!queue || queue.state !== "running") return;
+  // Guard: local dispatch must never run for cloud queues.
+  if (queue.origin === "cloud") return;
 
   // Re-query the task list at the dispatch boundary so we honor the
   // *current* dependency graph. A predecessor that just flipped to
@@ -477,6 +706,7 @@ async function pickAndDispatch(projectId: string): Promise<void> {
     };
   });
 
+  console.warn(`[autoRun:${projectId}] dispatch START taskId=${taskId}`);
   try {
     const client = createRendererPlanFlowClient({ cloudProjectId: queue.projectId });
     const result = await startTask({
@@ -486,15 +716,28 @@ async function pickAndDispatch(projectId: string): Promise<void> {
       taskId,
       cliName: "claude",
       mode: queue.mode,
+      // Auto-run owns the dispatch. Spawn the CLI off-layout so a
+      // queue of 5+ tasks doesn't pile pane after pane into the
+      // visible grid; the Auto-run bar's "Open" button surfaces a
+      // running task's PTY when the user wants to peek.
+      headless: true,
     });
-    // Stash the branch name so the verify_merge step can look up the
-    // PR by head. `null` is fine — that path just skips verification.
+    console.warn(
+      `[autoRun:${projectId}] dispatch OK taskId=${taskId} sessionId=${result.sessionId} branch=${result.branchName}`,
+    );
+    // Stash the branch name + headless session id. `null` for either
+    // field is fine — verify_merge just skips its PR check, and the
+    // bar hides the "Open" button when there's no session to attach.
     mutate(projectId, (q) => {
       if (!q) return q;
-      return { ...q, currentBranchName: result.branchName };
+      return {
+        ...q,
+        currentBranchName: result.branchName,
+        currentSessionId: result.sessionId,
+      };
     });
   } catch (err) {
-    console.warn(`[autoRun:${projectId}] dispatch failed for ${taskId}:`, err);
+    console.warn(`[autoRun:${projectId}] dispatch FAILED for ${taskId}:`, err);
     completeCurrent(projectId, taskId, "failed", Date.now());
   }
 }
@@ -558,7 +801,7 @@ function parseOriginRepo(config: string): string | null {
   return null;
 }
 
-async function pollMergeStatus(projectId: string, queue: AutoRunQueue): Promise<void> {
+async function pollMergeStatus(projectId: string, queue: AutoRunQueueMem): Promise<void> {
   const verifyStartedAt = queue.verifyStartedAt ?? Date.now();
   const branch = queue.currentBranchName;
   // Without a branch name we can't look the PR up at all — short-circuit
@@ -612,6 +855,11 @@ async function pollMergeStatus(projectId: string, queue: AutoRunQueue): Promise<
 /** Move out of verifying_merge: bump completedCount, decide whether
  *  to enter pacing or dispatch the next task immediately. */
 function finishVerifyAdvance(projectId: string): void {
+  // Same PTY-reap dance as `completeCurrent` — the verifying_merge
+  // state keeps the headless session id alive across the PR check;
+  // now that we've decided the task is truly done, kill the agent
+  // process so it doesn't camp on cloud-agent RAM forever.
+  const previousSessionId = queuesSignal()[projectId]?.currentSessionId ?? null;
   mutate(projectId, (q) => {
     if (!q || q.state !== "verifying_merge") return q;
     const completedCount = q.completedCount + 1;
@@ -624,6 +872,7 @@ function finishVerifyAdvance(projectId: string): void {
         nextDispatchAt: null,
         currentTaskId: null,
         currentBranchName: null,
+        currentSessionId: null,
         currentTaskStartedAt: null,
         verifyStartedAt: null,
       };
@@ -636,11 +885,22 @@ function finishVerifyAdvance(projectId: string): void {
       nextDispatchAt: pacingMs > 0 ? Date.now() + pacingMs : null,
       currentTaskId: null,
       currentBranchName: null,
+      currentSessionId: null,
       currentTaskStartedAt: null,
       verifyStartedAt: null,
     };
   });
   const updated = queuesSignal()[projectId];
+
+  if (previousSessionId !== null && updated?.currentSessionId !== previousSessionId) {
+    void ptyKill(previousSessionId).catch((err) => {
+      console.warn(
+        `[autoRun:${projectId}] ptyKill (verify-advance) ${previousSessionId.slice(0, 8)} failed:`,
+        err,
+      );
+    });
+  }
+
   if (updated && updated.state === "running") {
     void pickAndDispatch(projectId);
   }

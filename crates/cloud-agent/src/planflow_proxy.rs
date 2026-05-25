@@ -298,11 +298,7 @@ pub fn read_project_token(tokens_dir: &Path, project_id: &str) -> Result<Option<
 /// tempfile, sets `0600`, then renames into place — same pattern as
 /// [`crate::pair::write_pairing_token`] so a concurrent reader never
 /// sees a half-written file.
-pub fn write_project_token(
-    tokens_dir: &Path,
-    project_id: &str,
-    token: &str,
-) -> Result<(), String> {
+pub fn write_project_token(tokens_dir: &Path, project_id: &str, token: &str) -> Result<(), String> {
     let Some(final_path) = token_file_path(tokens_dir, project_id) else {
         return Err(format!("invalid project id: {project_id}"));
     };
@@ -480,7 +476,15 @@ pub async fn handle_list_tasks(
         Some(s) if !s.is_empty() => vec![("status", s)],
         _ => Vec::new(),
     };
-    proxy_get(state, out_tx, id, &path, &query, cloud_project_id.as_deref()).await;
+    proxy_get(
+        state,
+        out_tx,
+        id,
+        &path,
+        &query,
+        cloud_project_id.as_deref(),
+    )
+    .await;
 }
 
 pub async fn handle_list_active_work(
@@ -703,9 +707,14 @@ pub async fn handle_update_task_status(
 
     let path = format!("/projects/{}/tasks/bulk-status", urlencode(&project_id));
     let payload = json!({ "taskIds": [task_uuid], "status": status });
-    let response =
-        proxy_request(state, Method::POST, &path, Some(&payload), cloud_project_id.as_deref())
-            .await;
+    let response = proxy_request(
+        state,
+        Method::POST,
+        &path,
+        Some(&payload),
+        cloud_project_id.as_deref(),
+    )
+    .await;
 
     match response {
         Ok(value) => send(out_tx, &ServerMessage::planflow_result(id, value)).await,
@@ -762,22 +771,125 @@ pub async fn handle_token_set(
     }
 }
 
+// ---------- Orchestrator-facing public methods ----------
+
+impl PlanflowState {
+    /// List all tasks for a PlanFlow project. The `cloud_project_id` is
+    /// the Work Station workspace project id used to look up the per-project
+    /// PlanFlow API token. Returns the unwrapped `data` field from PlanFlow's
+    /// response envelope (typically `{ tasks: [...] }`).
+    ///
+    /// Called by the auto-run orchestrator on every tick to get a fresh
+    /// view of the task graph — dependency resolution requires seeing which
+    /// tasks have flipped to DONE since the last dispatch.
+    pub async fn list_tasks(
+        &self,
+        planflow_project_id: &str,
+        cloud_project_id: &str,
+    ) -> Result<serde_json::Value, ProxyError> {
+        let path = format!("/projects/{}/tasks", urlencode(planflow_project_id));
+        proxy_request(
+            self,
+            reqwest::Method::GET,
+            &path,
+            None,
+            Some(cloud_project_id),
+        )
+        .await
+    }
+
+    /// POST `{ action: "start" }` to PlanFlow's work endpoint for
+    /// `task_id`. Returns the unwrapped response data (branch name and
+    /// related fields). The orchestrator calls this after `pickNextTaskId`
+    /// selects a task and before spawning the PTY.
+    pub async fn start_work(
+        &self,
+        planflow_project_id: &str,
+        task_id: &str,
+        cloud_project_id: &str,
+    ) -> Result<serde_json::Value, ProxyError> {
+        let path = format!(
+            "/projects/{}/tasks/{}/work",
+            urlencode(planflow_project_id),
+            urlencode(task_id)
+        );
+        let payload = serde_json::json!({ "action": "start" });
+        proxy_request(
+            self,
+            reqwest::Method::POST,
+            &path,
+            Some(&payload),
+            Some(cloud_project_id),
+        )
+        .await
+    }
+
+    /// Bulk-update the status of `task_id` within `planflow_project_id`.
+    /// `status` must be one of PlanFlow's canonical values: `TODO`,
+    /// `IN_PROGRESS`, `DONE`, `DROPPED`.
+    ///
+    /// The orchestrator uses this to flip a timed-out or failed task back
+    /// to `TODO` or to `DROPPED` depending on `on_failure` policy — though
+    /// in Phase A we don't actively mutate task status. Left public so
+    /// Phase D can call it without adding new proxy methods.
+    // Phase D timeout/failure handling calls this. No callers yet in Phase A.
+    #[allow(dead_code)]
+    pub async fn update_task_status(
+        &self,
+        planflow_project_id: &str,
+        task_id: &str,
+        status: &str,
+        cloud_project_id: &str,
+    ) -> Result<serde_json::Value, ProxyError> {
+        // Resolve to UUID if the caller passed a human-readable id
+        // (e.g. "T1.5") — mirrors the WS handler's identical logic.
+        let task_uuid = if looks_like_uuid(task_id) {
+            task_id.to_string()
+        } else {
+            resolve_task_uuid(self, planflow_project_id, task_id, Some(cloud_project_id)).await?
+        };
+
+        let path = format!(
+            "/projects/{}/tasks/bulk-status",
+            urlencode(planflow_project_id)
+        );
+        let payload = serde_json::json!({ "taskIds": [task_uuid], "status": status });
+        proxy_request(
+            self,
+            reqwest::Method::POST,
+            &path,
+            Some(&payload),
+            Some(cloud_project_id),
+        )
+        .await
+    }
+}
+
 // ---------- HTTP plumbing ----------
 
-#[derive(Debug)]
-enum ProxyError {
+/// Errors from PlanFlow proxy requests.
+///
+/// `pub` so the auto-run orchestrator can match on specific variants
+/// (e.g. `NoCredential`) without accessing private internals. The
+/// `Display` impl maps each variant to a human-readable message
+/// consistent with the `kind` strings sent in `planflow_error` WS frames.
+#[derive(Debug, thiserror::Error)]
+pub enum ProxyError {
+    #[error("PlanFlow API token is not configured on the cloud-agent")]
     NoCredential,
+    #[error("credential store: {0}")]
     Credential(String),
+    #[error("network error: {0}")]
     Network(String),
+    #[error("request timed out")]
     Timeout,
     /// Non-2xx response — body is captured for the error frame so the
     /// PWA can show the upstream message verbatim if it wants.
-    Upstream {
-        status: u16,
-        body: String,
-    },
+    #[error("upstream HTTP {status}: {body}")]
+    Upstream { status: u16, body: String },
     /// PlanFlow's envelope didn't parse — almost always a server-side
     /// breaking change; surfacing it loudly is the right call.
+    #[error("decode error: {0}")]
     Decode(String),
 }
 
@@ -1107,11 +1219,7 @@ mod tests {
         // second list — covers the cache contract without asserting on
         // wiremock call counts (matchers above already constrain shape).
         assert_eq!(
-            state
-                .cached_org_id
-                .lock()
-                .unwrap()
-                .as_deref(),
+            state.cached_org_id.lock().unwrap().as_deref(),
             Some("org-1")
         );
     }
@@ -1398,8 +1506,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tokens_dir_path(tmp.path());
         for bad in ["", "../etc/passwd", "p/1", "p\\1", "..", ".", "p 1", "p\n"] {
-            assert!(token_file_path(&dir, bad).is_none(), "{bad:?} should be rejected");
-            assert!(write_project_token(&dir, bad, "x").is_err(), "write {bad:?}");
+            assert!(
+                token_file_path(&dir, bad).is_none(),
+                "{bad:?} should be rejected"
+            );
+            assert!(
+                write_project_token(&dir, bad, "x").is_err(),
+                "write {bad:?}"
+            );
             assert!(read_project_token(&dir, bad).is_err(), "read {bad:?}");
             assert!(delete_project_token(&dir, bad).is_err(), "delete {bad:?}");
         }
@@ -1414,10 +1528,7 @@ mod tests {
 
         let loader = make_token_loader(Some("from-config".to_string()), Some(dir.clone()));
         // Per-project file wins for project A.
-        assert_eq!(
-            loader(Some("pA")).unwrap().as_deref(),
-            Some("from-file-A")
-        );
+        assert_eq!(loader(Some("pA")).unwrap().as_deref(), Some("from-file-A"));
         // Project without a file falls back to env.
         assert_eq!(loader(Some("pB")).unwrap().as_deref(), Some("from-env"));
         // Calls without a project id also fall back to env.
@@ -1426,14 +1537,8 @@ mod tests {
         std::env::remove_var("PLANFLOW_API_TOKEN");
         // With env cleared, project A still uses its file; project B
         // drops to the config-pinned token.
-        assert_eq!(
-            loader(Some("pA")).unwrap().as_deref(),
-            Some("from-file-A")
-        );
-        assert_eq!(
-            loader(Some("pB")).unwrap().as_deref(),
-            Some("from-config")
-        );
+        assert_eq!(loader(Some("pA")).unwrap().as_deref(), Some("from-file-A"));
+        assert_eq!(loader(Some("pB")).unwrap().as_deref(), Some("from-config"));
     }
 
     /// T19.34 acceptance: two projects with two different keychain
@@ -1464,11 +1569,7 @@ mod tests {
         // Use the production loader so this also covers the wiring in
         // PlanflowState::new (minus the env var read, which the unit
         // test above covers).
-        let state = PlanflowState::for_test_with_dir(
-            server.uri(),
-            None,
-            tmp.path().to_path_buf(),
-        );
+        let state = PlanflowState::for_test_with_dir(server.uri(), None, tmp.path().to_path_buf());
 
         // Stage per-project tokens via the WS handler so the test
         // exercises the full set+lookup loop.
@@ -1553,11 +1654,8 @@ mod tests {
     #[tokio::test]
     async fn token_set_empty_string_clears_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = PlanflowState::for_test_with_dir(
-            "http://127.0.0.1:1",
-            None,
-            tmp.path().to_path_buf(),
-        );
+        let state =
+            PlanflowState::for_test_with_dir("http://127.0.0.1:1", None, tmp.path().to_path_buf());
         let (tx, mut rx) = channel();
         handle_token_set(&state, &tx, None, "p".to_string(), "tok".to_string()).await;
         let _ = collect_one(&mut rx).await;
@@ -1580,11 +1678,8 @@ mod tests {
     #[tokio::test]
     async fn token_set_rejects_unsafe_project_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = PlanflowState::for_test_with_dir(
-            "http://127.0.0.1:1",
-            None,
-            tmp.path().to_path_buf(),
-        );
+        let state =
+            PlanflowState::for_test_with_dir("http://127.0.0.1:1", None, tmp.path().to_path_buf());
         let (tx, mut rx) = channel();
         handle_token_set(
             &state,
@@ -1609,5 +1704,130 @@ mod tests {
         let frame = collect_one(&mut rx).await;
         assert_eq!(frame["type"], "planflow_error");
         assert_eq!(frame["kind"], "credential");
+    }
+
+    // ---------- Orchestrator-facing public method tests ----------
+
+    /// `list_tasks` unwraps the PlanFlow envelope and returns the inner
+    /// `data` value directly — callers don't need to peel the wrapper.
+    #[tokio::test]
+    async fn list_tasks_method_returns_unwrapped_data() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/proj-x/tasks"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": { "tasks": [{ "taskId": "T1.1", "status": "TODO" }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = PlanflowState::for_test(server.uri(), token_loader(Some("tok")));
+        let result = state
+            .list_tasks("proj-x", "ws-proj")
+            .await
+            .expect("list_tasks");
+        assert!(result["tasks"].is_array());
+        assert_eq!(result["tasks"][0]["taskId"], "T1.1");
+    }
+
+    /// `start_work` sends `{ action: "start" }` to the correct path and
+    /// returns the unwrapped response.
+    #[tokio::test]
+    async fn start_work_method_posts_action_start() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/projects/proj-x/tasks/task-1/work"))
+            .and(wiremock::matchers::body_json(json!({ "action": "start" })))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": { "branchName": "feature/t1-1" }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = PlanflowState::for_test(server.uri(), token_loader(Some("tok")));
+        let result = state
+            .start_work("proj-x", "task-1", "ws-proj")
+            .await
+            .expect("start_work");
+        assert_eq!(result["branchName"], "feature/t1-1");
+    }
+
+    /// `PlanflowState::update_task_status` with a UUID skips the resolve
+    /// round-trip and calls bulk-status directly.
+    #[tokio::test]
+    async fn planflow_state_update_task_status_uuid_skips_resolve() {
+        let server = MockServer::start().await;
+        let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        Mock::given(method("POST"))
+            .and(path("/projects/proj-x/tasks/bulk-status"))
+            .and(wiremock::matchers::body_json(json!({
+                "taskIds": [uuid],
+                "status": "DONE"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": { "tasks": [{ "id": uuid }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = PlanflowState::for_test(server.uri(), token_loader(Some("tok")));
+        let result = state
+            .update_task_status("proj-x", uuid, "DONE", "ws-proj")
+            .await
+            .expect("update_task_status");
+        assert!(result["tasks"].is_array());
+    }
+
+    /// `update_task_status` with a human-readable id ("T1.1") first
+    /// fetches the task list to resolve the UUID, then calls bulk-status.
+    #[tokio::test]
+    async fn update_task_status_human_id_resolves_first() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/proj-x/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": {
+                    "tasks": [{ "taskId": "T1.1", "id": "uuid-t11" }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/projects/proj-x/tasks/bulk-status"))
+            .and(wiremock::matchers::body_json(json!({
+                "taskIds": ["uuid-t11"],
+                "status": "IN_PROGRESS"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": { "tasks": [{ "id": "uuid-t11" }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = PlanflowState::for_test(server.uri(), token_loader(Some("tok")));
+        let result = state
+            .update_task_status("proj-x", "T1.1", "IN_PROGRESS", "ws-proj")
+            .await
+            .expect("update_task_status");
+        assert!(result["tasks"].is_array());
+    }
+
+    /// `list_tasks` surfaces `ProxyError::NoCredential` when the token
+    /// loader returns `None` — same taxonomy as the WS handler path.
+    #[tokio::test]
+    async fn list_tasks_method_no_credential_error() {
+        let state = PlanflowState::for_test("http://127.0.0.1:1", token_loader(None));
+        let err = state
+            .list_tasks("proj-x", "ws-proj")
+            .await
+            .expect_err("should fail with no credential");
+        assert!(matches!(err, ProxyError::NoCredential));
     }
 }

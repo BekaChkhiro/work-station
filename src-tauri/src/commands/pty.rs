@@ -204,6 +204,7 @@ fn spawn_inner(manager: PtyManager, args: SpawnArgs) -> Result<SpawnResponse, Sp
     validate(&args)?;
 
     let startup_commands = args.startup_commands;
+    let command_for_log = args.command.clone();
     let config = SpawnConfig {
         command: args.command,
         args: args.args,
@@ -213,11 +214,20 @@ fn spawn_inner(manager: PtyManager, args: SpawnArgs) -> Result<SpawnResponse, Sp
         rows: args.rows,
     };
 
+    let spawn_start = std::time::Instant::now();
     let id = manager.spawn(config)?;
+    let spawn_elapsed = spawn_start.elapsed();
     let session = manager
         .get(id)
         .ok_or_else(|| SpawnError::internal("spawned session missing from registry"))?;
     spawn_reader(manager.clone(), &session);
+    tracing::info!(
+        target: "pty_spawn",
+        command = %command_for_log,
+        session_id = %id,
+        spawn_ms = u64::try_from(spawn_elapsed.as_millis()).unwrap_or(u64::MAX),
+        "pty_spawn complete"
+    );
 
     // T4.14 — fire startup commands after the reader is broadcasting so
     // their output is captured in scrollback. Failures are logged and

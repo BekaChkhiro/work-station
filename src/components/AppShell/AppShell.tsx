@@ -17,11 +17,28 @@
 // scoped search metadata, etc.) stays out of this file — it just deals
 // in layout trees and sessionIds.
 
-import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } from "solid-js";
+import {
+  For,
+  Show,
+  Suspense,
+  createEffect,
+  createSignal,
+  lazy,
+  onCleanup,
+  onMount,
+  untrack,
+} from "solid-js";
 import type { JSX } from "solid-js";
 import { FileTree } from "../FileTree";
 import { LayoutTree } from "../LayoutTree";
-import { MonacoDiff, MonacoEditor } from "../MonacoEditor";
+// Monaco (~4.6 MB parsed + worker chunks) is split out of the main bundle so
+// cold start doesn't pay for it. The editor tab is opt-in — when the user
+// first switches to it, Vite fetches the chunk and Suspense holds the slot
+// until monaco.editor.create has run.
+const MonacoEditor = lazy(() =>
+  import("../MonacoEditor").then((m) => ({ default: m.MonacoEditor })),
+);
+const MonacoDiff = lazy(() => import("../MonacoEditor").then((m) => ({ default: m.MonacoDiff })));
 import {
   readTextFile,
   writeTextFile,
@@ -1280,62 +1297,78 @@ function EditorWorkspace(props: { projectId: string; projectPath: string | null 
             )}
           </Show>
           <div class="min-h-0 flex-1">
-            <Show
-              when={(() => {
-                const t = activeTabValue();
-                return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "diff"
-                  ? t
-                  : null;
-              })()}
+            <Suspense
               fallback={
-                <MonacoEditor
-                  value={editorValue()}
-                  path={activeTabValue()?.path ?? undefined}
-                  readOnly={isReadOnly()}
-                  onChange={handleEditorChange}
-                />
+                <div
+                  class="ws-editor-tab__loading flex min-h-0 flex-1 items-center justify-center text-sm opacity-60"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading editor…
+                </div>
               }
             >
-              {(t) => (
-                <div class="ws-editor-tab__diff flex min-h-0 flex-1 flex-col">
-                  <div class="ws-editor-tab__diff-toolbar" role="toolbar" aria-label="Diff actions">
-                    <span class="ws-editor-tab__diff-label">
-                      <strong>On disk</strong> ↔ <strong>Your changes</strong>
-                    </span>
-                    <div class="ws-editor-tab__conflict-actions">
-                      <button
-                        type="button"
-                        class="ws-editor-tab__conflict-button"
-                        onClick={() => resolveReload(t().path)}
-                      >
-                        Reload
-                      </button>
-                      <button
-                        type="button"
-                        class="ws-editor-tab__conflict-button"
-                        onClick={() => resolveKeepMine(t().path)}
-                      >
-                        Keep mine
-                      </button>
-                      <button
-                        type="button"
-                        class="ws-editor-tab__conflict-button"
-                        onClick={() => resolveBackToEdit(t().path)}
-                      >
-                        Back to editor
-                      </button>
+              <Show
+                when={(() => {
+                  const t = activeTabValue();
+                  return t?.kind === "text" && t.conflict !== null && t.conflict.mode === "diff"
+                    ? t
+                    : null;
+                })()}
+                fallback={
+                  <MonacoEditor
+                    value={editorValue()}
+                    path={activeTabValue()?.path ?? undefined}
+                    readOnly={isReadOnly()}
+                    onChange={handleEditorChange}
+                  />
+                }
+              >
+                {(t) => (
+                  <div class="ws-editor-tab__diff flex min-h-0 flex-1 flex-col">
+                    <div
+                      class="ws-editor-tab__diff-toolbar"
+                      role="toolbar"
+                      aria-label="Diff actions"
+                    >
+                      <span class="ws-editor-tab__diff-label">
+                        <strong>On disk</strong> ↔ <strong>Your changes</strong>
+                      </span>
+                      <div class="ws-editor-tab__conflict-actions">
+                        <button
+                          type="button"
+                          class="ws-editor-tab__conflict-button"
+                          onClick={() => resolveReload(t().path)}
+                        >
+                          Reload
+                        </button>
+                        <button
+                          type="button"
+                          class="ws-editor-tab__conflict-button"
+                          onClick={() => resolveKeepMine(t().path)}
+                        >
+                          Keep mine
+                        </button>
+                        <button
+                          type="button"
+                          class="ws-editor-tab__conflict-button"
+                          onClick={() => resolveBackToEdit(t().path)}
+                        >
+                          Back to editor
+                        </button>
+                      </div>
+                    </div>
+                    <div class="min-h-0 flex-1">
+                      <MonacoDiff
+                        original={t().conflict?.newContent ?? ""}
+                        modified={t().content}
+                        path={t().path}
+                      />
                     </div>
                   </div>
-                  <div class="min-h-0 flex-1">
-                    <MonacoDiff
-                      original={t().conflict?.newContent ?? ""}
-                      modified={t().content}
-                      path={t().path}
-                    />
-                  </div>
-                </div>
-              )}
-            </Show>
+                )}
+              </Show>
+            </Suspense>
           </div>
         </div>
       </div>

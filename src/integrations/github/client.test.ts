@@ -100,9 +100,7 @@ describe("GitHubClient.getRepo", () => {
     });
 
     await client.getRepo({ owner: "user/x", repo: "repo with space" });
-    expect(observed).toBe(
-      `${GITHUB_DEFAULT_BASE_URL}/repos/user%2Fx/repo%20with%20space`,
-    );
+    expect(observed).toBe(`${GITHUB_DEFAULT_BASE_URL}/repos/user%2Fx/repo%20with%20space`);
   });
 });
 
@@ -256,9 +254,7 @@ describe("GitHubClient.listWorkflowRuns", () => {
       defaultRetry: { attempts: 0 },
     });
     await client.listWorkflowRuns(REF, { workflowId: "ci.yml" });
-    expect(observedPath).toBe(
-      "/repos/BekaChkhiro/work-station/actions/workflows/ci.yml/runs",
-    );
+    expect(observedPath).toBe("/repos/BekaChkhiro/work-station/actions/workflows/ci.yml/runs");
   });
 });
 

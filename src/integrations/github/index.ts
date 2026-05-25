@@ -9,12 +9,7 @@ export type {
 } from "./client";
 export { createRendererGitHubClient, MissingGitHubTokenError } from "./clientFactory";
 export type { RendererGitHubClientOptions } from "./clientFactory";
-export {
-  GitHubApiError,
-  GitHubAuthError,
-  GitHubNotFoundError,
-  GitHubParseError,
-} from "./errors";
+export { GitHubApiError, GitHubAuthError, GitHubNotFoundError, GitHubParseError } from "./errors";
 export type {
   GitHubBranch,
   GitHubCommit,
