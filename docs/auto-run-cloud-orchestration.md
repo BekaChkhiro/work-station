@@ -163,6 +163,20 @@ handlers:
 
 ### Phase D — server-side PR-merge verification
 
+> **Status: Phase D DONE** (cloud-agent + core build, clippy-clean, 219
+> cloud-agent + 137 core tests pass). New `src/github.rs`: per-project GitHub
+> token store (`github_tokens/<project_id>`, 0600, path-jailed) + `github_token_set`
+> WS frame; `parse_origin_repo` (SSH+HTTPS github.com) + `resolve_repo_for_project`
+> (reads `<project.path>/.git/config` on the VPS, cached); a reqwest GitHub client
+> `pr_is_merged` (GET `/repos/{o}/{r}/pulls?state=all&head={o}:{branch}`, optional
+> Bearer, `GITHUB_API_BASE_URL` override for tests). `orchestrator.rs`
+> `poll_merge_status` replaces the Phase A stub — ports `pollMergeStatus` exactly:
+> no-branch / 60-min timeout / no-repo / token-load-error / any-API-error →
+> advance (best-effort, never pins the queue); PR `merged_at != null` → advance;
+> open PR → re-poll next tick. `GithubState` threaded through `spawn_orchestrator`.
+> Token works unauthenticated for public repos. Remaining: surface
+> `github_token_set` in the desktop UI; Phase F (CLI detection); auto_run_update push.
+
 - New per-project **GitHub token store** on the agent, mirroring
   `planflow_tokens/<project_id>` (see `crates/cloud-agent/src/planflow_proxy.rs`).
 - Resolve `owner/repo` from the cloud project's `.git/config` **on the VPS**

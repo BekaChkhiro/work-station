@@ -23,6 +23,7 @@ mod config;
 mod db;
 mod dispatch;
 mod fs;
+mod github;
 mod logging;
 mod pair;
 mod planflow_proxy;
@@ -130,6 +131,13 @@ async fn run(config: Config) -> ExitCode {
         config.state_dir.clone(),
     );
 
+    // T19.35 Phase D — build the GitHub state once at boot. The token
+    // directory lives at `<state_dir>/github_tokens/`. Cloned cheaply
+    // (Arc) per WebSocket connection and into the orchestrator. The
+    // reqwest::Client is re-used across all GitHub API calls made by the
+    // verifying_merge poller so connection pooling benefits apply.
+    let github = github::GithubState::new(&config.state_dir);
+
     // Workspace root for cloud-mode "New Project" flows. Auto-created
     // here so the first create-with-empty-path request doesn't race a
     // bare-filesystem state_dir.
@@ -158,6 +166,7 @@ async fn run(config: Config) -> ExitCode {
         manager.clone(),
         monitor,
         planflow.clone(),
+        github.clone(),
         projects_root.clone(),
         sessions_meta,
         config.listen,
@@ -182,7 +191,11 @@ async fn run(config: Config) -> ExitCode {
     // WebSocket layer so the desktop's `pty_list` can surface sessions
     // the orchestrator spawned. The JoinHandle is stored on the server
     // handle so it is aborted cleanly on SIGTERM / SIGINT.
-    let orch_handle = auto_run::spawn_orchestrator(pool, manager, planflow, projects_root);
+    //
+    // Phase D (T19.35) — `github` is also passed so the orchestrator's
+    // `verifying_merge` poller can load per-project GitHub tokens and
+    // call the GitHub Pulls API directly without any WS round-trip.
+    let orch_handle = auto_run::spawn_orchestrator(pool, manager, planflow, github, projects_root);
     server::attach_orchestrator(&mut handle, orch_handle);
 
     tracing::info!(

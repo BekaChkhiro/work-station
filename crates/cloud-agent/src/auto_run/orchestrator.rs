@@ -57,6 +57,7 @@ use crate::db::auto_run::{
 };
 use crate::db::projects;
 use crate::dispatch::ProjectsRoot;
+use crate::github::{GithubError, GithubState};
 use crate::planflow_proxy::PlanflowState;
 
 /// Polling interval for the orchestrator tick loop.
@@ -73,6 +74,17 @@ pub const AUTO_RUN_POLL_INTERVAL_MS: u64 = 20_000;
 /// `src/types/autoRunQueue.ts`. Generous because a fresh repo +
 /// `pnpm install` can legitimately take 30+ minutes.
 pub const AUTO_RUN_TASK_TIMEOUT_MS: i64 = 90 * 60 * 1000;
+
+/// Maximum time the orchestrator will poll for a PR merge before
+/// giving up and advancing the queue anyway.
+///
+/// Mirrors `AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS = 60 * 60 * 1000` from
+/// `src/types/autoRunQueue.ts`. Prevents the queue from being
+/// permanently pinned by a PR that was closed without merging, or a
+/// GitHub API outage longer than an hour. When the timeout fires the
+/// queue advances optimistically — same as every other "best-effort"
+/// skip path in `pollMergeStatus`.
+pub const AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS: i64 = 60 * 60 * 1000;
 
 /// Short delay between spawning a PTY and writing the start prompt.
 ///
@@ -101,13 +113,17 @@ const PTY_ROWS: u16 = 50;
 /// a single tick is caught and logged; the loop restarts on the next
 /// `AUTO_RUN_POLL_INTERVAL_MS` beat.
 ///
-/// `pool`, `manager`, `planflow`, and `projects_root` are all cheaply
-/// cloneable Arc-wrapped handles; the orchestrator holds its own clones
-/// so the caller can drop its copies without affecting us.
+/// `pool`, `manager`, `planflow`, `github`, and `projects_root` are all
+/// cheaply cloneable Arc-wrapped handles; the orchestrator holds its own
+/// clones so the caller can drop its copies without affecting us.
+///
+/// T19.35 Phase D adds `github` so the `verifying_merge` state can poll
+/// the GitHub Pulls API without any desktop involvement.
 pub fn spawn_orchestrator(
     pool: SqlitePool,
     manager: PtyManager,
     planflow: PlanflowState,
+    github: GithubState,
     projects_root: ProjectsRoot,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -118,7 +134,7 @@ pub fn spawn_orchestrator(
         );
         loop {
             tokio::time::sleep(Duration::from_millis(AUTO_RUN_POLL_INTERVAL_MS)).await;
-            tick(&pool, &manager, &planflow, &projects_root).await;
+            tick(&pool, &manager, &planflow, &github, &projects_root).await;
         }
     })
 }
@@ -133,6 +149,7 @@ async fn tick(
     pool: &SqlitePool,
     manager: &PtyManager,
     planflow: &PlanflowState,
+    github: &GithubState,
     projects_root: &ProjectsRoot,
 ) {
     let queues = match auto_run::list_active(pool).await {
@@ -149,7 +166,7 @@ async fn tick(
 
     for queue in queues {
         let project_id = queue.project_id.clone();
-        if let Err(error) = advance(pool, manager, planflow, projects_root, queue).await {
+        if let Err(error) = advance(pool, manager, planflow, github, projects_root, queue).await {
             tracing::warn!(
                 target: "cloud_agent::auto_run",
                 project_id = %project_id,
@@ -202,13 +219,14 @@ fn log_dispatch_error(project_id: &str, err: AdvanceError) {
 /// - `waiting`   → flip to `running` when `nextDispatchAt` elapses
 ///   (or finalize on deadline).
 /// - `running`   → [`poll_running`].
-/// - `verifying_merge` → [`finish_verify_advance`] (Phase A: immediate;
-///   Phase D replaces this with PR-merge polling).
+/// - `verifying_merge` → [`poll_merge_status`] (Phase D: real PR-merge
+///   poll; Phase A stub replaced here).
 /// - all other states are terminal / paused; no-op.
 async fn advance(
     pool: &SqlitePool,
     manager: &PtyManager,
     planflow: &PlanflowState,
+    github: &GithubState,
     projects_root: &ProjectsRoot,
     queue: AutoRunQueue,
 ) -> Result<(), AdvanceError> {
@@ -264,16 +282,12 @@ async fn advance(
         }
 
         AutoRunState::VerifyingMerge => {
-            // Phase D: replace this block with real PR-merge polling.
-            // Phase A treats verifying_merge as an immediate advance so
-            // the queue keeps moving without GitHub integration.
-            tracing::debug!(
-                target: "cloud_agent::auto_run",
-                project_id = %project_id,
-                "verifying_merge → immediate advance (Phase D TODO: real PR merge check)",
-            );
-            // Phase D TODO: poll GitHub PR merged_at before calling finish_verify_advance.
-            finish_verify_advance(pool, manager, planflow, projects_root, queue).await?;
+            // Phase D: real PR-merge poll. Replaces the Phase A
+            // immediate-advance stub. `poll_merge_status` only calls
+            // `finish_verify_advance` when the merge is confirmed, timed
+            // out, or unresolvable — otherwise it returns `Ok(())` and
+            // lets the next 20-second tick re-poll.
+            poll_merge_status(pool, manager, planflow, github, projects_root, queue).await?;
         }
 
         // Paused: user may resume via a future Phase B frame; the
@@ -556,13 +570,160 @@ async fn complete_current(
     Ok(())
 }
 
+/// Poll the GitHub Pulls API to check whether the current branch's PR
+/// has been merged. Calls [`finish_verify_advance`] when the merge is
+/// confirmed, the 60-minute timeout has elapsed, or the project cannot
+/// be resolved to a GitHub repo. Otherwise returns `Ok(())` so the
+/// orchestrator waits for the next 20-second tick.
+///
+/// Ports `src/stores/autoRunQueue.ts::pollMergeStatus` verbatim:
+///
+/// ```text
+/// no branch               → advance (can't look up without a branch name)
+/// timed out (> 60 min)    → advance (warn + advance, best-effort)
+/// no repo resolution      → advance (not a GitHub repo, or .git missing)
+/// PR with merged_at ≠ null → advance (merge confirmed)
+/// open PR / empty list    → keep polling (return Ok(()))
+/// GitHub error (any)      → advance (best-effort, never pin the queue)
+/// ```
+///
+/// The "advance on error" policy mirrors the TS `catch` block in
+/// `pollMergeStatus` — a missing token, 401, 403, or network blip must
+/// never permanently block an auto-merge queue. The user can always
+/// pause/stop the queue if it misbehaves.
+#[allow(clippy::too_many_lines)]
+async fn poll_merge_status(
+    pool: &SqlitePool,
+    manager: &PtyManager,
+    planflow: &PlanflowState,
+    github: &GithubState,
+    projects_root: &ProjectsRoot,
+    queue: AutoRunQueue,
+) -> Result<(), AdvanceError> {
+    let project_id = &queue.project_id;
+    let verify_started_at = queue.verify_started_at.unwrap_or_else(auto_run::epoch_ms);
+
+    // Without a branch name we can't look the PR up — advance optimistically.
+    let Some(ref branch) = queue.current_branch_name.clone() else {
+        tracing::debug!(
+            target: "cloud_agent::auto_run",
+            project_id = %project_id,
+            "verifying_merge: no branch name; advancing immediately",
+        );
+        return finish_verify_advance(pool, manager, planflow, projects_root, queue).await;
+    };
+
+    // 60-minute timeout: don't pin the queue forever.
+    let elapsed = auto_run::epoch_ms() - verify_started_at;
+    if elapsed > AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS {
+        tracing::warn!(
+            target: "cloud_agent::auto_run",
+            project_id = %project_id,
+            branch = %branch,
+            elapsed_ms = elapsed,
+            "verifying_merge timed out; advancing anyway",
+        );
+        return finish_verify_advance(pool, manager, planflow, projects_root, queue).await;
+    }
+
+    // Resolve the project's filesystem path to read `.git/config`.
+    let Ok(project) = projects::get(pool, project_id).await else {
+        tracing::debug!(
+            target: "cloud_agent::auto_run",
+            project_id = %project_id,
+            "verifying_merge: project not found in DB; advancing",
+        );
+        return finish_verify_advance(pool, manager, planflow, projects_root, queue).await;
+    };
+
+    // Resolve owner/repo from the project's `.git/config`.
+    let project_path = std::path::Path::new(&project.path);
+    let Some((owner, repo)) = crate::github::resolve_repo_for_project(project_path) else {
+        tracing::debug!(
+            target: "cloud_agent::auto_run",
+            project_id = %project_id,
+            path = %project.path,
+            "verifying_merge: not a GitHub repo; advancing",
+        );
+        return finish_verify_advance(pool, manager, planflow, projects_root, queue).await;
+    };
+
+    // Load the per-project GitHub token (optional — public repos work without it).
+    let token = match github.load_token(project_id) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                target: "cloud_agent::auto_run",
+                project_id = %project_id,
+                error = %e,
+                "verifying_merge: failed to load GitHub token; advancing",
+            );
+            return finish_verify_advance(pool, manager, planflow, projects_root, queue).await;
+        }
+    };
+
+    // Call the GitHub Pulls API.
+    let merged = github
+        .pr_is_merged(&owner, &repo, branch, token.as_deref())
+        .await;
+
+    match merged {
+        Ok(true) => {
+            tracing::info!(
+                target: "cloud_agent::auto_run",
+                project_id = %project_id,
+                owner = %owner,
+                repo = %repo,
+                branch = %branch,
+                "PR merged; advancing queue",
+            );
+            finish_verify_advance(pool, manager, planflow, projects_root, queue).await
+        }
+        Ok(false) => {
+            // PR not yet merged — keep polling.
+            tracing::trace!(
+                target: "cloud_agent::auto_run",
+                project_id = %project_id,
+                owner = %owner,
+                repo = %repo,
+                branch = %branch,
+                elapsed_ms = elapsed,
+                "PR not yet merged; will re-poll next tick",
+            );
+            Ok(())
+        }
+        Err(GithubError::Auth(ref msg)) => {
+            // 401/403 — likely a missing or expired token. Best-effort:
+            // advance rather than pin the queue. The user can set a token
+            // via `github_token_set` and restart the queue.
+            tracing::warn!(
+                target: "cloud_agent::auto_run",
+                project_id = %project_id,
+                error = %msg,
+                "verifying_merge: GitHub auth error; advancing (best-effort)",
+            );
+            finish_verify_advance(pool, manager, planflow, projects_root, queue).await
+        }
+        Err(ref e) => {
+            // Network blip, timeout, decode error, etc. — advance rather
+            // than pin the queue. These are transient and will self-heal.
+            tracing::warn!(
+                target: "cloud_agent::auto_run",
+                project_id = %project_id,
+                error = %e,
+                "verifying_merge: GitHub API error; advancing (best-effort)",
+            );
+            finish_verify_advance(pool, manager, planflow, projects_root, queue).await
+        }
+    }
+}
+
 /// Advance out of `verifying_merge`: bump completedCount, decide next
 /// state, reap the PTY.
 ///
-/// Phase A: called immediately after entering verifying_merge (no real
-/// PR poll). Phase D: called after `merged_at` is confirmed (or timeout).
-///
-/// Mirrors `src/stores/autoRunQueue.ts::finishVerifyAdvance`.
+/// Called by [`poll_merge_status`] when the merge is confirmed, the
+/// 60-minute timeout has elapsed, or the project cannot be resolved to a
+/// GitHub repo. Mirrors `src/stores/autoRunQueue.ts::finishVerifyAdvance`.
 ///
 /// `_planflow` and `_projects_root` are retained for Phase B inline
 /// dispatch (see `complete_current` doc comment).
@@ -1378,9 +1539,10 @@ mod tests {
         );
         let manager = PtyManager::new();
         let tmp = tempdir().expect("tmp");
+        let github = crate::github::GithubState::new(tmp.path());
         let projects_root = crate::dispatch::ProjectsRoot::new(tmp.path().to_path_buf());
 
-        advance(&pool, &manager, &planflow, &projects_root, queue)
+        advance(&pool, &manager, &planflow, &github, &projects_root, queue)
             .await
             .expect("advance should not return Err (network errors are swallowed)");
 
@@ -1440,9 +1602,10 @@ mod tests {
         );
         let manager = PtyManager::new();
         let tmp = tempdir().expect("tmp");
+        let github = crate::github::GithubState::new(tmp.path());
         let projects_root = crate::dispatch::ProjectsRoot::new(tmp.path().to_path_buf());
 
-        advance(&pool, &manager, &planflow, &projects_root, queue)
+        advance(&pool, &manager, &planflow, &github, &projects_root, queue)
             .await
             .expect("advance must not propagate network errors");
 
@@ -1495,9 +1658,10 @@ mod tests {
         );
         let manager = PtyManager::new();
         let tmp = tempdir().expect("tmp");
+        let github = crate::github::GithubState::new(tmp.path());
         let projects_root = crate::dispatch::ProjectsRoot::new(tmp.path().to_path_buf());
 
-        advance(&pool, &manager, &planflow, &projects_root, queue)
+        advance(&pool, &manager, &planflow, &github, &projects_root, queue)
             .await
             .expect("advance");
 

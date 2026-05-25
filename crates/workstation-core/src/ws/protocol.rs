@@ -158,6 +158,12 @@ pub const KNOWN_CLIENT_TYPES: &[&str] = &[
     "auto_run_pause",
     "auto_run_resume",
     "auto_run_status",
+    // T19.35 Phase D — drop a per-project GitHub API token on the cloud-agent
+    // so the auto-run orchestrator's `verifying_merge` state can call the
+    // GitHub Pulls API to confirm a PR was merged before dispatching the next
+    // task. An empty `token` clears the file (falls back to unauthenticated,
+    // which works for public repos). Mirrors the `planflow_token_set` frame.
+    "github_token_set",
 ];
 
 /// Client → server frame.
@@ -514,6 +520,27 @@ pub enum ClientMessage {
         external_id: String,
     },
 
+    // ---- T19.35 Phase D: per-project GitHub token store ----
+    //
+    // Write (or clear) the GitHub API token the cloud-agent uses when
+    // polling `GET /repos/{owner}/{repo}/pulls` during `verifying_merge`.
+    // An empty `token` removes the file — the agent falls back to
+    // unauthenticated requests (60 req/hr per IP, sufficient for public
+    // repos). Private repos need a PAT with `repo` read scope.
+    //
+    // Replies: `github_result { id, data: null }` on success;
+    // `github_error { id, kind, message }` on failure.
+    //
+    // Mirrors `planflow_token_set` in wire shape and server handling.
+    GithubTokenSet {
+        #[serde(default)]
+        id: Option<String>,
+        cloud_project_id: String,
+        /// GitHub Personal Access Token (PAT). An empty string clears the
+        /// stored token so the project falls back to unauthenticated calls.
+        token: String,
+    },
+
     // ---- T19.35 Phase B: auto-run queue control plane ----
     //
     // Five frames let the desktop seed and drive a server-side auto-run
@@ -842,6 +869,27 @@ pub enum ServerMessage {
         message: String,
     },
 
+    // ---- T19.35 Phase D: GitHub token store replies ----
+    //
+    // Mirrors the PlanFlow token-set reply shape (`planflow_result` /
+    // `planflow_error`) so the desktop client can handle both with the
+    // same branch. `data` is always `null` (the operation produces no
+    // payload). `kind` uses the same stable taxonomy:
+    // `invalid_args` (bad project id), `credential` (I/O failure).
+    /// Success reply for `github_token_set`.
+    GithubResult {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        data: Value,
+    },
+    /// Failure reply for `github_token_set`.
+    GithubError {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        kind: String,
+        message: String,
+    },
+
     // ---- T19.32: cloud-agent project_links replies ----
     //
     // Failures share the generic `Error` envelope (kinds: `not_found`
@@ -996,6 +1044,27 @@ impl ServerMessage {
         message: impl Into<String>,
     ) -> Self {
         Self::AutoRunError {
+            id,
+            kind: kind.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Convenience: GitHub token-store success reply (T19.35 Phase D).
+    ///
+    /// `data` is always `Value::Null` for `github_token_set` — the
+    /// operation produces no payload.
+    pub fn github_result(id: Option<String>, data: Value) -> Self {
+        Self::GithubResult { id, data }
+    }
+
+    /// Convenience: GitHub token-store error reply (T19.35 Phase D).
+    pub fn github_error(
+        id: Option<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::GithubError {
             id,
             kind: kind.into(),
             message: message.into(),

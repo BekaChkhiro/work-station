@@ -43,6 +43,7 @@ use workstation_core::ws::auth::{require_bearer, AuthToken};
 use workstation_core::ws::system_monitor::{self, SystemMonitorHandle};
 
 use crate::dispatch;
+use crate::github::GithubState;
 use crate::planflow_proxy::PlanflowState;
 
 /// Handle to a running cloud-agent server. Dropping it triggers a
@@ -94,12 +95,17 @@ impl Drop for ServerHandle {
 ///
 /// Exposed (crate-internal) for tests that want to drive the server
 /// against a real `TcpListener` without going through [`spawn`].
+///
+/// T19.35 Phase D adds `github` as a new [`axum::Extension`] so the
+/// `github_token_set` WS handler can access the token directory.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn router(
     token: AuthToken,
     pool: SqlitePool,
     manager: PtyManager,
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
+    github: GithubState,
     projects_root: dispatch::ProjectsRoot,
     sessions_meta: dispatch::SessionMetadataStore,
 ) -> Router {
@@ -137,6 +143,7 @@ pub(crate) fn router(
         .layer(Extension(manager))
         .layer(Extension(monitor))
         .layer(Extension(planflow))
+        .layer(Extension(github))
         .layer(Extension(projects_root))
         .layer(Extension(sessions_meta));
 
@@ -164,6 +171,7 @@ pub async fn spawn(
     token: AuthToken,
     pool: SqlitePool,
     planflow: PlanflowState,
+    github: GithubState,
     projects_root: dispatch::ProjectsRoot,
     addr: SocketAddr,
 ) -> std::io::Result<ServerHandle> {
@@ -184,6 +192,7 @@ pub async fn spawn(
         manager,
         monitor,
         planflow,
+        github,
         projects_root,
         sessions_meta,
         addr,
@@ -214,6 +223,7 @@ pub(crate) async fn spawn_with_components(
     manager: PtyManager,
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
+    github: GithubState,
     projects_root: dispatch::ProjectsRoot,
     sessions_meta: dispatch::SessionMetadataStore,
     addr: SocketAddr,
@@ -224,6 +234,7 @@ pub(crate) async fn spawn_with_components(
         manager,
         monitor,
         planflow,
+        github,
         projects_root,
         sessions_meta,
     );
@@ -306,6 +317,7 @@ async fn ws_handler(
     Extension(manager): Extension<PtyManager>,
     Extension(monitor): Extension<SystemMonitorHandle>,
     Extension(planflow): Extension<PlanflowState>,
+    Extension(github): Extension<GithubState>,
     Extension(projects_root): Extension<dispatch::ProjectsRoot>,
     Extension(sessions_meta): Extension<dispatch::SessionMetadataStore>,
     upgrade: WebSocketUpgrade,
@@ -317,6 +329,7 @@ async fn ws_handler(
             pool,
             monitor,
             planflow,
+            github,
             projects_root,
             sessions_meta,
         )
@@ -341,19 +354,20 @@ mod tests {
         let dir = Box::leak(Box::new(dir));
         let pool = crate::db::open(dir.path()).await.expect("open db");
         // T19.29 — these tests exercise the auth / healthz / dispatch
-        // routing paths; none of them speak PlanFlow. Hand the server a
-        // PlanflowState with no token so any stray `planflow_*` frame
-        // would short-circuit on `no_credential` instead of hitting the
-        // network. The real proxy behaviour is covered by the
-        // `planflow_proxy::tests` suite against a wiremock server.
+        // routing paths; none of them speak PlanFlow or GitHub. Hand the
+        // server a no-op PlanflowState and a real GithubState backed by
+        // a tempdir so any stray `github_token_set` frame can complete
+        // without touching the real filesystem or network.
         let planflow =
             PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|_pid| Ok(None)));
+        let github = GithubState::new(dir.path());
         let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
         std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
         let handle = spawn(
             token,
             pool,
             planflow,
+            github,
             projects_root,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )
@@ -541,6 +555,7 @@ mod tests {
             system_monitor::start_with_interval(manager.clone(), Duration::from_millis(50));
         let planflow =
             PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|_pid| Ok(None)));
+        let github = GithubState::new(dir.path());
         let projects_root = dispatch::ProjectsRoot::new(dir.path().join("projects"));
         std::fs::create_dir_all(projects_root.as_path()).expect("mkdir projects root");
         let sessions_meta = dispatch::new_session_metadata_store();
@@ -550,6 +565,7 @@ mod tests {
             manager,
             monitor,
             planflow,
+            github,
             projects_root,
             sessions_meta,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),

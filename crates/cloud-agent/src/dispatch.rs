@@ -78,6 +78,7 @@ use workstation_core::ws::system_monitor::{StatsSnapshot, SystemMonitorHandle};
 
 use crate::db::{app_settings, auto_run as db_auto_run, project_links, projects};
 use crate::fs::{self as cfs, FsError};
+use crate::github::{self as cgh, GithubState};
 use crate::planflow_proxy::{self, PlanflowState};
 
 /// Per-session metadata the agent stashes alongside the live PTY so
@@ -190,12 +191,17 @@ impl Drop for Connection {
 /// own handles; both are internally `Arc`-shared and cheap to clone.
 /// Dropping the per-connection copies on teardown doesn't affect other
 /// concurrent connections.
+///
+/// T19.35 Phase D adds `github`: the per-daemon [`GithubState`] handle
+/// threaded here so the `github_token_set` handler can write token files.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
     socket: WebSocket,
     manager: PtyManager,
     pool: SqlitePool,
     monitor: SystemMonitorHandle,
     planflow: PlanflowState,
+    github: GithubState,
     projects_root: ProjectsRoot,
     sessions_meta: SessionMetadataStore,
 ) {
@@ -230,6 +236,7 @@ pub async fn run_connection(
                     &mut conn,
                     &pool,
                     &planflow,
+                    &github,
                     &projects_root,
                     &sessions_meta,
                     &payload,
@@ -292,6 +299,7 @@ async fn handle_text(
     conn: &mut Connection,
     pool: &SqlitePool,
     planflow: &PlanflowState,
+    github: &GithubState,
     projects_root: &ProjectsRoot,
     sessions_meta: &SessionMetadataStore,
     payload: &str,
@@ -381,7 +389,8 @@ async fn handle_text(
         | "auto_run_stop"
         | "auto_run_pause"
         | "auto_run_resume"
-        | "auto_run_status" => match serde_json::from_value::<ClientMessage>(value) {
+        | "auto_run_status"
+        | "github_token_set" => match serde_json::from_value::<ClientMessage>(value) {
             Ok(msg) => msg,
             Err(error) => {
                 send_error(
@@ -406,7 +415,16 @@ async fn handle_text(
         }
     };
 
-    dispatch_typed(conn, pool, planflow, projects_root, sessions_meta, typed).await;
+    dispatch_typed(
+        conn,
+        pool,
+        planflow,
+        github,
+        projects_root,
+        sessions_meta,
+        typed,
+    )
+    .await;
 }
 
 /// Route a parsed [`ClientMessage`] to its handler. Split out of
@@ -424,6 +442,7 @@ async fn dispatch_typed(
     conn: &mut Connection,
     pool: &SqlitePool,
     planflow: &PlanflowState,
+    github: &GithubState,
     projects_root: &ProjectsRoot,
     sessions_meta: &SessionMetadataStore,
     typed: ClientMessage,
@@ -725,6 +744,17 @@ async fn dispatch_typed(
         } => {
             planflow_proxy::handle_token_set(planflow, &conn.out_tx, id, cloud_project_id, token)
                 .await;
+        }
+        // T19.35 Phase D — write (or clear) the per-project GitHub API token
+        // used by the auto-run orchestrator's `verifying_merge` state to poll
+        // the GitHub Pulls API. An empty token removes the file so subsequent
+        // calls fall back to unauthenticated (public repos only).
+        ClientMessage::GithubTokenSet {
+            id,
+            cloud_project_id,
+            token,
+        } => {
+            cgh::handle_token_set(github, &conn.out_tx, id, cloud_project_id, token).await;
         }
         // T19.32 — project ↔ external-service links. Same camelCase
         // wire shape the desktop's `commands/project_links.rs` exposes,
@@ -2332,6 +2362,16 @@ mod tests {
         PlanflowState::for_test("http://127.0.0.1:1", std::sync::Arc::new(|_pid| Ok(None)))
     }
 
+    /// Build a [`GithubState`] backed by a tempdir. Tests that exercise
+    /// the `github_token_set` handler live in `github::tests`; here we
+    /// only need a no-op handle so the dispatcher can pass it through
+    /// without touching the real filesystem.
+    fn offline_github_state() -> (GithubState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = GithubState::new(dir.path());
+        (state, dir)
+    }
+
     /// Materialize a fresh `ProjectsRoot` under a tempdir. Tests that
     /// don't care about the path can ignore the returned `TempDir` —
     /// the dir is dropped at scope exit which is fine because no
@@ -2349,12 +2389,14 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(8);
         let mut conn = fresh_conn(out_tx);
         let planflow = offline_planflow_state();
+        let (github, _github_guard) = offline_github_state();
         let (projects_root, _guard) = fresh_projects_root();
         let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             pool,
             &planflow,
+            &github,
             &projects_root,
             &sessions_meta,
             payload,
@@ -2652,12 +2694,14 @@ mod tests {
         // Drive through handle_text so the dispatcher's routing is
         // exercised end-to-end (typed parse + spawn arm).
         let planflow = offline_planflow_state();
+        let (github, _github_guard) = offline_github_state();
         let (projects_root, _guard) = fresh_projects_root();
         let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &github,
             &projects_root,
             &sessions_meta,
             r#"{"type":"pty_spawn","id":"spawn-1","command":"/bin/sh","args":["-c","echo HELLO_FROM_CLOUD; sleep 30"],"cols":80,"rows":24}"#,
@@ -2723,12 +2767,14 @@ mod tests {
         let mut conn = fresh_conn(out_tx);
 
         let planflow = offline_planflow_state();
+        let (github, _github_guard) = offline_github_state();
         let (projects_root, _guard) = fresh_projects_root();
         let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &github,
             &projects_root,
             &sessions_meta,
             r#"{"type":"pty_spawn","id":"x","command":"   ","cols":80,"rows":24}"#,
@@ -2748,12 +2794,14 @@ mod tests {
         let mut conn = fresh_conn(out_tx);
 
         let planflow = offline_planflow_state();
+        let (github, _github_guard) = offline_github_state();
         let (projects_root, _guard) = fresh_projects_root();
         let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &github,
             &projects_root,
             &sessions_meta,
             r#"{"type":"pty_spawn","id":"x","command":"/bin/sh","cols":0,"rows":24}"#,
@@ -2810,12 +2858,14 @@ mod tests {
         // we ack so the PWA doesn't have to special-case races between
         // its own session teardown and the agent's session removal.
         let planflow = offline_planflow_state();
+        let (github, _github_guard) = offline_github_state();
         let (projects_root, _guard) = fresh_projects_root();
         let sessions_meta = new_session_metadata_store();
         handle_text(
             &mut conn,
             &pool,
             &planflow,
+            &github,
             &projects_root,
             &sessions_meta,
             r#"{"type":"pty_unsubscribe","id":"u-1","session_id":"00000000-0000-0000-0000-000000000000"}"#,
