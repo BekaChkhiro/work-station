@@ -157,12 +157,24 @@ impl PtySession {
     /// `false` if it had to be force-killed. Errors are logged and
     /// swallowed — termination is best-effort and the registry must move
     /// on regardless.
+    // `pid` and `pgid` are distinct standard Unix ids; similar_names is a
+    // false positive on domain-conventional names here.
+    #[allow(clippy::similar_names)]
     pub fn terminate_gracefully(&self, grace: Duration) -> bool {
         let id = self.id;
         let pid = self.pid;
 
+        // Capture the process group up front — while the leader is still
+        // alive, `getpgid` resolves; once it's reaped it returns ESRCH.
+        // Every return path below sweeps the group so descendants the
+        // leader spawned don't orphan onto the daemon.
+        #[cfg(unix)]
+        let pgid = self.process_group();
+
         // Fast path: child has already exited (e.g. EOF cleanup race).
         if self.child_exited() {
+            #[cfg(unix)]
+            Self::kill_group(pgid);
             return true;
         }
 
@@ -171,6 +183,8 @@ impl PtySession {
         let deadline = Instant::now() + grace;
         loop {
             if self.child_exited() {
+                #[cfg(unix)]
+                Self::kill_group(pgid);
                 return true;
             }
             if Instant::now() >= deadline {
@@ -215,6 +229,9 @@ impl PtySession {
                 "pty session: wait after SIGKILL failed",
             );
         }
+        // Leader is dead; mop up any descendants still in its group.
+        #[cfg(unix)]
+        Self::kill_group(pgid);
         false
     }
 
@@ -256,6 +273,46 @@ impl PtySession {
         }
     }
 
+    /// Resolve the child's process-group id, but only when it is the
+    /// child's OWN group (the PTY child is a session leader — portable-pty's
+    /// `login_tty` calls `setsid`, so its pgid == pid) and distinct from
+    /// the daemon's own group. Returns `None` otherwise so [`kill_group`]
+    /// can never signal unrelated processes — or ourselves.
+    #[cfg(unix)]
+    #[allow(clippy::similar_names)] // pid vs pgid: distinct standard Unix ids
+    fn process_group(&self) -> Option<i32> {
+        let pid = i32::try_from(self.pid).ok()?;
+        if pid <= 0 {
+            return None;
+        }
+        // SAFETY: `getpgid` is async-signal-safe and only reads kernel state.
+        let pgid = unsafe { libc::getpgid(pid) };
+        let own = unsafe { libc::getpgid(0) };
+        if pgid > 0 && pgid != own {
+            Some(pgid)
+        } else {
+            None
+        }
+    }
+
+    /// SIGKILL every process still in `pgid`. Called AFTER the session
+    /// leader has exited, so it only reaps descendants the leader spawned
+    /// — e.g. an MCP server + a nested headless `claude -p` agent — that
+    /// would otherwise orphan onto the daemon and leak memory (the
+    /// dispatched-task RAM creep on the cloud-agent). A no-op once the
+    /// group is empty (`ESRCH`).
+    #[cfg(unix)]
+    fn kill_group(pgid: Option<i32>) {
+        if let Some(pgid) = pgid {
+            // SAFETY: async-signal-safe; a negative target addresses the
+            // whole process group. ESRCH (group already empty) is the
+            // common, expected outcome and is ignored.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+
     #[cfg(windows)]
     fn signal_terminate(&self) {
         // No SIGTERM on Windows — the closest equivalent is closing the
@@ -279,9 +336,15 @@ impl PtySession {
 }
 
 impl Drop for PtySession {
+    #[allow(clippy::similar_names)] // pid vs pgid: distinct standard Unix ids
     fn drop(&mut self) {
         let id = self.id;
         let pid = self.pid;
+
+        // Capture the group before the mutable borrow below; sweep after
+        // the leader is gone so descendants don't orphan on the EOF path.
+        #[cfg(unix)]
+        let pgid = self.process_group();
 
         // Drop only ever sees this code path when the session is being
         // discarded WITHOUT a prior `terminate_gracefully` (e.g. the EOF
@@ -309,6 +372,8 @@ impl Drop for PtySession {
                     status = %status,
                     "pty session dropped; child already exited",
                 );
+                #[cfg(unix)]
+                Self::kill_group(pgid);
                 return;
             }
             Ok(None) => {}
@@ -357,6 +422,9 @@ impl Drop for PtySession {
                 );
             }
         }
+        // Leader reaped; sweep any descendants still in its group.
+        #[cfg(unix)]
+        Self::kill_group(pgid);
     }
 }
 
@@ -552,6 +620,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A leader that backgrounds a grandchild and then exits on SIGTERM
+    /// would orphan that grandchild without the post-exit process-group
+    /// sweep. The grandchild writes its pid to a file so the test can
+    /// confirm the sweep reaped it after `terminate_gracefully` returns.
+    #[test]
+    fn terminate_sweeps_orphaned_grandchild() {
+        let pid_path = std::env::temp_dir().join(format!(
+            "ws_pty_sweep_{}_{}.pid",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        ));
+        let _ = std::fs::remove_file(&pid_path);
+
+        // Non-interactive sh has no job control, so the backgrounded
+        // `sleep` stays in sh's process group. sh exits cleanly on TERM,
+        // orphaning the sleep — the group sweep must then reap it.
+        let script = format!(
+            "sleep 300 & echo $! > {}; trap 'exit 0' TERM; wait",
+            pid_path.display(),
+        );
+        let session = open_session(&["/bin/sh", "-c", &script]);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let grandchild: u32 = loop {
+            if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild pid file never appeared",
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            pid_alive_in_ps(grandchild).is_some(),
+            "grandchild {grandchild} should be running before terminate",
+        );
+
+        let _ = session.terminate_gracefully(Duration::from_millis(500));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if pid_alive_in_ps(grandchild).is_none() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {grandchild} survived terminate — group sweep failed",
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_file(&pid_path);
     }
 }
 
