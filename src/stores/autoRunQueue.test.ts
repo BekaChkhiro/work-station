@@ -114,11 +114,13 @@ vi.mock("../db/projects", () => ({ listProjects: vi.fn().mockResolvedValue([]) }
 import {
   autoRunQueue,
   dismissAutoRun,
+  hydrateCloudAutoRun,
   isAutoRunActive,
   pauseAutoRun,
   resumeAutoRun,
   startAutoRun,
   stopAutoRun,
+  _resetForTests,
   _stopTickForTests,
 } from "./autoRunQueue";
 
@@ -142,6 +144,7 @@ function cloudQueueInput() {
 // Setup / teardown
 
 beforeEach(() => {
+  _resetForTests();
   _cloudMode = false;
   getSetting.mockReset();
   setSetting.mockReset();
@@ -212,6 +215,46 @@ describe("autoRunQueue — cloud mode — startAutoRun", () => {
     mockAutoRunStart.mockResolvedValue(null);
 
     await expect(startAutoRun(cloudQueueInput())).rejects.toThrow();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Cloud-mode: hydrateCloudAutoRun (reopen-app rehydrate)
+
+describe("autoRunQueue — cloud mode — hydrateCloudAutoRun", () => {
+  it("repopulates the signal from the agent for an active queue", async () => {
+    _cloudMode = true;
+    mockAutoRunStatus.mockResolvedValue({ ...QUEUE_PAYLOAD });
+
+    expect(autoRunQueue("ws-proj-1")).toBeNull();
+    await hydrateCloudAutoRun("ws-proj-1");
+
+    expect(mockAutoRunStatus).toHaveBeenCalledWith("ws-proj-1");
+    const q = autoRunQueue("ws-proj-1");
+    expect(q?.id).toBe("arq_cloud_1");
+    expect(q?.state).toBe("running");
+  });
+
+  it("leaves the signal empty when the agent has no queue", async () => {
+    _cloudMode = true;
+    mockAutoRunStatus.mockResolvedValue(null);
+
+    await hydrateCloudAutoRun("ws-proj-1");
+    expect(autoRunQueue("ws-proj-1")).toBeNull();
+  });
+
+  it("does not resurrect a terminal (stopped) queue", async () => {
+    _cloudMode = true;
+    mockAutoRunStatus.mockResolvedValue({ ...QUEUE_PAYLOAD, state: "stopped" });
+
+    await hydrateCloudAutoRun("ws-proj-1");
+    expect(autoRunQueue("ws-proj-1")).toBeNull();
+  });
+
+  it("is a no-op in local mode (never queries the agent)", async () => {
+    _cloudMode = false;
+    await hydrateCloudAutoRun("ws-proj-1");
+    expect(mockAutoRunStatus).not.toHaveBeenCalled();
   });
 });
 

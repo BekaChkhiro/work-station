@@ -12,12 +12,13 @@
 // component only renders + dispatches user intent (pause/resume/stop/
 // dismiss). No timers live here.
 
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 
 import {
   autoRunQueue,
   dismissAutoRun,
+  hydrateCloudAutoRun,
   pauseAutoRun,
   resumeAutoRun,
   stopAutoRun,
@@ -115,6 +116,16 @@ function stateLabelFor(queue: AutoRunQueue): string {
 
 export function AutoRunBar(props: AutoRunBarProps): JSX.Element {
   const queue = createMemo<AutoRunQueue | null>(() => autoRunQueue(props.workspaceProjectId));
+
+  // Cloud queues live in the agent DB, not local app_settings, so a fresh
+  // app launch starts with an empty signal. Ask the agent whether this
+  // project has a running queue and, if so, repopulate the signal + resume
+  // polling — otherwise a queue started before the app was closed would be
+  // invisible on reopen. No-op in local mode. Re-runs if the project id
+  // changes (the bar is reused across the cloud project's task view).
+  createEffect(() => {
+    void hydrateCloudAutoRun(props.workspaceProjectId);
+  });
   // Default to expanded so the user sees metadata + history without
   // having to click. The chevron still works to collapse for users
   // who want a quieter strip.

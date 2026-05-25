@@ -249,6 +249,14 @@ export function _stopTickForTests(): void {
   cloudPollIntervals.clear();
 }
 
+/** Test-only: clear all in-memory queues, stop timers, and reset the
+ *  hydration latch so each test starts from a blank store. */
+export function _resetForTests(): void {
+  _stopTickForTests();
+  setQueuesSignal({});
+  hydrated = false;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Cloud-mode helpers
 
@@ -298,6 +306,29 @@ async function pollCloudQueue(projectId: string): Promise<void> {
     }
   } catch (err) {
     console.warn(`[autoRun:${projectId}] cloud poll failed:`, err);
+  }
+}
+
+/** Rehydrate a cloud queue from the agent on app launch / project open.
+ *  Cloud queues are NOT persisted to local app_settings (the agent DB is
+ *  the source of truth), so after an app restart the in-memory signal is
+ *  empty and the bar wouldn't show an already-running queue. Call this
+ *  when a cloud project's task view mounts: it asks the agent for the
+ *  current queue and, if one is active, seeds the signal + resumes
+ *  polling so the bar reappears. No-op in local mode. Idempotent —
+ *  `startCloudPoll` guards against duplicate loops. */
+export async function hydrateCloudAutoRun(projectId: string): Promise<void> {
+  if (!cloudMode()) return;
+  try {
+    const client = await awaitCloudClient();
+    const raw = await client.autoRunStatus(projectId);
+    const queue = parseAgentQueue(raw);
+    if (queue && isAutoRunQueueActive(queue)) {
+      mutateFromAgent(projectId, queue);
+      startCloudPoll(projectId);
+    }
+  } catch (err) {
+    console.warn(`[autoRun:${projectId}] cloud hydrate failed:`, err);
   }
 }
 
