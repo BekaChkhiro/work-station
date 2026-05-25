@@ -361,6 +361,28 @@ async fn handle_text(
             )
             .await;
         }
+        // Auto-run orchestration + per-project GitHub tokens live entirely
+        // on the cloud-agent (the orchestrator runs server-side there, so a
+        // queue survives the desktop closing). The desktop's own WS bridge
+        // serves the mobile PWA and has no analog — surface a typed
+        // `unsupported` rather than silently dropping the frame.
+        ClientMessage::AutoRunStart { id, .. }
+        | ClientMessage::AutoRunStop { id, .. }
+        | ClientMessage::AutoRunPause { id, .. }
+        | ClientMessage::AutoRunResume { id, .. }
+        | ClientMessage::AutoRunStatus { id, .. }
+        | ClientMessage::GithubTokenSet { id, .. } => {
+            send(
+                &conn.out_tx,
+                &ServerMessage::Error {
+                    id,
+                    kind: "unsupported".into(),
+                    message: "auto-run orchestration is handled by the cloud-agent, not the desktop WS bridge"
+                        .into(),
+                },
+            )
+            .await;
+        }
         ClientMessage::SettingsGet { id } => {
             projects_bridge::handle_settings_get(&conn.out_tx, pool, id).await;
         }

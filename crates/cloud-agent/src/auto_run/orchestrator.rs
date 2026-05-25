@@ -86,12 +86,20 @@ pub const AUTO_RUN_TASK_TIMEOUT_MS: i64 = 90 * 60 * 1000;
 /// skip path in `pollMergeStatus`.
 pub const AUTO_RUN_VERIFY_MERGE_TIMEOUT_MS: i64 = 60 * 60 * 1000;
 
-/// Short delay between spawning a PTY and writing the start prompt.
-///
-/// Gives the shell a moment to print its banner before we inject
-/// `planflow_task_start(...)` — otherwise the bytes may race ahead of
-/// the shell's `read()` call and be lost.
-const PROMPT_WRITE_DELAY: Duration = Duration::from_millis(800);
+/// Phase G — idle-aware prompt injection timings. Mirror the desktop's
+/// `writePromptWhenReady` (AppRoot.tsx). After spawning `claude` we watch
+/// its PTY output and wait until it falls silent for [`PROMPT_IDLE_QUIET`]
+/// (the Ink TUI has finished booting + connecting MCP and will accept
+/// input), capped at [`PROMPT_MAX_WAIT`] so a TUI that never fully
+/// quiesces (spinner / cursor redraws) still gets the prompt. The prompt
+/// text and the submitting carriage return are then written SEPARATELY,
+/// [`PROMPT_CR_DELAY`] apart, so claude consumes the characters before the
+/// CR — writing `"{prompt}\r"` in one shot submits on a partial/empty
+/// buffer and the task never starts (the dispatched-but-idle failure the
+/// fixed-delay Phase A write produced).
+const PROMPT_IDLE_QUIET: Duration = Duration::from_millis(800);
+const PROMPT_MAX_WAIT: Duration = Duration::from_secs(12);
+const PROMPT_CR_DELAY: Duration = Duration::from_millis(700);
 
 /// Columns for the headless `claude` PTY spawned per task.
 ///
@@ -980,8 +988,8 @@ async fn pick_and_dispatch(
 ///
 /// Resolves the project's filesystem path from the `projects` table.
 /// Mirrors the desktop's `startTaskCliLauncher` + `writePromptWhenReady`
-/// flow (Phase G TODO: port the idle-detect loop for a production-quality
-/// idle write; Phase A uses a fixed [`PROMPT_WRITE_DELAY`]).
+/// flow: idle-detect on the PTY output broadcast (Phase G), then a
+/// prompt-text / carriage-return pair written [`PROMPT_CR_DELAY`] apart.
 async fn spawn_task_pty(
     pool: &SqlitePool,
     manager: &PtyManager,
@@ -1043,20 +1051,56 @@ async fn spawn_task_pty(
         "claude PTY spawned; waiting before writing prompt",
     );
 
-    // Wait for the shell to settle before injecting the prompt.
-    // Phase G TODO: replace this fixed delay with an idle-detect loop
-    // that watches the PTY output broadcast and waits for 600ms of
-    // silence (mirrors writePromptWhenReady in AppRoot.tsx:1341).
-    tokio::time::sleep(PROMPT_WRITE_DELAY).await;
+    // Phase G — wait for claude's TUI to settle before injecting the
+    // prompt. Subscribe to the PTY output broadcast and treat
+    // PROMPT_IDLE_QUIET of silence as "ready for input", capped at
+    // PROMPT_MAX_WAIT. A fixed delay (Phase A) wrote before the Ink TUI
+    // was ready, so the prompt + CR landed on a buffer that wasn't
+    // accepting input and the task never started.
+    if let Some(session) = manager.get(session_id) {
+        let mut rx = session.output_tx.subscribe();
+        // Drop the Arc; the broadcast receiver stays valid while the
+        // session's sender lives in the manager registry.
+        drop(session);
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() >= PROMPT_MAX_WAIT {
+                break;
+            }
+            match tokio::time::timeout(PROMPT_IDLE_QUIET, rx.recv()).await {
+                // Quiet for the whole window → TUI settled, accept input.
+                Err(_elapsed) => break,
+                // More output — keep waiting for it to settle.
+                Ok(Ok(_chunk)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                // Session ended before settling — nothing to write to.
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    return Err(AdvanceError::PtyWrite(
+                        "claude PTY closed before the prompt could be written".to_string(),
+                    ));
+                }
+            }
+        }
+    } else {
+        // Session vanished right after spawn — fall back to a fixed wait.
+        tokio::time::sleep(PROMPT_IDLE_QUIET).await;
+    }
 
     let prompt = format_planflow_start_prompt(task_id, mode);
-    // Write prompt + carriage return to submit it (mirrors the desktop's
-    // `ptyWrite` + `\r` in AppRoot.tsx:1364).
-    let payload = format!("{prompt}\r");
+    // Write the prompt TEXT first (no CR), …
+    let prompt_bytes = prompt.clone().into_bytes();
     let manager_write = manager.clone();
-    tokio::task::spawn_blocking(move || manager_write.write(session_id, payload.as_bytes()))
+    tokio::task::spawn_blocking(move || manager_write.write(session_id, &prompt_bytes))
         .await
         .map_err(|e| AdvanceError::PtyWrite(format!("write task panicked: {e}")))?
+        .map_err(|e| AdvanceError::PtyWrite(e.to_string()))?;
+    // … pause so claude's Ink TUI consumes the characters, then submit
+    // with a separate carriage return (mirrors writePromptWhenReady).
+    tokio::time::sleep(PROMPT_CR_DELAY).await;
+    let manager_cr = manager.clone();
+    tokio::task::spawn_blocking(move || manager_cr.write(session_id, b"\r"))
+        .await
+        .map_err(|e| AdvanceError::PtyWrite(format!("CR write task panicked: {e}")))?
         .map_err(|e| AdvanceError::PtyWrite(e.to_string()))?;
 
     tracing::info!(

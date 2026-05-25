@@ -273,6 +273,10 @@ pub struct AutoRunQueue {
     /// Workspace project id (PRIMARY KEY in the DB).
     pub project_id: String,
     /// Stable id for UI React-keying (`arq_<epoch36>_<random6>`).
+    /// Serialized as `id` on the wire to match the desktop's
+    /// `autoRunQueueSchema` (`src/types/autoRunQueue.ts`), which names this
+    /// field `id`; the column + Rust field stay `queue_id`.
+    #[serde(rename = "id")]
     pub queue_id: String,
     /// PlanFlow externalId (project UUID on the PlanFlow side).
     pub external_id: String,
