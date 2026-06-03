@@ -256,26 +256,25 @@ export function acquireAgentSession(sessionId: string, opts: AgentSessionOptions
     const note = (tone: NoteItem["tone"], text: string): void =>
       pushItem({ kind: "note", id: nextId(), tone, text });
 
-    // Progressive-streaming state (from `--include-partial-messages`).
-    // `blockByIndex` maps the current message's content-block index to the
-    // store item it feeds (plus a buffer for tool-input JSON deltas). The
-    // batch `assistant` event then *finalizes* each block's content
-    // authoritatively — this both fills blocks that produced no deltas and
-    // forces a definitive render of the last message (the bug where the
-    // final chunk only appeared on the next turn).
-    const blockByIndex = new Map<number, { itemId: string; kind: "text" | "tool"; json: string }>();
-    // Id of the message `blockByIndex` currently maps. A batch `assistant`
-    // for a NEW message (one that emitted no `message_start`/deltas) must
-    // start fresh, otherwise its blocks would overwrite the previous
-    // message's items — the bug where the final reply never appeared.
+    // Progressive-streaming state. Each content block is tracked by a STABLE
+    // key shared between the streamed deltas and the authoritative batch
+    // `assistant` event: `${messageId}#${index}` for text, the tool-use id for
+    // tools. Stable keys are what fix BOTH the "duplicated reply" and the
+    // "missing final reply" bugs — the same block always maps to the same
+    // store item regardless of which path (stream vs batch) touches it.
+    const keyToItem = new Map<string, { itemId: string; kind: "text" | "tool"; json: string }>();
+    const indexToKey = new Map<number, string>(); // current message's blocks
     let currentMsgId = "";
 
-    const appendAssistantText = (itemId: string, delta: string): void => {
-      if (delta.length === 0) return;
+    const mutateItem = <K extends Item["kind"]>(
+      itemId: string,
+      kind: K,
+      fn: (item: Extract<Item, { kind: K }>) => void,
+    ): void => {
       setStore(
         produce((s) => {
           const it = s.items.find((x) => x.id === itemId);
-          if (it && it.kind === "assistant") it.text += delta;
+          if (it && it.kind === kind) fn(it as Extract<Item, { kind: K }>);
         }),
       );
     };
@@ -286,7 +285,7 @@ export function acquireAgentSession(sessionId: string, opts: AgentSessionOptions
 
       if (etype === "message_start") {
         currentMsgId = asString(asRecord(ev.message).id);
-        blockByIndex.clear();
+        indexToKey.clear();
         setBusy(true);
         return;
       }
@@ -294,48 +293,55 @@ export function acquireAgentSession(sessionId: string, opts: AgentSessionOptions
         const block = asRecord(ev.content_block);
         const blockType = asString(block.type);
         if (blockType === "text") {
-          const id = nextId();
-          pushItem({ kind: "assistant", id, text: "" });
-          blockByIndex.set(index, { itemId: id, kind: "text", json: "" });
+          const key = `${currentMsgId}#${index}`;
+          if (!keyToItem.has(key)) {
+            const id = nextId();
+            pushItem({ kind: "assistant", id, text: "" });
+            keyToItem.set(key, { itemId: id, kind: "text", json: "" });
+          }
+          indexToKey.set(index, key);
         } else if (blockType === "tool_use") {
-          const id = asString(block.id) || nextId();
-          pushItem({
-            kind: "tool",
-            id,
-            name: asString(block.name) || "tool",
-            input: asRecord(block.input),
-            status: "pending",
-            result: "",
-          });
-          blockByIndex.set(index, { itemId: id, kind: "tool", json: "" });
+          const tid = asString(block.id);
+          const key = tid || `${currentMsgId}#t${index}`;
+          if (!keyToItem.has(key)) {
+            const id = tid || nextId();
+            pushItem({
+              kind: "tool",
+              id,
+              name: asString(block.name) || "tool",
+              input: asRecord(block.input),
+              status: "pending",
+              result: "",
+            });
+            keyToItem.set(key, { itemId: id, kind: "tool", json: "" });
+          }
+          indexToKey.set(index, key);
         }
         return;
       }
       if (etype === "content_block_delta") {
-        const slot = blockByIndex.get(index);
+        const key = indexToKey.get(index);
+        const slot = key ? keyToItem.get(key) : undefined;
         if (!slot) return;
         const delta = asRecord(ev.delta);
         const dtype = asString(delta.type);
         if (dtype === "text_delta" && slot.kind === "text") {
-          appendAssistantText(slot.itemId, asString(delta.text));
+          const piece = asString(delta.text);
+          if (piece.length > 0) mutateItem(slot.itemId, "assistant", (it) => (it.text += piece));
         } else if (dtype === "input_json_delta" && slot.kind === "tool") {
           slot.json += asString(delta.partial_json);
         }
         return;
       }
       if (etype === "content_block_stop") {
-        const slot = blockByIndex.get(index);
+        const key = indexToKey.get(index);
+        const slot = key ? keyToItem.get(key) : undefined;
         if (slot && slot.kind === "tool" && slot.json.length > 0) {
           try {
             const parsed = asRecord(JSON.parse(slot.json));
-            setStore(
-              produce((s) => {
-                const it = s.items.find((x) => x.id === slot.itemId);
-                if (it && it.kind === "tool") it.input = parsed;
-              }),
-            );
+            mutateItem(slot.itemId, "tool", (it) => (it.input = parsed));
           } catch {
-            // Partial/invalid JSON — keep whatever input arrived on start.
+            /* partial/invalid JSON — keep input from start */
           }
         }
       }
@@ -406,82 +412,35 @@ export function acquireAgentSession(sessionId: string, opts: AgentSessionOptions
         return;
       }
       if (type === "assistant") {
-        // Finalize each content block authoritatively. If `stream_event`
-        // deltas already created the item (slot), overwrite it with the full
-        // content (block end → no later deltas, so no duplication); otherwise
-        // create it. Works with OR without partial streaming.
-        const message = asRecord(event.message);
-        const content = message.content;
+        // TEXT is rendered purely from `stream_event` deltas (reliable and
+        // complete). The batch `assistant` events arrive one block at a time,
+        // each at array-index 0 regardless of the block's real content index,
+        // so trusting their order would collide/duplicate text. Here we only
+        // *finalize tools* — keyed by the globally-unique tool-use id — to
+        // fill any input the deltas missed and to create a tool the stream
+        // somehow skipped.
+        const content = asRecord(event.message).content;
         if (!Array.isArray(content)) return;
         setBusy(true);
-        // If this batch is for a message that never streamed (no
-        // `message_start`), the index→item map is stale from the previous
-        // message — reset so its blocks become NEW items instead of
-        // overwriting the prior reply.
-        const msgId = asString(message.id);
-        if (msgId && msgId !== currentMsgId) {
-          currentMsgId = msgId;
-          blockByIndex.clear();
-        }
-        content.forEach((raw, i) => {
+        for (const raw of content) {
           const block = asRecord(raw);
-          const blockType = asString(block.type);
-          const slot = blockByIndex.get(i);
-          if (blockType === "text") {
-            const text = asString(block.text);
-            if (slot && slot.kind === "text") {
-              setStore(
-                produce((s) => {
-                  const it = s.items.find((x) => x.id === slot.itemId);
-                  if (it && it.kind === "assistant") it.text = text;
-                }),
-              );
-            } else if (text.trim().length > 0) {
-              const id = nextId();
-              pushItem({ kind: "assistant", id, text });
-              blockByIndex.set(i, { itemId: id, kind: "text", json: "" });
-            }
-          } else if (blockType === "tool_use") {
-            const input = asRecord(block.input);
-            const tid = asString(block.id);
-            // Prefer an existing item — by stream slot, else by tool-use id —
-            // so a batch never duplicates a tool card the stream already made.
-            const targetId =
-              slot && slot.kind === "tool"
-                ? slot.itemId
-                : tid && store.items.some((x) => x.kind === "tool" && x.id === tid)
-                  ? tid
-                  : null;
-            if (targetId) {
-              setStore(
-                produce((s) => {
-                  const it = s.items.find((x) => x.id === targetId);
-                  if (it && it.kind === "tool") {
-                    it.input = input;
-                    // Canonicalize to the real tool-use id so the later
-                    // tool_result (keyed by that id) can match and flip the
-                    // status to done — otherwise the row is stuck "running".
-                    if (tid && it.id !== tid) it.id = tid;
-                  }
-                }),
-              );
-              if (tid && slot && slot.kind === "tool") {
-                blockByIndex.set(i, { itemId: tid, kind: "tool", json: "" });
-              }
-            } else {
-              const id = tid || nextId();
-              pushItem({
-                kind: "tool",
-                id,
-                name: asString(block.name) || "tool",
-                input,
-                status: "pending",
-                result: "",
-              });
-              blockByIndex.set(i, { itemId: id, kind: "tool", json: "" });
-            }
+          if (asString(block.type) !== "tool_use") continue;
+          const tid = asString(block.id);
+          if (!tid) continue;
+          const input = asRecord(block.input);
+          if (store.items.some((x) => x.kind === "tool" && x.id === tid)) {
+            mutateItem(tid, "tool", (it) => (it.input = input));
+          } else {
+            pushItem({
+              kind: "tool",
+              id: tid,
+              name: asString(block.name) || "tool",
+              input,
+              status: "pending",
+              result: "",
+            });
           }
-        });
+        }
         persist();
         return;
       }
@@ -522,24 +481,6 @@ export function acquireAgentSession(sessionId: string, opts: AgentSessionOptions
           durationMs: typeof event.duration_ms === "number" ? event.duration_ms : null,
           denials,
         });
-        // Guaranteed-final fallback: the `result` event always carries the
-        // turn's final assistant text. If streaming didn't surface it (the
-        // intermittent "last reply missing" bug), append it here — deduped
-        // against the last assistant message so a normal turn isn't doubled.
-        const finalText = asString(event.result);
-        if (finalText.trim().length > 0) {
-          let lastAssistant: AssistantItem | null = null;
-          for (let i = store.items.length - 1; i >= 0; i -= 1) {
-            const candidate = store.items[i];
-            if (candidate && candidate.kind === "assistant") {
-              lastAssistant = candidate;
-              break;
-            }
-          }
-          if (!lastAssistant || lastAssistant.text.trim() !== finalText.trim()) {
-            pushItem({ kind: "assistant", id: nextId(), text: finalText });
-          }
-        }
         setBusy(false);
         persist();
         return;
@@ -589,7 +530,8 @@ export function acquireAgentSession(sessionId: string, opts: AgentSessionOptions
     };
 
     const spawn = (): void => {
-      blockByIndex.clear();
+      keyToItem.clear();
+      indexToKey.clear();
       currentMsgId = "";
       setClosed(false);
       setBusy(false);
@@ -635,7 +577,7 @@ export function acquireAgentSession(sessionId: string, opts: AgentSessionOptions
       spawn();
     };
 
-    // Initial spawn for the session (not reactive — runs once at creation).
+    // Initial spawn for the session (runs once at creation).
     // eslint-disable-next-line solid/reactivity
     spawn();
 

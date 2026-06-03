@@ -117,6 +117,10 @@ const editFilePath = (t: ToolItem): string => asString(t.input.file_path) || asS
 const groupNodes = (items: Item[]): RenderNode[] => {
   const out: RenderNode[] = [];
   let run: ToolItem[] = [];
+  // Safety net: collapse an assistant message that's identical to the
+  // immediately-preceding assistant message (defends the UI against any
+  // parser-level duplication regardless of its cause).
+  let lastAssistantText: string | null = null;
   const flush = (): void => {
     // Drop empty `{}` partials (no file) and dedupe by tool-use id so a file
     // never appears twice in the "files changed" card.
@@ -136,6 +140,13 @@ const groupNodes = (items: Item[]): RenderNode[] => {
       run.push(item);
     } else {
       flush();
+      if (item.kind === "assistant") {
+        const text = item.text.trim();
+        if (text.length > 0 && text === lastAssistantText) continue; // drop dup
+        lastAssistantText = text;
+      } else if (item.kind !== "note") {
+        lastAssistantText = null; // reset across non-assistant content
+      }
       out.push({ kind: "item", item });
     }
   }
@@ -203,7 +214,9 @@ export function AgentView(props: AgentViewProps): JSX.Element {
   const [historyOpen, setHistoryOpen] = createSignal(false);
   const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
   const openHistory = (): void => {
-    setSessions(listSessions());
+    // Only this project's sessions (matched by working directory).
+    const cwd = props.cwd;
+    setSessions(cwd ? listSessions().filter((s) => s.cwd === cwd) : listSessions());
     setMenuOpen(false);
     setHistoryOpen(true);
   };
@@ -394,14 +407,18 @@ export function AgentView(props: AgentViewProps): JSX.Element {
     onCleanup(() => unlisten?.());
   });
 
-  // Auto-grow the composer up to ~3 lines, then scroll internally.
+  // Auto-grow the composer up to ~3 lines, then scroll internally. Guard
+  // against scrollHeight === 0 (which happens when the pane is hidden, e.g. on
+  // a workspace-tab switch) — otherwise the textarea would lock at height:0px
+  // and the user could no longer type.
   createEffect(() => {
     void ctrl.draft();
     queueMicrotask(() => {
       const el = textarea;
       if (!el) return;
       el.style.height = "auto";
-      el.style.height = `${Math.min(el.scrollHeight, 72)}px`;
+      const h = el.scrollHeight;
+      if (h > 0) el.style.height = `${Math.min(Math.max(h, 24), 72)}px`;
     });
   });
 
