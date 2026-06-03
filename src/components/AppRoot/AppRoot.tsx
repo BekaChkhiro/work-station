@@ -39,6 +39,8 @@ import { DeleteProjectConfirm } from "../DeleteProjectConfirm";
 import { ProjectContextMenu } from "../ProjectContextMenu";
 import { SettingsPanel } from "../SettingsPanel";
 import { Terminal } from "../Terminal/Terminal";
+import { AgentView } from "../AgentView";
+import { releaseAgentSession } from "../AgentView/agentSession";
 import {
   createProject,
   deleteProject,
@@ -309,6 +311,57 @@ export function AppRoot(): JSX.Element {
     });
   };
 
+  // Layout sessionIds that render the rich Claude Code "Agent view"
+  // (stream-json chat + diff) instead of a raw PTY Terminal. These panes
+  // have no backing PTY session — the `AgentView` component owns its own
+  // `claude` child process and reaps it on unmount — so the kill / scrollback
+  // paths skip them. Persisted layouts that restore one of these ids fall
+  // back to an (empty) Terminal, which is acceptable for the POC.
+  const [agentSessions, setAgentSessions] = createSignal<ReadonlySet<string>>(new Set());
+  const isAgentSession = (sessionId: string): boolean => agentSessions().has(sessionId);
+  const markAgentSession = (sessionId: string): void => {
+    setAgentSessions((prev) => new Set(prev).add(sessionId));
+  };
+  const unmarkAgentSession = (sessionId: string): void => {
+    setAgentSessions((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.delete(sessionId);
+      return next;
+    });
+  };
+
+  // Synthetic launcher entry that opens the rich Claude Code Agent view
+  // (stream-json chat + diff) rather than a raw `claude` PTY. Kept distinct
+  // from the detected `claude` binary so the launcher offers BOTH — the
+  // user picks per pane which Claude experience they want.
+  const AGENT_CLI_NAME = "Claude (Agent)";
+  const agentCliOption: PaneCliOption = {
+    name: AGENT_CLI_NAME,
+    path: "Rich chat + diff view · stream-json",
+    version: "agent",
+  };
+  const isAgentCli = (cli: PaneCliOption): boolean => cli.name === AGENT_CLI_NAME;
+
+  // CLI list shown in the launcher / pane "+" menu: prepend the Agent-view
+  // entry whenever the `claude` binary is detected (the Agent view drives
+  // that binary). Other call sites keep using `availableClis()` directly so
+  // task-start / default-CLI resolution never picks the synthetic entry.
+  const launcherClis = (): PaneCliOption[] => {
+    const base = availableClis();
+    return base.some((c) => c.name === "claude") ? [agentCliOption, ...base] : base;
+  };
+
+  // Allocate an agent pane: a fresh layout sessionId that `renderPane` maps
+  // to `AgentView`. No PTY spawn — the badge tracks "claude" so the pane
+  // chrome matches a launched Claude Code session.
+  const spawnAgentPane = (): string => {
+    const sessionId = crypto.randomUUID();
+    markAgentSession(sessionId);
+    recordSessionCli(sessionId, "claude");
+    return sessionId;
+  };
+
   const resolveCliBadge = (
     _projectId: string,
     sessionId: string,
@@ -331,6 +384,8 @@ export function AppRoot(): JSX.Element {
     if (!list) return;
     sessionsByProject[projectId] = list.filter((id) => id !== sessionId);
     forgetSessionCli(sessionId);
+    if (isAgentSession(sessionId)) releaseAgentSession(sessionId);
+    unmarkAgentSession(sessionId);
   };
 
   // T7.4 — resolve a project's default CLI to a `PaneCliOption` if (and
@@ -815,6 +870,24 @@ export function AppRoot(): JSX.Element {
   });
 
   const renderPane = (projectId: string, sessionId: string): JSX.Element => {
+    if (isAgentSession(sessionId)) {
+      const cwd = projectPaths[projectId];
+      const projectName = projects().find((p) => p.id === projectId)?.name;
+      // Pass the resolved absolute `claude` path so the agent launches in the
+      // bundled .app (whose PATH lacks ~/.local/bin); falls back to the bare
+      // name in dev where PATH is inherited from the launching terminal.
+      const claudePath = availableClis().find((c) => c.name === "claude")?.path;
+      return (
+        <AgentView
+          sessionId={sessionId}
+          title="Claude Code"
+          projectName={projectName}
+          command={claudePath ?? undefined}
+          cwd={cwd && cwd.length > 0 ? cwd : undefined}
+          permissionMode="bypassPermissions"
+        />
+      );
+    }
     const color = projects().find((p) => p.id === projectId)?.color;
     return (
       <Terminal
@@ -919,10 +992,16 @@ export function AppRoot(): JSX.Element {
     }
     for (const id of sessionsByProject[target.id] ?? []) liveSessions.add(id);
     for (const sessionId of liveSessions) {
-      try {
-        await ptyKill(sessionId);
-      } catch {
-        // Backend already logs; nothing the user can act on.
+      if (isAgentSession(sessionId)) {
+        // Agent panes have no PTY — reap the claude child + reactive root.
+        releaseAgentSession(sessionId);
+        unmarkAgentSession(sessionId);
+      } else {
+        try {
+          await ptyKill(sessionId);
+        } catch {
+          // Backend already logs; nothing the user can act on.
+        }
       }
       // T7.7 — drop badge entries for the about-to-be-removed sessions
       // so the map doesn't accumulate dead ids over the app's lifetime.
@@ -1192,7 +1271,9 @@ export function AppRoot(): JSX.Element {
   ): Promise<void> => {
     setActionError(null);
     try {
-      const nextSessionId = await spawnCli(projectId, cli);
+      // "Claude (Agent)" → rich Agent view; everything else → raw PTY.
+      const isAgent = isAgentCli(cli);
+      const nextSessionId = isAgent ? spawnAgentPane() : await spawnCli(projectId, cli);
       trackSession(projectId, nextSessionId);
       if (mode === "split-h" || mode === "split-v") {
         splitPane(projectId, sessionId, mode === "split-h" ? "h" : "v", nextSessionId);
@@ -1202,22 +1283,27 @@ export function AppRoot(): JSX.Element {
           ws?.layout !== undefined &&
           collectPanes(ws.layout).some((pane) => pane.sessionId === nextSessionId);
         if (!didAttach) {
-          await ptyKill(nextSessionId);
+          // Agent panes have no PTY — untrack drops the marker; the
+          // never-mounted AgentView spawned no child to reap.
+          if (!isAgent) await ptyKill(nextSessionId);
           untrackSession(projectId, nextSessionId);
         }
         return;
       }
       const replaced = replacePane(projectId, sessionId, nextSessionId);
       if (replaced === null) {
-        await ptyKill(nextSessionId);
+        if (!isAgent) await ptyKill(nextSessionId);
         untrackSession(projectId, nextSessionId);
         return;
       }
+      const replacedWasAgent = isAgentSession(replaced);
       untrackSession(projectId, replaced);
-      try {
-        await ptyKill(replaced);
-      } catch {
-        // Backend logs the failed cleanup; the replacement pane is already live.
+      if (!replacedWasAgent) {
+        try {
+          await ptyKill(replaced);
+        } catch {
+          // Backend logs the failed cleanup; the replacement pane is already live.
+        }
       }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -1454,7 +1540,9 @@ export function AppRoot(): JSX.Element {
   const handleLaunchFirstCli = async (projectId: string, cli: PaneCliOption): Promise<void> => {
     setActionError(null);
     try {
-      const sessionId = await spawnCli(projectId, cli);
+      // "Claude (Agent)" opens the rich Agent view (stream-json chat + diff);
+      // the raw `claude` binary and every other CLI spawn a PTY Terminal.
+      const sessionId = isAgentCli(cli) ? spawnAgentPane() : await spawnCli(projectId, cli);
       trackSession(projectId, sessionId);
       setLayout(projectId, paneNode(sessionId));
       setFocusedSession(projectId, sessionId);
@@ -1470,7 +1558,11 @@ export function AppRoot(): JSX.Element {
     if (!ws?.focusedSessionId) return;
     const closed = closePaneInStore(projectId, ws.focusedSessionId);
     if (closed === null) return;
+    const wasAgent = isAgentSession(closed);
     untrackSession(projectId, closed);
+    // Agent panes self-reap their `claude` child on unmount; only PTY
+    // sessions need an explicit kill.
+    if (wasAgent) return;
     try {
       await ptyKill(closed);
     } catch (err) {
@@ -1831,7 +1923,7 @@ export function AppRoot(): JSX.Element {
                 setContextTarget({ projectId: id, position: { x, y } })
               }
               onReorderProjects={(ids) => void handleReorder(ids)}
-              clis={availableClis()}
+              clis={launcherClis()}
               onLaunchCli={(projectId, sessionId, cli, mode) =>
                 void handleLaunchCli(projectId, sessionId, cli, mode)
               }

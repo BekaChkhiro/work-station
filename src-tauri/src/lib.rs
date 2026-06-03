@@ -240,6 +240,17 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::log::log_from_frontend,
+            commands::agent::agent_spawn,
+            commands::agent::agent_write,
+            commands::agent::agent_interrupt,
+            commands::agent::agent_kill,
+            commands::git::git_status,
+            commands::git::git_diff_file,
+            commands::git::git_stage,
+            commands::git::git_unstage,
+            commands::git::git_discard,
+            commands::git::git_stage_all,
+            commands::git::git_commit,
             commands::pty::pty_spawn,
             commands::pty::pty_write,
             commands::pty::pty_resize,

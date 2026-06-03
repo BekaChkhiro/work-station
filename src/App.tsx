@@ -14,6 +14,7 @@ import AddProjectModalLiveHarness from "./components/AddProjectModal/AddProjectM
 import EditProjectFlowLiveHarness from "./components/EditProjectFlow/EditProjectFlow.live.dev";
 import ProjectsEmptyStateLiveHarness from "./components/ProjectsEmptyState/ProjectsEmptyState.live.dev";
 import AsyncStatesLiveHarness from "./components/AsyncStates/AsyncStates.live.dev";
+import AgentTestHarness from "./components/AgentView/AgentTest.live.dev";
 import { AppRoot } from "./components/AppRoot";
 import { CloudConnectionBanner } from "./components/CloudConnectionBanner";
 import TokenShowcase from "./components/TokenShowcase";
@@ -50,6 +51,7 @@ type DebugMode =
   | "projectsempty"
   | "asyncstates"
   | "tokens"
+  | "agent-test"
   | null;
 
 const debugMode = (): DebugMode => {
@@ -68,7 +70,8 @@ const debugMode = (): DebugMode => {
     v === "editproject" ||
     v === "projectsempty" ||
     v === "asyncstates" ||
-    v === "tokens"
+    v === "tokens" ||
+    v === "agent-test"
     ? v
     : null;
 };
@@ -238,6 +241,9 @@ export default function App() {
           </Match>
           <Match when={debugMode() === "asyncstates"}>
             <AsyncStatesLiveHarness />
+          </Match>
+          <Match when={debugMode() === "agent-test"}>
+            <AgentTestHarness />
           </Match>
         </Switch>
       </PanelErrorBoundary>
