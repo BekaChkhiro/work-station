@@ -1,5 +1,9 @@
 // T4.13: Cross-session search modal.
 //
+// Officially deferred to v0.2 (PROJECT_PLAN.md §10). This scaffold ships
+// early to keep the session registry wiring honest, but the feature is
+// considered post-v0.1 scope — do not promote it back into v0.1 planning.
+//
 // Cmd/Ctrl+Shift+F: search across every open session's scrollback in one
 // pass, then jump to a match by scrolling the owning pane's terminal.
 //

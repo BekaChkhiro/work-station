@@ -786,13 +786,14 @@ Each task: status, complexity (S/M/L/XL — work hours roughly 2/8/24/40+), depe
 
 #### T4.13: Cross-session search (defer to v0.2)
 
-- [ ] **Status**: STRETCH
+- [ ] **Status**: DEFERRED (v0.2)
 - **Complexity**: L
 - **Dependencies**: T2.9, T4.10
 - **Description**:
   - Cmd/Ctrl+Shift+F: search across all open scrollback buffers in current project.
   - Useful for "where did I see that error?"
-- **Acceptance**: Defer unless v0.1 timeline allows.
+  - A modal scaffold (`CrossSessionSearch`) may land early to keep the session registry wiring honest, but the feature is officially v0.2 scope — see §10.
+- **Acceptance**: Tracked under §10 (post-v0.1 stretch). Do not gate v0.1 cutover on this.
 
 #### T4.14: Configurable shell init
 
